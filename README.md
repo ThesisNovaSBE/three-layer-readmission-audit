@@ -2,13 +2,40 @@
 
 > **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md` and the latest file in `sessions/` before starting work.**
 
-A two-stage "Triage-and-Verify" pipeline for predicting unplanned hospital readmissions, built as a Master's thesis at Nova SBE.
+A three-stage "Triage-and-Verify" pipeline for predicting unplanned 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics).
 
-**Stage 1 — Triage (Classical ML):** A high-recall classifier (Logistic Regression / XGBoost / HistGradientBoosting) flags at-risk patients from structured MIMIC-IV data.
+**Stage 1 — Triage (XGBoost):** A high-recall classifier trained on 521,191 MIMIC-IV structured admissions flags at-risk patients (AUROC=0.706, recall=0.848).
 
-**Stage 2 — Verify (Clinical Encoder):** A fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`) reads the discharge notes of flagged patients and prunes false positives.
+**Stage 2 — Verify (Clinical-Longformer):** A fine-tuned `yikuan8/Clinical-Longformer` reads discharge notes of flagged patients and prunes false positives (+21% precision, retains 70.9% of true positives in the notes cohort).
 
-**Stage 3 — Explain (Optional):** A local generative model (Ollama) writes plain-language explanations for confirmed cases.
+**Stage 3 — Explain (phi4-mini):** A local generative model (Ollama) writes plain-language readmission risk explanations for confirmed patients, delivered to the responsible clinician.
+
+**Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
+
+---
+
+## Results
+
+### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test)
+
+| Metric | Value |
+|--------|-------|
+| AUROC | 0.706 |
+| AUPRC | 0.406 |
+| Recall @ thr=0.354 | 0.848 |
+| Precision @ thr=0.354 | 0.256 |
+| F2 | 0.580 |
+
+### Stage 1+2 — Combined (notes cohort, thr₂=0.3)
+
+Evaluated on the 43,776 Stage 1–flagged patients who have discharge notes (the deployable population — in real clinical use every discharged patient has a note).
+
+| Metric | Stage 1 baseline | Stage 1+2 |
+|--------|-----------------|-----------|
+| Precision | 0.256 | **0.309** (+21%) |
+| Recall (notes cohort) | 1.000 | 0.709 |
+| F2 | 0.632 | 0.563 |
+| Confirmed flags | 43,776 | 25,699 |
 
 ---
 
@@ -17,67 +44,104 @@ A two-stage "Triage-and-Verify" pipeline for predicting unplanned hospital readm
 No MIMIC access? The pipeline runs on synthetic data out of the box.
 
 ```bash
-# 1. Clone and set up
 git clone <repo-url> && cd 20260401_Thesis
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Run the demo (generates synthetic data + trains Stage 1)
+# Generate synthetic data + train Stage 1
 python setup_demo.py
 ```
 
-The synthetic generator (`src/data/synthetic.py`) creates fake patient records that match the real MIMIC-IV column schema, so all downstream code works identically.
+The synthetic generator creates fake patient records that match the MIMIC-IV column schema so all downstream code runs identically.
+
+---
 
 ## Full Pipeline — With MIMIC Access
 
-If you have credentialed access to MIMIC-IV on PhysioNet:
-
 ```bash
-# 1. Copy and fill in your local data paths
-cp .env.example .env
-# Edit .env to point MIMIC_IV_DIR and MIMIC_IV_NOTE_DIR to your local extracts
+# 1. Configure data paths
+cp .env.example .env   # edit MIMIC_IV_DIR and MIMIC_IV_NOTE_DIR
 
 # 2. Install dependencies
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Run the pipeline
-python -m src.data.cohort       # Extract cohort
-python -m src.data.features     # Engineer features
-python -m src.model.train       # Train Stage 1 models
+# 3. Stage 1: train XGBoost
+python -m src.model.train
+
+# 4. Stage 2: fine-tune Clinical-Longformer on discharge notes (~24h on CPU)
+python setup_stage2.py --mode full
+
+# 5. Stage 3: generate explanations for confirmed patients
+#    Requires Ollama running + phi4-mini pulled: ollama pull phi4-mini
+python setup_stage3.py --limit 50   # --limit for demo; remove for full run
 ```
+
+---
+
+## Frontend (Demo / Thesis Presentation)
+
+```bash
+cd frontend
+npm install
+npm run dev   # opens at http://localhost:5173
+```
+
+The dashboard has two views:
+- **Pipeline** — visual Stage 1 → 2 → 3 diagram with real metrics and how-it-works explanation (for professor / committee presentations)
+- **Patients** — sortable table of confirmed high-risk patients with Stage 1/2 scores; click any row for the Stage 3 clinical explanation
+
+---
+
+## Utility Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `setup_demo.py` | Synthetic data demo — no MIMIC needed |
+| `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
+| `setup_stage3.py --limit N` | Generate Stage 3 explanations (N = sample size) |
+| `sweep_stage2_threshold.py` | Sweep thresholds using saved scores — instant, no re-inference |
+| `update_stage2_threshold.py --threshold 0.3` | Update `stage2_confirmed` in results CSV |
+
+---
 
 ## Data Policy
 
-> **The real MIMIC-IV data must NEVER be committed to this repository.**
+> **MIMIC-IV data must NEVER be committed to this repository.**
 >
-> MIMIC-IV is a credentialed dataset governed by a PhysioNet Data Use Agreement.
-> It stays only on the local machines of team members who have signed the DUA.
-> The `data/` directory is gitignored. Do not override this.
+> MIMIC-IV is governed by a PhysioNet Data Use Agreement.
+> The `data/` directory and all `.csv`/`.joblib`/model weight files are gitignored.
+
+---
 
 ## Project Structure
 
 ```
-├── PROJECT_TLDR.md          # Project context (read this first)
-├── MODEL_CARD.md            # Model documentation
-├── config.yaml              # All configurable parameters
-├── .env.example             # Template for local data paths
-├── requirements.txt         # Python dependencies
-├── setup_demo.py            # One-command demo with synthetic data
+├── PROJECT_TLDR.md              # Project context (read first)
+├── MODEL_CARD.md                # Full model documentation + metrics
+├── config.yaml                  # All configurable parameters
+├── setup_demo.py                # One-command demo (synthetic data)
+├── setup_stage2.py              # Stage 2 fine-tuning runner
+├── setup_stage3.py              # Stage 3 explanation runner
+├── sweep_stage2_threshold.py    # Threshold sweep utility
+├── update_stage2_threshold.py   # Update confirmed flags in CSV
+├── frontend/                    # React + TS + Vite dashboard
+│   └── src/
+│       ├── components/          # PipelineDiagram, PatientTable, PatientModal
+│       └── data/mockPatients.ts # Synthetic demo patients
 ├── src/
-│   ├── config.py            # Config + env loader
-│   ├── schemas.py           # Column schemas / contracts
+│   ├── config.py                # Config + env loader
+│   ├── schemas.py               # Column contracts
 │   ├── data/
-│   │   ├── cohort.py        # Cohort extraction from MIMIC-IV
-│   │   ├── features.py      # Feature engineering
-│   │   └── synthetic.py     # Synthetic data generator
-│   └── model/
-│       ├── train.py          # Model training
-│       ├── evaluate.py       # Evaluation metrics
-│       └── predict.py        # Inference
-├── sessions/                # Work session logs (read latest for context)
-├── notebooks/               # Exploratory analysis
-├── tests/                   # Unit & integration tests
-├── data/                    # LOCAL ONLY — gitignored
-└── models/                  # Trained artifacts — gitignored
+│   │   ├── cohort.py            # MIMIC-IV cohort extraction
+│   │   ├── features.py          # Feature engineering
+│   │   └── synthetic.py        # Synthetic data generator
+│   ├── model/                   # Stage 1: train, tune, evaluate, predict
+│   ├── stage2/                  # Stage 2: dataset, train, predict
+│   └── stage3/                  # Stage 3: explain, run
+├── sessions/                    # Work session logs (read latest for context)
+├── tests/                       # Unit & integration tests
+├── docs/                        # Modeling plan and documentation
+├── data/                        # LOCAL ONLY — gitignored
+└── models/                      # Trained artifacts — gitignored
 ```
