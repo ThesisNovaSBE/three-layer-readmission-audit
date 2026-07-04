@@ -66,17 +66,37 @@ stage1:
   n_estimators_cap: 2000                   # XGBoost upper bound used with early stopping
 
 # ── Stage 2: Clinical encoder ──
+# Model: Clinical-Longformer (Li et al. 2022, arXiv:2201.11838)
+# Chosen over Bio_ClinicalBERT (512-token limit) and Clinical-BigBird:
+#   - 4096-token context window handles full discharge notes (avg 1435 words in MIMIC-III)
+#   - Outperforms ClinicalBERT on all 10 benchmarks incl. MIMIC-AKI binary classification
+#   - Authors explicitly recommend it over Clinical-BigBird for limited-resource settings
+#   - Trained on MIMIC-III clinical notes — same domain as this project
 stage2:
-  model_name: "emilyalsentzer/Bio_ClinicalBERT"
-  max_seq_length: 512
-  batch_size: 16
-  epochs: 3
+  model_name: "yikuan8/Clinical-Longformer"
+  max_seq_length: 512           # token budget per note (Longformer supports up to 4096)
+                                # 512 is the practical limit on CPU; bump to 1024+ if using GPU
+  max_train_notes: 15000        # cap training notes (stratified by label)
+                                # full 251k notes × periodic eval = weeks on CPU; 15k ≈ 9 hours train
+  max_eval_notes: 3000          # cap eval set used for checkpoint selection during training
+                                # 62k test notes × 5 epochs = days of eval alone; 3k ≈ 30 min/epoch
+  batch_size: 2                 # small batch + gradient accumulation for Apple Silicon memory
+  gradient_accumulation_steps: 8
+  epochs: 5
   learning_rate: 2.0e-5
+  threshold: 0.5                # Stage 2 confirmation threshold (tune after training)
 
 # ── Stage 3: Explanation (optional) ──
+# Model: phi4-mini via Ollama
+# Chosen over Meditron-7B (base model, not instruction-tuned) and gemma3:
+#   - phi4-mini is instruction-tuned — reliably follows prompts
+#   - Strong reasoning quality for its size (~3.8B), fast on Apple Silicon
+#   - Stage 3 is a structured explanation task; instruction-following matters
+#     more than medical domain pre-training here
+# To enable: set enabled: true and run `ollama pull phi4-mini`
 stage3:
   enabled: false
-  ollama_model: "gemma3"
+  ollama_model: "phi4-mini"
   temperature: 0.3
 
 # ── Output ──

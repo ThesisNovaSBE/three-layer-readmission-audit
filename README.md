@@ -6,7 +6,7 @@ A two-stage "Triage-and-Verify" pipeline for predicting unplanned hospital readm
 
 **Stage 1 — Triage (Classical ML):** A high-recall classifier (Logistic Regression / XGBoost / HistGradientBoosting) flags at-risk patients from structured MIMIC-IV data.
 
-**Stage 2 — Verify (Clinical Encoder):** A fine-tuned Bio_ClinicalBERT reads the clinical notes of flagged patients and prunes false positives.
+**Stage 2 — Verify (Clinical Encoder):** A fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`) reads the discharge notes of flagged patients and prunes false positives.
 
 **Stage 3 — Explain (Optional):** A local generative model (Ollama) writes plain-language explanations for confirmed cases.
 

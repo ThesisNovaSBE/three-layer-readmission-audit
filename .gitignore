@@ -1,7 +1,8 @@
 # ── Data (MIMIC-IV must NEVER be committed) ──
-data/
-!data/.gitkeep
-!data/README.md
+# Leading slash anchors to repo root — does NOT affect src/data/
+/data/
+!/data/.gitkeep
+!/data/README.md
 *.csv
 *.csv.gz
 *.parquet
@@ -10,11 +11,19 @@ data/
 *.hdf5
 
 # ── Model artifacts ──
-models/*.pkl
-models/*.joblib
-models/*.pt
-models/*.bin
+# Exclude large binaries at any depth under models/
+models/**/*.pkl
+models/**/*.joblib
+models/**/*.pt
+models/**/*.bin
+models/**/*.safetensors
+*.safetensors
 *.onnx
+# Intermediate training checkpoints (keep only the best model metadata)
+models/stage2_checkpoints/
+# Best model weights (too large for git; store separately or use HuggingFace Hub)
+models/stage2_longformer_best/model.safetensors
+models/stage2_longformer_best/training_args.bin
 
 # ── Environment / secrets ──
 .env

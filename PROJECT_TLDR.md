@@ -24,18 +24,21 @@ Predict unplanned hospital readmission as accurately as possible using a two-sta
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC); see `docs/MODELING_PLAN.md`
 - Plan & approach: **`docs/MODELING_PLAN.md`**
 
-### Stage 2 — Clinical Encoder (Notes)
+### Stage 2 — Clinical Encoder (Notes) — IMPLEMENTED
 
-- Model: Fine-tuned Bio_ClinicalBERT
-- Input: Clinical notes (MIMIC-IV-Note) for patients flagged in Stage 1
+- Model: Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`, Li et al. 2023)
+- Input: Discharge notes (MIMIC-IV-Note) for patients flagged in Stage 1
 - Objective: Confirm or reject each flag, reducing false positives
-- Runs locally, small and fast
+- Requires real MIMIC-IV-Note; cannot run on synthetic data
+- See `src/stage2/` for implementation
 
-### Stage 3 — Explanation (Optional, Later)
+### Stage 3 — Explanation (Optional) — IMPLEMENTED
 
-- Model: Local quantized generative model via Ollama (Gemma 3 or Mistral)
+- Model: `phi4-mini` via Ollama
 - Input: Confirmed high-risk cases from Stage 2
 - Objective: Plain-language explanation of why a patient is flagged
+- Run: `ollama pull phi4-mini` then `python setup_stage3.py`
+- See `src/stage3/` for implementation
 
 ## Data
 
