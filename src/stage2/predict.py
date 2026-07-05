@@ -4,17 +4,21 @@ Loads the Stage 1 artifact to identify flagged admissions (score >= threshold),
 then runs the fine-tuned Clinical-Longformer on their discharge notes to
 confirm or reject each flag.
 
+If models/stage2_calibration.json exists, applies Platt-scaled per-age-group
+thresholds.  Falls back to the global threshold from config.yaml if not found.
+
 Outputs a CSV to models/stage2_results.csv with columns:
     hadm_id, subject_id, readmission_30d, stage1_score, stage2_score, stage2_confirmed
 
 Usage:
     python -m src.stage2.predict
-    python -m src.stage2.predict --threshold 0.4
+    python -m src.stage2.predict --threshold 0.4   # override global fallback threshold
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 
 import joblib
 import numpy as np
@@ -28,6 +32,18 @@ from src.config import load_config, get_model_dir
 from src.data.features import load_feature_matrix, split_xy
 from src.stage2.dataset import load_notes, build_notes_dataframe, ClinicalNotesDataset
 from src.schemas import TARGET_COL
+
+
+_BAND_MAP = {
+    "(17, 40]":  "18-40",
+    "(40, 55]":  "41-55",
+    "(55, 70]":  "56-70",
+    "(70, 120]": "70+",
+}
+
+
+def _band_key(age_band) -> str:
+    return _BAND_MAP.get(str(age_band), str(age_band))
 
 
 def predict_stage2(
@@ -57,9 +73,18 @@ def predict_stage2(
             "Run `python -m src.stage2.train` first."
         )
 
-    if stage2_threshold is None:
-        stage2_threshold = cfg["stage2"].get("threshold", 0.5)
+    global_threshold = stage2_threshold if stage2_threshold is not None \
+                       else cfg["stage2"].get("threshold", 0.5)
     batch_size = cfg["stage2"]["batch_size"] * 2
+
+    # Load per-group calibration if available
+    cal_json_path = model_dir / "stage2_calibration.json"
+    calibration: dict | None = None
+    if cal_json_path.exists():
+        calibration = json.loads(cal_json_path.read_text())
+        print(f"[stage2/predict] Loaded calibration from {cal_json_path}")
+    else:
+        print(f"[stage2/predict] No calibration found — using global threshold={global_threshold:.3f}")
 
     # ── Load Stage 1 predictions on the test set ──
     stage1_name = cfg["stage1"]["model"]
@@ -77,9 +102,10 @@ def predict_stage2(
     stage1_scores = artifact["estimator"].predict_proba(Xte)[:, 1]
     stage1_threshold = artifact["threshold"]
 
-    test_meta = matrix.iloc[test_idx][["hadm_id", "subject_id", TARGET_COL]].reset_index(drop=True)
+    test_meta = matrix.iloc[test_idx][["hadm_id", "subject_id", "age_band", TARGET_COL]].reset_index(drop=True)
     test_meta["stage1_score"] = stage1_scores
     test_meta["stage1_threshold"] = stage1_threshold
+    test_meta["age_band_key"] = test_meta["age_band"].apply(_band_key)
 
     flagged = test_meta[test_meta["stage1_score"] >= stage1_threshold].reset_index(drop=True)
     print(f"[stage2/predict] Stage 1 flagged {len(flagged):,} / {len(test_meta):,} test admissions "
@@ -123,21 +149,45 @@ def predict_stage2(
 
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = all_probs
-    notes_df["stage2_confirmed"] = (notes_df["stage2_score"] >= stage2_threshold).astype(int)
 
-    # Merge back Stage 1 scores
-    out = notes_df.merge(
-        flagged[["hadm_id", "stage1_score", "stage1_threshold"]],
+    # Merge age_band_key for per-group thresholding
+    notes_df = notes_df.merge(
+        flagged[["hadm_id", "stage1_score", "stage1_threshold", "age_band_key"]],
         on="hadm_id", how="left",
     )
 
+    if calibration is not None:
+        # Apply Platt scaling + per-group threshold
+        cal_calibrators = calibration["calibrators"]
+        cal_thresholds  = calibration["thresholds"]
+
+        cal_probs = np.empty(len(notes_df))
+        for i, (logit, band) in enumerate(zip(
+            np.log(np.clip(notes_df["stage2_score"].values, 1e-7, 1 - 1e-7) /
+                   np.clip(1 - notes_df["stage2_score"].values, 1e-7, 1 - 1e-7)),
+            notes_df["age_band_key"].values,
+        )):
+            coef, intercept = cal_calibrators.get(band, [1.0, 0.0])
+            cal_logit = coef * logit + intercept
+            cal_probs[i] = 1.0 / (1.0 + np.exp(-cal_logit))
+
+        notes_df["stage2_score"] = cal_probs
+        band_thr = notes_df["age_band_key"].map(cal_thresholds).fillna(global_threshold)
+        notes_df["stage2_confirmed"] = (notes_df["stage2_score"] >= band_thr).astype(int)
+        print(f"[stage2/predict] Per-group thresholds: {cal_thresholds}")
+    else:
+        notes_df["stage2_confirmed"] = (notes_df["stage2_score"] >= global_threshold).astype(int)
+
+    out = notes_df
+
     confirmed = int(out["stage2_confirmed"].sum())
+    thr_display = "per-group" if calibration is not None else f"{global_threshold:.3f}"
     print(f"[stage2/predict] Stage 2 confirmed: {confirmed:,} / {len(out):,} "
-          f"({confirmed / max(len(out), 1):.1%} retained | threshold={stage2_threshold:.3f})")
+          f"({confirmed / max(len(out), 1):.1%} retained | threshold={thr_display})")
 
     result_cols = ["hadm_id", "subject_id", TARGET_COL,
                    "stage1_score", "stage1_threshold", "stage2_score", "stage2_confirmed"]
-    out = out[result_cols]
+    out = out[[c for c in result_cols if c in out.columns]]
 
     out_path = model_dir / "stage2_results.csv"
     out.to_csv(out_path, index=False)

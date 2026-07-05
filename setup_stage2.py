@@ -55,8 +55,11 @@ from transformers import (  # noqa: E402
     TrainingArguments,
     EarlyStoppingCallback,
 )
-from src.stage2.train import train_stage2      # noqa: E402
-from src.stage2.predict import predict_stage2  # noqa: E402
+from src.stage2.splits import build_splits       # noqa: E402
+from src.stage2.train import train_stage2       # noqa: E402
+from src.stage2.predict import predict_stage2   # noqa: E402
+from src.stage2.calibrate import calibrate      # noqa: E402
+from src.stage2.evaluate import evaluate        # noqa: E402
 
 
 
@@ -103,21 +106,35 @@ def main():
 
     check_prerequisites(cfg)
 
+    # ── Step 0: Patient-level splits ──
+    print("\n[0/4] Building patient-level train / val / calibration splits ...")
+    build_splits(cfg, artifact=_preloaded_artifact)
+
     # ── Step 1: Fine-tune ──
-    print("\n[1/2] Fine-tuning Clinical-Longformer on discharge notes...")
+    print("\n[1/4] Fine-tuning Clinical-Longformer on discharge notes...")
     print("      (model downloads automatically from HuggingFace on first run)\n")
     # Pass the pre-loaded artifact so train_stage2 does NOT call joblib.load()
     # after torch is in memory (which segfaults on macOS).
     train_stage2(cfg, artifact=_preloaded_artifact)
 
-    # ── Step 2: Predict ──
-    print("\n[2/2] Scoring Stage 1 flagged patients with fine-tuned model...\n")
+    # ── Step 2: Calibrate ──
+    print("\n[2/4] Running Platt scaling + per-group threshold selection...\n")
+    calibrate(cfg, artifact=_preloaded_artifact)
+
+    # ── Step 3: Predict ──
+    print("\n[3/4] Scoring Stage 1 flagged patients with fine-tuned model...\n")
     results = predict_stage2(cfg, artifact=_preloaded_artifact)
+
+    # ── Step 4: Evaluate ──
+    print("\n[4/4] Computing per-age-group evaluation metrics...\n")
+    eval_results = evaluate(cfg, artifact=_preloaded_artifact)
 
     # ── Summary ──
     total = len(results)
     confirmed = int(results["stage2_confirmed"].sum())
     pruned = total - confirmed
+    overall = eval_results.get("overall", {})
+    gaps    = eval_results.get("fairness_gaps", {})
 
     print("\n" + "=" * 64)
     print("  Stage 2 complete")
@@ -125,10 +142,16 @@ def main():
     print(f"  Stage 1 flagged:      {total:,}")
     print(f"  Stage 2 confirmed:    {confirmed:,}  ({confirmed / max(total, 1):.1%} retained)")
     print(f"  Stage 2 pruned:       {pruned:,}  ({pruned / max(total, 1):.1%} removed)")
-    if "readmission_30d" in results.columns:
-        true_pos = int(((results["stage2_confirmed"] == 1) & (results["readmission_30d"] == 1)).sum())
-        print(f"  True positives confirmed: {true_pos:,}")
+    if overall:
+        print(f"  Overall AUROC:        {overall.get('auroc', float('nan')):.3f}")
+        print(f"  Overall Recall:       {overall.get('recall', float('nan')):.3f}")
+        print(f"  Overall Precision:    {overall.get('precision', float('nan')):.3f}")
+        print(f"  ECE:                  {overall.get('ece', float('nan')):.4f}")
+    if gaps:
+        print(f"  Recall gap (age):     {gaps.get('recall_gap', float('nan')):.3f}")
+        print(f"  Precision gap (age):  {gaps.get('precision_gap', float('nan')):.3f}")
     print(f"  Results saved to:     models/stage2_results.csv")
+    print(f"  Evaluation saved to:  models/stage2_evaluation.json")
     print()
     print("  Next: python setup_stage3.py  (requires Ollama + phi4-mini)")
     print("=" * 64)

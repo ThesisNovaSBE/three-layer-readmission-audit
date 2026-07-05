@@ -133,11 +133,13 @@ class ClinicalNotesDataset(Dataset):
         labels: list[int],
         tokenizer: PreTrainedTokenizerBase,
         max_length: int = 1024,
+        group_weights: list[float] | None = None,
     ):
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.group_weights = group_weights  # per-sample age-group loss multiplier
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -152,4 +154,7 @@ class ClinicalNotesDataset(Dataset):
         )
         item = {k: v.squeeze(0) for k, v in encoding.items()}
         item["labels"] = self.labels[idx]
+        if self.group_weights is not None:
+            import torch
+            item["group_weight"] = torch.tensor(self.group_weights[idx], dtype=torch.float32)
         return item
