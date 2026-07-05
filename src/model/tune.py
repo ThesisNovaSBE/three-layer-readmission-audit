@@ -5,7 +5,8 @@
 - MedianPruner stops unpromising trials early.
 - Writes best params to models/<model>_best_params.json for train.py to pick up.
 
-Usage:
+Usage::
+
     python -m src.model.tune                  # uses config.yaml run.mode
     python -m src.model.tune --mode full
     python -m src.model.tune --model histgradientboosting
@@ -17,42 +18,64 @@ import argparse
 import json
 
 import numpy as np
-import optuna
+
+try:
+    import optuna
+except ImportError as _opt_err:
+    raise ImportError(
+        "Optuna is required for hyperparameter tuning. "
+        "Install with: pip install optuna"
+    ) from _opt_err
 
 from src.config import load_config, get_model_dir
+from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
 from src.model.cv import fit_predict_fold
+from src.model.metrics import auprc
 from src.model.models import suggest_params
 from src.model.splits import grouped_train_test_split, make_cv
-from src.model.metrics import auprc
 
 
-def run_study(cfg: dict) -> dict:
-    mode = cfg["run"]["mode"]
-    seed = cfg["run"]["random_state"]
-    name = cfg["stage1"]["model"]
-    n_splits = cfg["run"][mode]["cv_folds"]
-    n_trials = cfg["run"][mode]["optuna_trials"]
+def run_study(cfg: AppConfig) -> dict:
+    """Run an Optuna hyperparameter study and save the best parameters.
+
+    Args:
+        cfg: validated project config.
+
+    Returns:
+        Dict of best hyperparameter values.
+    """
+    mode = cfg.run.mode
+    seed = cfg.run.random_state
+    name = cfg.stage1.model
+    n_splits = cfg.run.active().cv_folds
+    n_trials = cfg.run.active().optuna_trials
 
     matrix = load_feature_matrix(cfg, mode)
-    X, y, groups, _subgroups, feat_cols = split_xy(matrix)
+    features, y, groups, _subgroups, _feat_cols = split_xy(matrix)
 
     train_idx, _test_idx = grouped_train_test_split(
-        y, groups, test_size=cfg["stage1"]["test_size"], seed=seed)
-    Xtr = X.iloc[train_idx].reset_index(drop=True)
-    ytr, gtr = y[train_idx], groups[train_idx]
+        y, groups, test_size=cfg.stage1.test_size, seed=seed)
+    x_train = features.iloc[train_idx].reset_index(drop=True)
+    y_train, g_train = y[train_idx], groups[train_idx]
 
-    print(f"[tune] mode={mode} model={name} trials={n_trials} cv_folds={n_splits} "
-          f"train_rows={len(ytr):,}")
+    print(
+        f"[tune] mode={mode} model={name} trials={n_trials} "
+        f"cv_folds={n_splits} train_rows={len(y_train):,}"
+    )
 
     def objective(trial: optuna.Trial) -> float:
+        """Optimisation target: mean CV AUPRC."""
         params = suggest_params(name, trial)
-        cv = make_cv(n_splits, seed)
+        cross_val = make_cv(n_splits, seed)
         fold_scores = []
-        for i, (tr, va) in enumerate(cv.split(Xtr, ytr, gtr)):
-            proba = fit_predict_fold(name, Xtr, ytr, gtr, tr, va, params, cfg, seed)
-            fold_scores.append(auprc(ytr[va], proba))
-            trial.report(float(np.mean(fold_scores)), step=i)
+        for fold_i, (tr, va) in enumerate(cross_val.split(x_train, y_train, g_train)):
+            proba = fit_predict_fold(
+                name, x_train, y_train, g_train, tr, va,
+                params=params, cfg=cfg, seed=seed,
+            )
+            fold_scores.append(auprc(y_train[va], proba))
+            trial.report(float(np.mean(fold_scores)), step=fold_i)
             if trial.should_prune():
                 raise optuna.TrialPruned()
         return float(np.mean(fold_scores))
@@ -73,16 +96,24 @@ def run_study(cfg: dict) -> dict:
     return study.best_params
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI entry point for hyperparameter tuning."""
     parser = argparse.ArgumentParser(description="Optuna search for Stage 1 model")
     parser.add_argument("--mode", choices=["quick", "full"], default=None)
-    parser.add_argument("--model", choices=["logistic_regression", "xgboost",
-                                            "histgradientboosting"], default=None)
+    parser.add_argument(
+        "--model",
+        choices=["logistic_regression", "xgboost", "histgradientboosting"],
+        default=None,
+    )
     args = parser.parse_args()
 
-    cfg = load_config()
+    _cfg = load_config()
     if args.mode:
-        cfg["run"]["mode"] = args.mode
+        _cfg.run.mode = args.mode
     if args.model:
-        cfg["stage1"]["model"] = args.model
-    run_study(cfg)
+        _cfg.stage1.model = args.model
+    run_study(_cfg)
+
+
+if __name__ == "__main__":
+    main()

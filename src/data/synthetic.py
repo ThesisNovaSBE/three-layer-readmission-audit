@@ -23,7 +23,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config import load_config, get_data_dir
+from src.config import get_data_dir, load_config
+from src.config_schema import AppConfig
 from src.data.comorbidity import CHARLSON_ICD10, charlson_per_admission
 
 
@@ -62,6 +63,7 @@ _FILLER_ICD10 = ["Z00", "R10", "R51", "M545", "K219", "F329", "R079"]
 
 
 def generate_patients(n: int, rng: np.random.Generator) -> pd.DataFrame:
+    """Return a patients DataFrame with n synthetic subjects."""
     return pd.DataFrame({
         "subject_id": np.arange(100_000, 100_000 + n),
         "gender": rng.choice(["M", "F"], size=n, p=[0.52, 0.48]),
@@ -70,6 +72,7 @@ def generate_patients(n: int, rng: np.random.Generator) -> pd.DataFrame:
 
 
 def generate_admissions(patients: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    """Return an admissions DataFrame with random encounter data per patient."""
     rows = []
     hadm_id = 200_000
     for _, pat in patients.iterrows():
@@ -248,14 +251,20 @@ def generate_synthetic_dataset(
     return tables
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate synthetic MIMIC-IV-like data")
-    parser.add_argument("--n", type=int, default=None, help="Number of patients")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed")
-    args = parser.parse_args()
+def _main(cfg: AppConfig, n_patients: int | None, seed: int | None) -> None:
+    """Generate and persist synthetic data tables."""
+    n_out = n_patients or cfg.data.synthetic_n_patients
+    seed_out = seed or cfg.data.synthetic_seed
+    generate_synthetic_dataset(
+        n_patients=n_out,
+        seed=seed_out,
+        output_dir=get_data_dir() / "synthetic",
+    )
 
-    cfg = load_config()
-    n = args.n or cfg["data"]["synthetic_n_patients"]
-    seed = args.seed or cfg["data"]["synthetic_seed"]
-    generate_synthetic_dataset(n_patients=n, seed=seed,
-                               output_dir=get_data_dir() / "synthetic")
+
+if __name__ == "__main__":
+    _parser = argparse.ArgumentParser(description="Generate synthetic MIMIC-IV-like data")
+    _parser.add_argument("--n", type=int, default=None, help="Number of patients")
+    _parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    _args = _parser.parse_args()
+    _main(load_config(), _args.n, _args.seed)

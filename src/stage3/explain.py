@@ -4,23 +4,32 @@ Uses a local generative model (default: phi4-mini) to write 3-5 sentence
 plain-language summaries of why a patient was confirmed high-risk.
 
 Prerequisites:
-  - Ollama installed and running: https://ollama.com
-  - Model pulled: `ollama pull phi4-mini`
-  - stage3.enabled: true in config.yaml
 
-Usage:
+- Ollama installed and running: https://ollama.com
+- Model pulled: ``ollama pull phi4-mini``
+- ``stage3.enabled: true`` in ``config.yaml``
+
+Usage::
+
     python -m src.stage3.run
     python -m src.stage3.run --input models/stage2_results.csv
 """
 
 from __future__ import annotations
 
+import math
 import textwrap
 from typing import Any
 
-import ollama
+try:
+    import ollama
+except ImportError as _ollama_err:
+    raise ImportError(
+        "Ollama is required for Stage 3. "
+        "Install with: pip install ollama  and  ollama pull phi4-mini"
+    ) from _ollama_err
 
-from src.config import load_config
+from src.config_schema import AppConfig
 
 
 _SYSTEM_PROMPT = textwrap.dedent("""
@@ -68,7 +77,6 @@ def _fmt(val: Any, decimals: int = 1) -> str:
     if val is None:
         return "not available"
     try:
-        import math
         if math.isnan(float(val)):
             return "not available"
     except (TypeError, ValueError):
@@ -79,15 +87,25 @@ def _fmt(val: Any, decimals: int = 1) -> str:
 
 
 def build_prompt(patient: dict) -> str:
-    """Construct the user prompt from a patient feature dict."""
+    """Construct the user prompt from a patient feature dict.
+
+    Args:
+        patient: dict containing patient features and stage scores.
+
+    Returns:
+        Formatted prompt string ready to send to the LLM.
+    """
     return _USER_TEMPLATE.format(
         age=_fmt(patient.get("age"), 0),
         gender=patient.get("gender", "unknown"),
         los_days=_fmt(patient.get("los_days")),
-        admission_type="emergency" if patient.get("admission_type_emergency") else "non-emergency",
+        admission_type=(
+            "emergency" if patient.get("admission_type_emergency") else "non-emergency"
+        ),
         came_via_ed="yes" if patient.get("came_via_ed") else "no",
-        discharge_location="facility (SNF/rehab)" if patient.get("discharged_to_facility")
-                           else "home",
+        discharge_location=(
+            "facility (SNF/rehab)" if patient.get("discharged_to_facility") else "home"
+        ),
         n_prior_admissions=int(patient.get("n_prior_admissions", 0)),
         days_since_last_discharge=_fmt(patient.get("days_since_last_discharge"), 0),
         charlson_index=_fmt(patient.get("charlson_index"), 0),
@@ -100,24 +118,24 @@ def build_prompt(patient: dict) -> str:
     )
 
 
-def generate_explanation(patient: dict, cfg: dict) -> str:
+def generate_explanation(patient: dict, cfg: AppConfig) -> str:
     """Call Ollama to generate a plain-language readmission risk explanation.
 
     Args:
         patient: dict containing patient features and stage scores.
-        cfg: loaded config dict.
+        cfg:     validated project config.
 
     Returns:
-        Explanation string. Empty string if stage3.enabled is False.
+        Explanation string. Empty string if ``stage3.enabled`` is ``False``.
 
     Raises:
         ollama.ResponseError: if Ollama is not running or model not pulled.
     """
-    if not cfg["stage3"]["enabled"]:
+    if not cfg.stage3.enabled:
         return ""
 
-    model = cfg["stage3"]["ollama_model"]
-    temperature = cfg["stage3"]["temperature"]
+    model = cfg.stage3.ollama_model
+    temperature = cfg.stage3.temperature
 
     response = ollama.chat(
         model=model,
@@ -132,26 +150,37 @@ def generate_explanation(patient: dict, cfg: dict) -> str:
 
 def generate_explanations_batch(
     patients: list[dict],
-    cfg: dict,
+    cfg: AppConfig,
     verbose: bool = True,
 ) -> list[dict]:
     """Generate explanations for a list of confirmed high-risk patients.
 
-    Returns the input list with an added 'explanation' key per patient dict.
-    Failures per patient are caught individually so one bad call doesn't abort the batch.
+    Returns the input list with an added ``'explanation'`` key per patient
+    dict. Failures per patient are caught individually so one bad call does
+    not abort the batch.
+
+    Args:
+        patients: list of patient feature dicts.
+        cfg:      validated project config.
+        verbose:  if ``True``, print a preview of each explanation.
+
+    Returns:
+        List of dicts with an added ``'explanation'`` key.
     """
-    if not cfg["stage3"]["enabled"]:
+    if not cfg.stage3.enabled:
         print("[stage3] Disabled in config (stage3.enabled: false). Skipping.")
         return [{**p, "explanation": ""} for p in patients]
 
-    model = cfg["stage3"]["ollama_model"]
+    model = cfg.stage3.ollama_model
     print(f"[stage3] Generating explanations with '{model}' for {len(patients):,} patients...")
 
     results = []
     for i, patient in enumerate(patients):
         try:
             explanation = generate_explanation(patient, cfg)
-        except Exception as exc:
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Catch all exceptions so a single failed API call does not abort
+            # the entire batch; the error is surfaced in the explanation field.
             explanation = f"[generation failed: {exc}]"
 
         results.append({**patient, "explanation": explanation})

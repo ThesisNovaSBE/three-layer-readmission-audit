@@ -1,48 +1,70 @@
-"""Model factory + Optuna search spaces for the three Stage 1 algorithms.
+"""Model factory and Optuna search spaces for the three Stage 1 algorithms.
 
-Algorithms (selected via config `stage1.model`):
-- logistic_regression : L2 + class_weight="balanced", interpretable baseline
-                        (imputation + scaling done inside a Pipeline -> per-fold, no leakage)
-- xgboost             : hist tree method (CPU), eval_metric="aucpr",
-                        scale_pos_weight = neg/pos, n_estimators via early stopping
-- histgradientboosting: fast sklearn GBT, native NaN handling, class_weight="balanced"
+Algorithms (selected via config ``stage1.model``):
+
+- ``logistic_regression``: L2 + class_weight="balanced", interpretable baseline
+  (imputation + scaling done inside a Pipeline → per-fold, no leakage)
+- ``xgboost``: hist tree method (CPU), eval_metric="aucpr",
+  scale_pos_weight = neg/pos, n_estimators via early stopping
+- ``histgradientboosting``: fast sklearn GBT, native NaN handling,
+  class_weight="balanced"
 """
 
 from __future__ import annotations
 
 import numpy as np
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+try:
+    from xgboost import XGBClassifier
+except ImportError as _xgb_err:
+    raise ImportError(
+        "XGBoost is required for the 'xgboost' model. "
+        "Install with: pip install xgboost"
+    ) from _xgb_err
+
+from src.config_schema import AppConfig
 
 MODEL_NAMES = ["logistic_regression", "xgboost", "histgradientboosting"]
 
 
-def scale_pos_weight(y) -> float:
-    y = np.asarray(y)
-    pos = float((y == 1).sum())
-    neg = float((y == 0).sum())
+def scale_pos_weight(y: np.ndarray) -> float:
+    """Return the negative-to-positive class ratio for XGBoost weighting."""
+    y_arr = np.asarray(y)
+    pos = float((y_arr == 1).sum())
+    neg = float((y_arr == 0).sum())
     return neg / pos if pos else 1.0
 
 
 def default_params(name: str) -> dict:
-    """Sensible defaults for the quick baseline (pre-tuning)."""
+    """Return sensible defaults for the quick baseline (pre-tuning)."""
     if name == "logistic_regression":
         return {"C": 1.0}
     if name == "xgboost":
-        return {"learning_rate": 0.05, "max_depth": 5, "min_child_weight": 3,
-                "subsample": 0.8, "colsample_bytree": 0.8, "gamma": 0.0,
-                "reg_lambda": 1.0, "reg_alpha": 0.0}
+        return {
+            "learning_rate": 0.05, "max_depth": 5, "min_child_weight": 3,
+            "subsample": 0.8, "colsample_bytree": 0.8, "gamma": 0.0,
+            "reg_lambda": 1.0, "reg_alpha": 0.0,
+        }
     if name == "histgradientboosting":
-        return {"learning_rate": 0.1, "max_leaf_nodes": 31, "max_depth": None,
-                "min_samples_leaf": 50, "l2_regularization": 0.0}
+        return {
+            "learning_rate": 0.1, "max_leaf_nodes": 31, "max_depth": None,
+            "min_samples_leaf": 50, "l2_regularization": 0.0,
+        }
     raise ValueError(f"Unknown model: {name}")
 
 
-def suggest_params(name: str, trial) -> dict:
-    """Optuna search spaces (ranges from docs/MODELING_PLAN.md)."""
+def suggest_params(name: str, trial: object) -> dict:
+    """Return Optuna search-space suggestions for the given model.
+
+    Args:
+        name:  model identifier string.
+        trial: an :class:`optuna.Trial` instance.
+    """
     if name == "logistic_regression":
         return {"C": trial.suggest_float("C", 1e-2, 1e2, log=True)}
     if name == "xgboost":
@@ -62,13 +84,25 @@ def suggest_params(name: str, trial) -> dict:
             "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 15, 255),
             "max_depth": trial.suggest_categorical("max_depth", [None, 4, 6, 8, 12]),
             "min_samples_leaf": trial.suggest_int("min_samples_leaf", 10, 200, log=True),
-            "l2_regularization": trial.suggest_float("l2_regularization", 1e-3, 10.0, log=True),
+            "l2_regularization": trial.suggest_float(
+                "l2_regularization", 1e-3, 10.0, log=True
+            ),
         }
     raise ValueError(f"Unknown model: {name}")
 
 
-def build_estimator(name: str, params: dict, y_train, cfg: dict, seed: int):
-    """Construct an (unfitted) estimator for the given model name."""
+def build_estimator(
+    name: str, params: dict, y_train: np.ndarray, cfg: AppConfig, seed: int
+) -> object:
+    """Construct an unfitted estimator for the given model name.
+
+    Args:
+        name:    model identifier.
+        params:  hyperparameter dict (from tuning or defaults).
+        y_train: training labels (used to compute scale_pos_weight for XGBoost).
+        cfg:     validated project config.
+        seed:    random seed for reproducibility.
+    """
     if name == "logistic_regression":
         return Pipeline([
             ("impute", SimpleImputer(strategy="median")),
@@ -79,13 +113,16 @@ def build_estimator(name: str, params: dict, y_train, cfg: dict, seed: int):
         ])
 
     if name == "xgboost":
-        from xgboost import XGBClassifier
         return XGBClassifier(
-            n_estimators=cfg["stage1"]["n_estimators_cap"],
-            tree_method="hist", eval_metric="aucpr",
-            early_stopping_rounds=cfg["stage1"]["early_stopping_rounds"],
+            n_estimators=cfg.stage1.n_estimators_cap,
+            tree_method="hist",
+            eval_metric="aucpr",
+            early_stopping_rounds=cfg.stage1.early_stopping_rounds,
             scale_pos_weight=scale_pos_weight(y_train),
-            random_state=seed, n_jobs=-1, **params)
+            random_state=seed,
+            n_jobs=-1,
+            **params,
+        )
 
     if name == "histgradientboosting":
         return HistGradientBoostingClassifier(
@@ -95,10 +132,30 @@ def build_estimator(name: str, params: dict, y_train, cfg: dict, seed: int):
     raise ValueError(f"Unknown model: {name}")
 
 
-def fit_estimator(est, name: str, X_train, y_train, X_val=None, y_val=None):
-    """Fit, wiring up an eval_set for XGBoost early stopping when validation is given."""
-    if name == "xgboost" and X_val is not None:
-        est.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+def fit_estimator(
+    estimator: object,
+    name: str,
+    x_train: object,
+    y_train: np.ndarray,
+    *,
+    x_val: object = None,
+    y_val: np.ndarray | None = None,
+) -> object:
+    """Fit the estimator, wiring up an eval_set for XGBoost early stopping.
+
+    Args:
+        estimator: unfitted sklearn-compatible estimator.
+        name:      model identifier string.
+        x_train:   training features.
+        y_train:   training labels.
+        x_val:     validation features for XGBoost early stopping (keyword-only).
+        y_val:     validation labels for XGBoost early stopping (keyword-only).
+
+    Returns:
+        The fitted estimator.
+    """
+    if name == "xgboost" and x_val is not None:
+        estimator.fit(x_train, y_train, eval_set=[(x_val, y_val)], verbose=False)
     else:
-        est.fit(X_train, y_train)
-    return est
+        estimator.fit(x_train, y_train)
+    return estimator

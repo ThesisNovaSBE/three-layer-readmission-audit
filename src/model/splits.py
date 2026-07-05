@@ -15,8 +15,8 @@ def grouped_train_test_split(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (train_idx, test_idx) split by group, stratified on y.
 
-    Approximates `test_size` by choosing n_splits = round(1/test_size) and using
-    the first fold as the held-out test set.
+    Approximates ``test_size`` by choosing ``n_splits = round(1/test_size)`` and
+    using the first fold as the held-out test set.
     """
     n_splits = max(2, round(1.0 / test_size))
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
@@ -25,4 +25,5 @@ def grouped_train_test_split(
 
 
 def make_cv(n_splits: int = 5, seed: int = 42) -> StratifiedGroupKFold:
+    """Return a configured :class:`StratifiedGroupKFold` cross-validator."""
     return StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
