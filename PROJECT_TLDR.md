@@ -29,8 +29,10 @@ Predict unplanned hospital readmission as accurately as possible using a two-sta
 - Model: Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`, Li et al. 2023)
 - Input: Discharge notes (MIMIC-IV-Note) for patients flagged in Stage 1
 - Objective: Confirm or reject each flag, reducing false positives
+- Training: Focal loss + per-age-group loss weights; 2048-token sequences; patient-level splits (60/20/20 finetune/val/cal)
+- Calibration: Platt scaling per age group + recall-floor threshold selection (recall ≥ 0.65, maximise F2)
 - Requires real MIMIC-IV-Note; cannot run on synthetic data
-- See `src/stage2/` for implementation
+- Key modules: `src/stage2/splits.py`, `src/stage2/train.py`, `src/stage2/calibrate.py`, `src/stage2/evaluate.py`, `src/stage2/predict.py`
 
 ### Stage 3 — Explanation (Optional) — IMPLEMENTED
 
@@ -67,3 +69,4 @@ python -m src.model.evaluate         # AUPRC/AUROC + operating point + fairness
 - **Simplicity** — keep the architecture straightforward
 - **Small/local models** — no large cloud APIs in the pipeline
 - **Build it ourselves** — understand every component
+- **Code quality** — Pylint 10.00/10 enforced via `.pylintrc`; Pydantic v2 config validation throughout (`src/config_schema.py`)

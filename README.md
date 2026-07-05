@@ -100,8 +100,8 @@ The dashboard has two views:
 | `setup_demo.py` | Synthetic data demo — no MIMIC needed |
 | `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
 | `setup_stage3.py --limit N` | Generate Stage 3 explanations (N = sample size) |
-| `sweep_stage2_threshold.py` | Sweep thresholds using saved scores — instant, no re-inference |
-| `update_stage2_threshold.py --threshold 0.3` | Update `stage2_confirmed` in results CSV |
+| `train_stage2_gpu.py` | GPU-optimised Stage 2 training (for cloud/HPC runs) |
+| `analyse_age_fairness.py` | Age-group fairness analysis on Stage 1 results |
 
 ---
 
@@ -120,24 +120,34 @@ The dashboard has two views:
 ├── PROJECT_TLDR.md              # Project context (read first)
 ├── MODEL_CARD.md                # Full model documentation + metrics
 ├── config.yaml                  # All configurable parameters
+├── .pylintrc                    # Pylint config (enforces 10.00/10)
 ├── setup_demo.py                # One-command demo (synthetic data)
 ├── setup_stage2.py              # Stage 2 fine-tuning runner
 ├── setup_stage3.py              # Stage 3 explanation runner
-├── sweep_stage2_threshold.py    # Threshold sweep utility
-├── update_stage2_threshold.py   # Update confirmed flags in CSV
+├── train_stage2_gpu.py          # GPU-optimised Stage 2 training
+├── analyse_age_fairness.py      # Age-group fairness analysis
 ├── frontend/                    # React + TS + Vite dashboard
 │   └── src/
 │       ├── components/          # PipelineDiagram, PatientTable, PatientModal
 │       └── data/mockPatients.ts # Synthetic demo patients
 ├── src/
-│   ├── config.py                # Config + env loader
+│   ├── config.py                # Config loader (returns AppConfig)
+│   ├── config_schema.py         # Pydantic v2 AppConfig model tree
 │   ├── schemas.py               # Column contracts
 │   ├── data/
 │   │   ├── cohort.py            # MIMIC-IV cohort extraction
+│   │   ├── comorbidity.py       # Charlson comorbidity index
 │   │   ├── features.py          # Feature engineering
-│   │   └── synthetic.py        # Synthetic data generator
-│   ├── model/                   # Stage 1: train, tune, evaluate, predict
-│   ├── stage2/                  # Stage 2: dataset, train, predict
+│   │   └── synthetic.py         # Synthetic data generator
+│   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv
+│   ├── stage2/
+│   │   ├── _utils.py            # Shared helpers (band_key, model path)
+│   │   ├── dataset.py           # ClinicalNotesDataset + note loading
+│   │   ├── splits.py            # Patient-level finetune/val/cal splits
+│   │   ├── train.py             # Fine-tune Clinical-Longformer (focal loss)
+│   │   ├── calibrate.py         # Platt scaling + per-group threshold selection
+│   │   ├── evaluate.py          # Stage 2 evaluation metrics
+│   │   └── predict.py           # Stage 2 inference on Stage 1 flags
 │   └── stage3/                  # Stage 3: explain, run
 ├── sessions/                    # Work session logs (read latest for context)
 ├── tests/                       # Unit & integration tests
