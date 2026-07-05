@@ -1,11 +1,13 @@
 import type { Patient } from "../types";
 
 // Representative synthetic patients reflecting real pipeline statistics:
-// Notes cohort precision=0.309 @ thr=0.3, base readmission rate 25.6%
+// Notes cohort precision=0.309, base readmission rate 25.6%
+// Stage 2 uses calibrated per-age-group thresholds (Platt scaling, recall floor 0.65)
 export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 298471,
     age: 74,
+    age_band: "70+",
     gender: "Female",
     los_days: 11.2,
     charlson_index: 6,
@@ -20,6 +22,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.81,
     stage1_threshold: 0.354,
     stage2_score: 0.61,
+    stage2_threshold: 0.31,
     stage2_confirmed: true,
     readmitted: true,
     explanation:
@@ -28,6 +31,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 183924,
     age: 68,
+    age_band: "56-70",
     gender: "Male",
     los_days: 7.5,
     charlson_index: 4,
@@ -42,6 +46,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.72,
     stage1_threshold: 0.354,
     stage2_score: 0.54,
+    stage2_threshold: 0.29,
     stage2_confirmed: true,
     readmitted: true,
     explanation:
@@ -50,6 +55,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 374821,
     age: 82,
+    age_band: "70+",
     gender: "Female",
     los_days: 14.8,
     charlson_index: 8,
@@ -64,6 +70,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.89,
     stage1_threshold: 0.354,
     stage2_score: 0.67,
+    stage2_threshold: 0.31,
     stage2_confirmed: true,
     readmitted: true,
     explanation:
@@ -72,6 +79,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 521089,
     age: 58,
+    age_band: "56-70",
     gender: "Male",
     los_days: 5.1,
     charlson_index: 3,
@@ -86,6 +94,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.41,
     stage1_threshold: 0.354,
     stage2_score: 0.38,
+    stage2_threshold: 0.29,
     stage2_confirmed: true,
     readmitted: false,
     explanation:
@@ -94,6 +103,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 647302,
     age: 71,
+    age_band: "70+",
     gender: "Female",
     los_days: 9.3,
     charlson_index: 5,
@@ -108,6 +118,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.67,
     stage1_threshold: 0.354,
     stage2_score: 0.51,
+    stage2_threshold: 0.31,
     stage2_confirmed: true,
     readmitted: false,
     explanation:
@@ -116,6 +127,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 719834,
     age: 45,
+    age_band: "41-55",
     gender: "Male",
     los_days: 3.7,
     charlson_index: 2,
@@ -130,6 +142,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.37,
     stage1_threshold: 0.354,
     stage2_score: 0.32,
+    stage2_threshold: 0.28,
     stage2_confirmed: true,
     readmitted: false,
     explanation:
@@ -138,6 +151,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 832561,
     age: 79,
+    age_band: "70+",
     gender: "Male",
     los_days: 12.4,
     charlson_index: 7,
@@ -152,6 +166,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.85,
     stage1_threshold: 0.354,
     stage2_score: 0.63,
+    stage2_threshold: 0.31,
     stage2_confirmed: true,
     readmitted: true,
     explanation:
@@ -160,6 +175,7 @@ export const MOCK_PATIENTS: Patient[] = [
   {
     hadm_id: 943710,
     age: 63,
+    age_band: "56-70",
     gender: "Female",
     los_days: 6.8,
     charlson_index: 4,
@@ -174,6 +190,7 @@ export const MOCK_PATIENTS: Patient[] = [
     stage1_score: 0.48,
     stage1_threshold: 0.354,
     stage2_score: 0.41,
+    stage2_threshold: 0.29,
     stage2_confirmed: true,
     readmitted: false,
     explanation:
@@ -194,16 +211,18 @@ export const PIPELINE_METRICS = {
     flagged: 69775,
   },
   stage2: {
-    model: "Clinical-Longformer",
+    // Metrics from first training run (15k notes, 512 tokens).
+    // Rebuilt model (2048 tokens, focal loss, per-age calibration) not yet run.
+    model: "Clinical-Longformer (yikuan8)",
     auroc: 0.640,
     auprc: 0.341,
-    threshold: 0.3,
     notes_cohort: 43776,
     confirmed: 25699,
     precision: 0.309,
     recall_notes: 0.709,
     f2: 0.563,
     training_notes: 15000,
+    max_seq_length: 512,
   },
   stage3: {
     model: "phi4-mini (Ollama)",

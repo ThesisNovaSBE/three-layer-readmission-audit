@@ -59,14 +59,15 @@ export default function PatientModal({
         <div className="p-6 space-y-5">
           {/* Score gauges */}
           <div className="grid grid-cols-2 gap-4 bg-slate-50 rounded-xl p-4">
-            <ScoreGauge label="Stage 1 score (XGBoost)" score={patient.stage1_score} color="text-blue-600" />
-            <ScoreGauge label="Stage 2 score (Longformer)" score={patient.stage2_score} color="text-violet-600" />
+            <ScoreGauge label={`Stage 1 (XGBoost · thr=${patient.stage1_threshold})`} score={patient.stage1_score} color="text-blue-600" />
+            <ScoreGauge label={`Stage 2 calibrated · thr=${patient.stage2_threshold} (${patient.age_band})`} score={patient.stage2_score} color="text-violet-600" />
           </div>
 
           {/* Patient profile */}
           <div>
             <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Patient Profile</h3>
             <div className="bg-slate-50 rounded-xl px-4">
+              <InfoRow label="Age group" value={patient.age_band} />
               <InfoRow label="Length of stay" value={`${patient.los_days} days`} />
               <InfoRow label="Charlson Comorbidity Index" value={`${patient.charlson_index} (${patient.n_comorbidities} conditions)`} />
               <InfoRow label="Prior admissions" value={patient.n_prior_admissions} />

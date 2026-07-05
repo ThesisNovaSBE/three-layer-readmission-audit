@@ -67,7 +67,7 @@ export default function PatientTable({
         <div>
           <h2 className="text-base font-bold text-slate-800">Confirmed High-Risk Patients</h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Stage 2 confirmed · thr₂ = 0.3 · Click a row for details
+            Stage 2 confirmed · calibrated per-age-group thresholds · Click a row for details
           </p>
         </div>
         <span className="text-sm text-slate-400">{patients.length} shown</span>
@@ -76,7 +76,8 @@ export default function PatientTable({
         <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
           <tr>
             <th className="px-4 py-3 text-left">Admission ID</th>
-            <th className="px-4 py-3 text-left">Age / Gender</th>
+            <th className="px-4 py-3 text-left">Age / Band</th>
+            <th className="px-4 py-3 text-left">Gender</th>
             <th className="px-4 py-3 text-left">LOS (days)</th>
             <th className="px-4 py-3 text-left">Charlson</th>
             <th className="px-4 py-3 text-left">
@@ -98,8 +99,10 @@ export default function PatientTable({
             >
               <td className="px-4 py-3 font-mono text-slate-600 text-xs">{p.hadm_id}</td>
               <td className="px-4 py-3 text-slate-700">
-                {p.age}y / {p.gender}
+                {p.age}y
+                <span className="ml-1 text-xs text-slate-400">({p.age_band})</span>
               </td>
+              <td className="px-4 py-3 text-slate-600">{p.gender}</td>
               <td className="px-4 py-3 text-slate-600">{p.los_days}</td>
               <td className="px-4 py-3 text-slate-600">{p.charlson_index}</td>
               <td className="px-4 py-3">

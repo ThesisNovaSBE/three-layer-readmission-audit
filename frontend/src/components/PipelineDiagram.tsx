@@ -82,9 +82,10 @@ export default function PipelineDiagram() {
           metrics={[
             { label: "With notes", value: m.stage2.notes_cohort.toLocaleString() },
             { label: "AUROC", value: m.stage2.auroc.toFixed(3) },
-            { label: "Confirmed (thr=0.3)", value: m.stage2.confirmed.toLocaleString() },
+            { label: "Confirmed", value: m.stage2.confirmed.toLocaleString() },
             { label: "Precision ↑", value: `${m.stage2.precision.toFixed(3)} (+21%)` },
             { label: "Recall (notes)", value: m.stage2.recall_notes.toFixed(3) },
+            { label: "Threshold", value: "Calibrated per age group" },
           ]}
         />
         <Arrow />

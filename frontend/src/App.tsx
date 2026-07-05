@@ -61,7 +61,7 @@ export default function App() {
                 <div className="flex gap-3">
                   <span className="shrink-0 w-6 h-6 rounded-full bg-violet-100 text-violet-600 font-bold text-xs flex items-center justify-center">2</span>
                   <div>
-                    <strong className="text-slate-800">Stage 2 — Verify.</strong> A fine-tuned Clinical-Longformer reads the discharge note of each flagged patient and assigns a confirmation score. Notes contain richer clinical context than structured data: symptom progression, clinician judgment, discharge plan. At threshold 0.3, Stage 2 improves precision by +21% (0.256 → 0.309) while retaining 70.9% of true positives in the notes cohort.
+                    <strong className="text-slate-800">Stage 2 — Verify.</strong> A fine-tuned Clinical-Longformer (4096-token context, 2048 used) reads the discharge note of each flagged patient. Notes contain richer clinical context than structured data: symptom progression, clinician judgment, and discharge plan — signals that predict readmission but are absent from labs and vitals. Training uses focal loss and per-age-group loss weights to improve fairness across age bands. After training, Platt scaling calibrates probabilities per age group, and a recall-floor threshold (≥ 0.65 recall) is selected per group. Stage 2 improves precision by +21% (0.256 → 0.309) while retaining 70.9% of true positives in the notes cohort.
                   </div>
                 </div>
                 <div className="flex gap-3">
