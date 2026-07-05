@@ -99,7 +99,7 @@ def main():
     print(f"  Mode:  {cfg['run']['mode']}")
     print(f"  Model: {cfg['stage2']['model_name']}")
     print(f"  Max sequence length: {cfg['stage2']['max_seq_length']} tokens")
-    max_train = cfg['stage2'].get('max_train_notes', 0)
+    max_train = getattr(cfg.stage2, 'max_train_notes', 0)
     if max_train:
         print(f"  Max training notes:  {max_train:,} (stratified subsample)")
     print()

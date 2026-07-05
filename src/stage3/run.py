@@ -1,16 +1,19 @@
-"""Entry point for Stage 3: generate plain-language explanations for confirmed high-risk patients.
+"""Entry point for Stage 3: generate plain-language explanations for high-risk patients.
 
-Reads Stage 2 results (models/stage2_results.csv), merges in the feature matrix
-for prompt context, and calls Ollama to generate one explanation per patient.
+Reads Stage 2 results (``models/stage2_results.csv``), merges in the feature
+matrix for prompt context, and calls Ollama to generate one explanation per
+patient.
 
-Output saved to models/stage3_explanations.csv.
+Output saved to ``models/stage3_explanations.csv``.
 
 Prerequisites:
-  - Stage 2 results: run `python -m src.stage2.predict` first
-  - Ollama running with model pulled: `ollama pull phi4-mini`
-  - stage3.enabled: true in config.yaml
 
-Usage:
+- Stage 2 results: run ``python -m src.stage2.predict`` first
+- Ollama running with model pulled: ``ollama pull phi4-mini``
+- ``stage3.enabled: true`` in ``config.yaml``
+
+Usage::
+
     python -m src.stage3.run
     python -m src.stage3.run --input models/stage2_results.csv
 """
@@ -22,22 +25,32 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config import load_config, get_model_dir
+from src.config import get_model_dir, load_config
+from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import ID_COLS, TARGET_COL
+from src.schemas import TARGET_COL
 from src.stage3.explain import generate_explanations_batch
 
 
-def run_stage3(cfg: dict, results_path: Path | None = None, limit: int | None = None) -> pd.DataFrame:
+def run_stage3(
+    cfg: AppConfig,
+    results_path: Path | None = None,
+    limit: int | None = None,
+) -> pd.DataFrame:
     """Generate explanations for Stage 2 confirmed patients.
 
     Args:
-        cfg: loaded config dict.
-        results_path: path to Stage 2 results CSV. Defaults to models/stage2_results.csv.
-        limit: if set, only generate explanations for this many randomly sampled patients.
+        cfg:          validated project config.
+        results_path: path to Stage 2 results CSV. Defaults to
+                      ``models/stage2_results.csv``.
+        limit:        if set, only generate explanations for this many randomly
+                      sampled patients.
 
     Returns:
-        DataFrame of confirmed patients with an added 'explanation' column.
+        DataFrame of confirmed patients with an added ``'explanation'`` column.
+
+    Raises:
+        FileNotFoundError: if Stage 2 results are not found.
     """
     model_dir = get_model_dir()
     results_path = results_path or model_dir / "stage2_results.csv"
@@ -60,9 +73,8 @@ def run_stage3(cfg: dict, results_path: Path | None = None, limit: int | None = 
         print("[stage3] No confirmed patients — nothing to do.")
         return confirmed_df
 
-    # ── Merge feature matrix for richer prompt context ──
-    # Always load full matrix so all hadm_ids from Stage 2 (trained in full mode)
-    # get feature context; quick mode would miss most rows since they're subsampled.
+    # Merge feature matrix for richer prompt context.
+    # Always load full matrix so all hadm_ids from Stage 2 get feature context.
     matrix = load_feature_matrix(cfg, "full")
     exclude = {TARGET_COL, "gender", "age_band"}
     feat_cols = [c for c in matrix.columns if c not in exclude]
@@ -78,12 +90,19 @@ def run_stage3(cfg: dict, results_path: Path | None = None, limit: int | None = 
     return out_df
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Stage 3: generate readmission risk explanations")
+def main() -> None:
+    """CLI entry point for Stage 3 explanation generation."""
+    parser = argparse.ArgumentParser(
+        description="Stage 3: generate readmission risk explanations"
+    )
     parser.add_argument(
         "--input", type=Path, default=None,
-        help="Path to Stage 2 results CSV (default: models/stage2_results.csv)"
+        help="Path to Stage 2 results CSV (default: models/stage2_results.csv)",
     )
     args = parser.parse_args()
-    cfg = load_config()
-    run_stage3(cfg, results_path=args.input)
+    _cfg = load_config()
+    run_stage3(_cfg, results_path=args.input)
+
+
+if __name__ == "__main__":
+    main()

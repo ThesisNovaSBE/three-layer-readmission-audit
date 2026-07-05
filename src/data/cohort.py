@@ -4,14 +4,27 @@ Reads raw MIMIC-IV tables, applies inclusion/exclusion criteria, and produces
 the cohort with a 30-day readmission label.
 """
 
-from pathlib import Path
+from __future__ import annotations
 
 import pandas as pd
 
-from src.config import load_config, has_real_data, get_data_dir
+from src.config import has_real_data, load_config
+from src.config_schema import AppConfig
 
 
-def extract_cohort(cfg: dict | None = None) -> pd.DataFrame:
+def extract_cohort(cfg: AppConfig | None = None) -> pd.DataFrame:
+    """Extract the patient cohort from real MIMIC-IV data.
+
+    Args:
+        cfg: validated project config. Loaded from disk if ``None``.
+
+    Returns:
+        DataFrame of cohort admissions with a ``readmission_30d`` label column.
+
+    Raises:
+        FileNotFoundError: if MIMIC-IV data is not configured or not found.
+        NotImplementedError: real cohort extraction is not yet implemented.
+    """
     cfg = cfg or load_config()
 
     if not has_real_data(cfg):
@@ -20,7 +33,6 @@ def extract_cohort(cfg: dict | None = None) -> pd.DataFrame:
             "or use src.data.synthetic to generate sample data."
         )
 
-    # TODO: implement real MIMIC-IV cohort extraction
     raise NotImplementedError("Real MIMIC-IV cohort extraction not yet implemented.")
 
 

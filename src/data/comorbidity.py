@@ -169,6 +169,7 @@ def charlson_categories(codes_with_versions: list[tuple[str, int]]) -> dict[str,
 
 
 def charlson_index(flags: dict[str, int]) -> int:
+    """Return the total Charlson score by summing weighted comorbidity flags."""
     return sum(CHARLSON_WEIGHTS[cat] * present for cat, present in flags.items())
 
 

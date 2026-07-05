@@ -4,7 +4,8 @@ Runs Platt scaling (logistic regression on raw logits) per age group on the
 calibration split, then selects per-group decision thresholds that satisfy a
 recall floor while maximising F2.
 
-Output: models/stage2_calibration.json
+Output: ``models/stage2_calibration.json``::
+
     {
       "calibrators": {"18-40": [coef, intercept], ...},
       "thresholds":  {"18-40": 0.31, "41-55": 0.28, ...},
@@ -13,7 +14,8 @@ Output: models/stage2_calibration.json
       "calibration_metrics": {...}
     }
 
-Usage:
+Usage::
+
     python -m src.stage2.calibrate
     python -m src.stage2.calibrate --force
 """
@@ -22,51 +24,52 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
-import torch
+
+try:
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import AutoTokenizer, LongformerForSequenceClassification
+except ImportError as _torch_err:
+    raise ImportError(
+        "Stage 2 requires PyTorch and Transformers. "
+        "Install with: pip install torch transformers"
+    ) from _torch_err
+
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
-from torch.utils.data import DataLoader
+from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from tqdm import tqdm
-from transformers import AutoTokenizer, LongformerForSequenceClassification
 
-from src.config import load_config, get_model_dir
-from src.data.features import load_feature_matrix
-from src.stage2.dataset import load_notes, build_notes_dataframe, ClinicalNotesDataset
-from src.stage2.splits import build_splits
+from src.config import get_model_dir, load_config
+from src.config_schema import AppConfig
 from src.schemas import TARGET_COL
-
-
-# ── Age band key helpers ──────────────────────────────────────────────────────
-
-_BAND_MAP = {
-    "(17, 40]":  "18-40",
-    "(40, 55]":  "41-55",
-    "(55, 70]":  "56-70",
-    "(70, 120]": "70+",
-}
-
-
-def _band_key(age_band) -> str:
-    return _BAND_MAP.get(str(age_band), str(age_band))
+from src.stage2._utils import band_key, get_stage2_model_path
+from src.stage2.dataset import ClinicalNotesDataset, build_notes_dataframe, load_notes
+from src.stage2.splits import build_splits
 
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
 
-def _get_logits(model, dataset: ClinicalNotesDataset, batch_size: int, device) -> np.ndarray:
-    """Run inference and return raw logits (class-1 column)."""
+def _get_logits(
+    model: object,
+    dataset: ClinicalNotesDataset,
+    batch_size: int,
+    device: torch.device,
+) -> np.ndarray:
+    """Run inference and return raw class-1 logits for every sample."""
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     all_logits: list[float] = []
-    model.eval()
+    model.eval()  # type: ignore[union-attr]
     with torch.no_grad():
         for batch in tqdm(loader, desc="[calibrate] scoring"):
-            inputs = {k: v.to(device) for k, v in batch.items()
-                      if k not in {"labels", "group_weight"}}
-            logits = model(**inputs).logits          # (B, 2)
+            inputs = {
+                k: v.to(device) for k, v in batch.items()
+                if k not in {"labels", "group_weight"}
+            }
+            logits = model(**inputs).logits  # type: ignore[operator]
             all_logits.extend(logits[:, 1].cpu().numpy().tolist())
     return np.array(all_logits)
 
@@ -79,12 +82,22 @@ def _recall_floor_threshold(
     recall_floor: float,
     n_steps: int = 200,
 ) -> float:
-    """Return the threshold that satisfies recall >= recall_floor and maximises F2.
+    """Return the threshold satisfying recall >= recall_floor with max F2.
 
-    If no threshold achieves the recall floor, return the one with highest recall.
+    If no threshold achieves the recall floor, returns the one with the
+    highest recall.
+
+    Args:
+        probs:        calibrated probabilities for the group.
+        labels:       true binary labels.
+        recall_floor: minimum required recall.
+        n_steps:      number of threshold candidates to evaluate.
+
+    Returns:
+        Selected decision threshold (float in [0.01, 0.99]).
     """
-    best_thr   = 0.5
-    best_f2    = -1.0
+    best_thr = 0.5
+    best_f2 = -1.0
     best_recall = -1.0
 
     for thr in np.linspace(0.01, 0.99, n_steps):
@@ -93,160 +106,217 @@ def _recall_floor_threshold(
         if rec < recall_floor:
             continue
         pre = precision_score(labels, preds, zero_division=0)
-        f2  = (5 * pre * rec) / (4 * pre + rec + 1e-9)
+        f2 = (5 * pre * rec) / (4 * pre + rec + 1e-9)
         if f2 > best_f2:
-            best_f2  = f2
+            best_f2 = f2
             best_thr = float(thr)
             best_recall = rec
 
     if best_f2 < 0:
-        # Recall floor not achievable — pick threshold with highest recall
         for thr in np.linspace(0.01, 0.99, n_steps):
             preds = (probs >= thr).astype(int)
             rec = recall_score(labels, preds, zero_division=0)
             if rec > best_recall:
                 best_recall = rec
-                best_thr    = float(thr)
+                best_thr = float(thr)
 
     return best_thr
 
 
-# ── Main calibration routine ──────────────────────────────────────────────────
+# ── Per-band processing ───────────────────────────────────────────────────────
 
-def calibrate(cfg: dict, artifact: dict | None = None, force: bool = False) -> dict:
-    """Run Platt scaling + per-group threshold selection on the calibration split.
+def _process_band(
+    raw_logits: np.ndarray,
+    labels_arr: np.ndarray,
+    mask: np.ndarray,
+    strategy: str,
+    recall_floor: float,
+) -> tuple[list[float], float, dict]:
+    """Fit Platt scaling and select threshold for one age group.
 
     Args:
-        cfg:      loaded config dict.
-        artifact: pre-loaded Stage 1 artifact; loaded from disk if None.
-        force:    recompute even if calibration JSON already exists.
+        raw_logits:   raw class-1 logits for ALL samples.
+        labels_arr:   true binary labels for ALL samples.
+        mask:         boolean mask selecting this group's rows.
+        strategy:     threshold selection strategy (``"recall_floor"``).
+        recall_floor: minimum required recall if strategy is ``"recall_floor"``.
 
     Returns:
-        Calibration dict (same structure written to JSON).
+        Tuple of ``(calibrator_params, threshold, metrics_dict)``.
     """
-    model_dir  = get_model_dir()
-    cal_path   = model_dir / "stage2_calibration.json"
+    x_band = raw_logits[mask].reshape(-1, 1)
+    y_band = labels_arr[mask]
 
-    if not force and cal_path.exists():
-        print("[calibrate] Loading existing calibration from", cal_path)
-        return json.loads(cal_path.read_text())
-
-    stage2_path = model_dir / "stage2_longformer_best"
-    if not stage2_path.exists():
-        raise FileNotFoundError(
-            f"Stage 2 model not found at {stage2_path}. "
-            "Run `python -m src.stage2.train` first."
+    if y_band.sum() < 5 or (y_band == 0).sum() < 5:
+        print(
+            f"  [calibrate] too few samples ({mask.sum()}) — "
+            "using identity calibration"
         )
+        coef_list: list[float] = [1.0, 0.0]
+    else:
+        lr = LogisticRegression(max_iter=1000)
+        lr.fit(x_band, y_band)
+        coef_list = [float(lr.coef_[0][0]), float(lr.intercept_[0])]
 
-    s2             = cfg["stage2"]
-    batch_size     = s2["batch_size"] * 2
-    max_length     = s2["max_seq_length"]
-    recall_floor   = s2.get("recall_floor", 0.65)
-    strategy       = s2.get("threshold_strategy", "recall_floor")
+    coef, intercept = coef_list
+    cal_logits = coef * raw_logits[mask] + intercept
+    cal_probs = 1.0 / (1.0 + np.exp(-cal_logits))
 
-    # Load Stage 1 artifact for train_idx / mode
-    if artifact is None:
-        stage1_name = cfg["stage1"]["model"]
-        artifact = joblib.load(model_dir / f"stage1_{stage1_name}.joblib")
+    thr = (
+        _recall_floor_threshold(cal_probs, y_band, recall_floor)
+        if strategy == "recall_floor" else 0.5
+    )
 
-    mode = artifact["mode"]
+    preds = (cal_probs >= thr).astype(int)
+    rec = recall_score(y_band, preds, zero_division=0)
+    pre = precision_score(y_band, preds, zero_division=0)
+    try:
+        band_auroc = float(roc_auc_score(y_band, cal_probs))
+    except ValueError:
+        band_auroc = float("nan")
+    f2 = (5 * pre * rec) / (4 * pre + rec + 1e-9)
 
-    # Patient-level splits → calibration hadm_ids
-    splits = build_splits(cfg, artifact=artifact)
-    cal_hadm_ids = set(splits["cal"]["hadm_id"].astype(int))
+    metrics: dict = {
+        "n": int(mask.sum()),
+        "pos_rate": float(y_band.mean()),
+        "threshold": thr,
+        "recall": float(rec),
+        "precision": float(pre),
+        "f2": float(f2),
+        "auroc": band_auroc,
+    }
+    return coef_list, thr, metrics
 
-    # Feature matrix for age_band
-    matrix    = load_feature_matrix(cfg, mode)
-    labels_df = matrix[["hadm_id", "subject_id", "age_band", TARGET_COL]]
 
-    # Load notes for calibration split only
+# ── Note loading and scoring helpers ─────────────────────────────────────────
+
+def _load_cal_notes(
+    cfg: AppConfig,
+    artifact: dict,
+    splits: dict,
+) -> pd.DataFrame:
+    """Load calibration-split discharge notes with labels and age bands.
+
+    Args:
+        cfg:      validated project config.
+        artifact: pre-loaded Stage 1 artifact (used by :func:`build_splits`
+                  if splits are not yet cached).
+        splits:   dict with ``"cal"`` key from :func:`build_splits`.
+
+    Returns:
+        DataFrame with columns ``hadm_id``, ``subject_id``, ``age_band``,
+        ``TARGET_COL``, and ``text``.
+    """
+    _ = artifact  # kept for API symmetry; splits already computed by caller
+    cal_split = splits["cal"]
+    cal_hadm_ids = set(cal_split["hadm_id"].astype(int).tolist())
     print(f"[calibrate] Loading notes for {len(cal_hadm_ids):,} calibration admissions ...")
-    notes  = load_notes(cfg, hadm_ids=cal_hadm_ids)
-    sub_df = labels_df[labels_df["hadm_id"].isin(cal_hadm_ids)]
-    cal_df = build_notes_dataframe(notes, sub_df[["hadm_id", "subject_id", TARGET_COL]])
-    cal_df = cal_df.merge(labels_df[["hadm_id", "age_band"]], on="hadm_id", how="left")
-    cal_df["age_band_key"] = cal_df["age_band"].apply(_band_key)
 
-    print(f"[calibrate] Calibration notes: {len(cal_df):,}  "
-          f"(readmission rate: {cal_df[TARGET_COL].mean():.1%})")
+    notes = load_notes(cfg, hadm_ids=cal_hadm_ids)
+    notes_df = build_notes_dataframe(
+        notes, cal_split[["hadm_id", "subject_id", TARGET_COL]]
+    )
+    notes_df = notes_df.merge(
+        cal_split[["hadm_id", "age_band"]], on="hadm_id", how="left"
+    )
+    print(f"[calibrate] Notes available for {len(notes_df):,} admissions")
+    return notes_df
 
-    # Device
+
+def _score_cal_notes(
+    cal_df: pd.DataFrame,
+    stage2_path: object,
+    batch_size: int,
+    max_length: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Run Stage 2 inference on the calibration split and return raw logits.
+
+    Args:
+        cal_df:      DataFrame with ``text``, ``TARGET_COL``, and ``age_band``
+                     columns.
+        stage2_path: path to the fine-tuned model directory.
+        batch_size:  inference batch size.
+        max_length:  tokenization max length.
+
+    Returns:
+        Tuple ``(raw_logits, labels_arr, bands)`` — each a 1-D numpy array
+        aligned row-by-row with ``cal_df``.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[calibrate] Device: {device}")
-
-    # Load model + tokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(stage2_path))
-    model     = LongformerForSequenceClassification.from_pretrained(str(stage2_path))
-    model.to(device)
-
     dataset = ClinicalNotesDataset(
         cal_df["text"].tolist(),
         cal_df[TARGET_COL].tolist(),
         tokenizer,
         max_length,
     )
+    model = LongformerForSequenceClassification.from_pretrained(str(stage2_path))
+    model.to(device)
+
     raw_logits = _get_logits(model, dataset, batch_size, device)
-    labels_arr = cal_df[TARGET_COL].values
+    labels_arr = np.array(cal_df[TARGET_COL].tolist())
+    bands = np.array(cal_df["age_band"].apply(band_key).tolist())
+    return raw_logits, labels_arr, bands
 
-    # ── Per-group Platt scaling ──────────────────────────────────────────────
-    bands = cal_df["age_band_key"].values
+
+# ── Main calibration routine ──────────────────────────────────────────────────
+
+def calibrate(cfg: AppConfig, artifact: dict | None = None, force: bool = False) -> dict:
+    """Run Platt scaling and per-group threshold selection on the calibration split.
+
+    Args:
+        cfg:      validated project config.
+        artifact: pre-loaded Stage 1 artifact; loaded from disk if ``None``.
+        force:    recompute even if calibration JSON already exists.
+
+    Returns:
+        Calibration dict (same structure written to JSON).
+    """
+    model_dir = get_model_dir()
+    cal_path = model_dir / "stage2_calibration.json"
+
+    if not force and cal_path.exists():
+        print("[calibrate] Loading existing calibration from", cal_path)
+        return json.loads(cal_path.read_text())
+
+    stage2_path = get_stage2_model_path(model_dir)
+
+    batch_size = cfg.stage2.batch_size * 2
+    max_length = cfg.stage2.max_seq_length
+    recall_floor = cfg.stage2.recall_floor
+    strategy = cfg.stage2.threshold_strategy
+
+    if artifact is None:
+        artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
+
+    cal_df = _load_cal_notes(cfg, artifact, splits=build_splits(cfg, artifact=artifact))
+    raw_logits, labels_arr, bands = _score_cal_notes(
+        cal_df, stage2_path, batch_size, max_length
+    )
+
     calibrators: dict[str, list[float]] = {}
-    thresholds:  dict[str, float]       = {}
-    cal_metrics: dict[str, dict]        = {}
+    thresholds: dict[str, float] = {}
+    cal_metrics: dict[str, dict] = {}
 
-    unique_bands = sorted(set(bands))
-    for band in unique_bands:
+    print("\n[calibrate] Per-age-group Platt scaling:")
+    for band in sorted(set(bands)):
         mask = bands == band
-        X_b  = raw_logits[mask].reshape(-1, 1)
-        y_b  = labels_arr[mask]
-
-        if y_b.sum() < 5 or (y_b == 0).sum() < 5:
-            print(f"  [calibrate] {band}: too few samples ({mask.sum()}) — "
-                  "skipping per-group calibration, using global fallback")
-            calibrators[band] = [1.0, 0.0]   # identity (logit passthrough)
-        else:
-            lr = LogisticRegression(max_iter=1000)
-            lr.fit(X_b, y_b)
-            calibrators[band] = [float(lr.coef_[0][0]), float(lr.intercept_[0])]
-
-        # Calibrated probabilities
-        coef, intercept = calibrators[band]
-        cal_logits = coef * raw_logits[mask] + intercept
-        cal_probs  = 1.0 / (1.0 + np.exp(-cal_logits))
-
-        # Threshold selection
-        if strategy == "recall_floor":
-            thr = _recall_floor_threshold(cal_probs, y_b, recall_floor)
-        else:
-            thr = 0.5
+        coef_list, thr, metrics = _process_band(
+            raw_logits, labels_arr, mask, strategy, recall_floor
+        )
+        calibrators[band] = coef_list
         thresholds[band] = thr
-
-        # Report
-        preds  = (cal_probs >= thr).astype(int)
-        rec    = recall_score(y_b, preds, zero_division=0)
-        pre    = precision_score(y_b, preds, zero_division=0)
-        try:
-            auroc = float(roc_auc_score(y_b, cal_probs))
-        except ValueError:
-            auroc = float("nan")
-        f2 = (5 * pre * rec) / (4 * pre + rec + 1e-9)
-
-        cal_metrics[band] = {
-            "n": int(mask.sum()),
-            "pos_rate": float(y_b.mean()),
-            "threshold": thr,
-            "recall": float(rec),
-            "precision": float(pre),
-            "f2": float(f2),
-            "auroc": auroc,
-        }
-        print(f"  {band:<8}  n={mask.sum():>5,}  thr={thr:.3f}  "
-              f"rec={rec:.3f}  pre={pre:.3f}  F2={f2:.3f}  AUROC={auroc:.3f}")
+        cal_metrics[band] = metrics
+        print(
+            f"  {band:<8}  n={mask.sum():>5,}  thr={thr:.3f}  "
+            f"rec={metrics['recall']:.3f}  pre={metrics['precision']:.3f}  "
+            f"F2={metrics['f2']:.3f}  AUROC={metrics['auroc']:.3f}"
+        )
 
     result = {
         "calibrators": calibrators,
-        "thresholds":  thresholds,
-        "strategy":    strategy,
+        "thresholds": thresholds,
+        "strategy": strategy,
         "recall_floor": recall_floor,
         "calibration_metrics": cal_metrics,
     }
@@ -256,10 +326,15 @@ def calibrate(cfg: dict, artifact: dict | None = None, force: bool = False) -> d
     return result
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI entry point for Stage 2 calibration."""
     parser = argparse.ArgumentParser(description="Calibrate Stage 2 per age group")
     parser.add_argument("--force", action="store_true",
                         help="Recompute even if calibration JSON exists")
     args = parser.parse_args()
-    cfg  = load_config()
-    calibrate(cfg, force=args.force)
+    _cfg = load_config()
+    calibrate(_cfg, force=args.force)
+
+
+if __name__ == "__main__":
+    main()
