@@ -1,6 +1,7 @@
 export interface Patient {
   hadm_id: number;
   age: number;
+  age_band: string;
   gender: string;
   los_days: number;
   charlson_index: number;
@@ -15,6 +16,7 @@ export interface Patient {
   stage1_score: number;
   stage1_threshold: number;
   stage2_score: number;
+  stage2_threshold: number;
   stage2_confirmed: boolean;
   readmitted: boolean;
   explanation: string;
