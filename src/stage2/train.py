@@ -80,6 +80,7 @@ class _TrainHparams:
     fp16: bool
     bf16: bool
     num_workers: int
+    save_steps: int
 
 
 def _parse_hparams(cfg: AppConfig) -> _TrainHparams:
@@ -103,6 +104,7 @@ def _parse_hparams(cfg: AppConfig) -> _TrainHparams:
         fp16=s2.fp16,
         bf16=s2.bf16,
         num_workers=s2.dataloader_num_workers,
+        save_steps=s2.save_steps,
     )
 
 
@@ -211,6 +213,22 @@ def _detect_device() -> str:
     return "cpu"
 
 
+def _find_resume_checkpoint(checkpoint_dir) -> str | None:
+    """Return the path of the latest checkpoint, or None if none exist.
+
+    Called before ``trainer.train()`` to enable automatic crash recovery —
+    if training is interrupted, restarting the script resumes from the last
+    saved checkpoint rather than starting from scratch.
+    """
+    if checkpoint_dir.exists():
+        existing = sorted(checkpoint_dir.glob("checkpoint-*"))
+        if existing:
+            print(f"[stage2/train] Resuming from checkpoint: {existing[-1].name}")
+            return str(existing[-1])
+    print("\n[stage2/train] Starting fine-tuning from scratch ...")
+    return None
+
+
 def _compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
     """Return a [neg_weight, pos_weight] tensor for cross-entropy loss."""
     pos = int((train_df[TARGET_COL] == 1).sum())
@@ -227,10 +245,18 @@ def _build_training_args(
     device: str,
     seed: int,
 ) -> TrainingArguments:
-    """Construct HuggingFace TrainingArguments from hyperparameters."""
+    """Construct HuggingFace TrainingArguments from hyperparameters.
+
+    Uses step-level checkpointing (every ``save_steps`` optimizer steps) so
+    that a crash mid-epoch loses at most ``save_steps`` steps of progress.
+    The last 3 checkpoints are kept; the best is restored at the end.
+    """
     use_fp16 = hp.fp16 and device == "cuda"
     use_bf16 = hp.bf16 and device == "cuda"
-    print(f"[stage2/train] Device: {device}  fp16={use_fp16}  bf16={use_bf16}")
+    print(
+        f"[stage2/train] Device: {device}  fp16={use_fp16}  bf16={use_bf16}  "
+        f"checkpoint every {hp.save_steps} steps"
+    )
     return TrainingArguments(
         output_dir=str(model_dir / "stage2_checkpoints"),
         num_train_epochs=hp.epochs,
@@ -240,8 +266,12 @@ def _build_training_args(
         learning_rate=hp.learning_rate,
         warmup_ratio=hp.warmup_ratio,
         weight_decay=hp.weight_decay,
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        # Step-level eval + save so a crash never loses more than save_steps steps
+        eval_strategy="steps",
+        eval_steps=hp.save_steps,
+        save_strategy="steps",
+        save_steps=hp.save_steps,
+        save_total_limit=3,          # keep only the 3 most recent checkpoints
         load_best_model_at_end=True,
         metric_for_best_model="auprc",
         greater_is_better=True,
@@ -390,8 +420,9 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
         callbacks=[EarlyStoppingCallback(early_stopping_patience=hp.patience)],
     )
 
-    print("\n[stage2/train] Starting fine-tuning ...")
-    trainer.train()
+    trainer.train(
+        resume_from_checkpoint=_find_resume_checkpoint(model_dir / "stage2_checkpoints")
+    )
 
     _save_results(trainer, val_dataset, model_dir, tokenizer)
     print("[stage2/train] Done. Run calibrate.py next.")
