@@ -90,38 +90,41 @@ stage2:
   # Target note count per (age_band, readmission_30d) cell.
   # 70+ is oversampled to address the recall gap found in the v1 model.
   # Cells with fewer available notes than the target use all available notes.
-  # Total: ~100,000 notes (40% of ~251k available) — set for GPU training.
+  # Total: ~249,000 notes (~99% of ~251k available) — scaled for A100 80GB on GWDG Grete.
+  # 70+ group is deliberately oversampled to address the recall gap found in the v1 model.
+  # Cells with fewer available notes than the target fall back to using all available.
   age_group_train_targets:
-    "18-40_0": 10000   # age 18-40, not readmitted
-    "18-40_1": 4000    # age 18-40, readmitted
-    "41-55_0": 15000   # age 41-55, not readmitted
-    "41-55_1": 6000    # age 41-55, readmitted
-    "56-70_0": 20000   # age 56-70, not readmitted
-    "56-70_1": 8000    # age 56-70, readmitted
-    "70+_0":   25000   # age 70+,   not readmitted
-    "70+_1":   12000   # age 70+,   readmitted  ← oversampled vs natural rate
+    "18-40_0": 25000   # age 18-40, not readmitted
+    "18-40_1": 10000   # age 18-40, readmitted
+    "41-55_0": 37000   # age 41-55, not readmitted
+    "41-55_1": 15000   # age 41-55, readmitted
+    "56-70_0": 50000   # age 56-70, not readmitted
+    "56-70_1": 20000   # age 56-70, readmitted
+    "70+_0":   62000   # age 70+,   not readmitted
+    "70+_1":   30000   # age 70+,   readmitted  ← oversampled vs natural rate
 
   # ── Training hyperparameters ──
-  batch_size: 4
-  gradient_accumulation_steps: 4   # effective batch size = 16
+  batch_size: 8
+  gradient_accumulation_steps: 2   # effective batch size = 16
   epochs: 10
   early_stopping_patience: 3
   learning_rate: 1.0e-5
   warmup_ratio: 0.10
   weight_decay: 0.01
-  # Checkpoint every N optimizer steps — crash recovery, worst-case loss ~12 min
+  # Checkpoint every N optimizer steps — crash recovery / HPC wall-time limit safety
   save_steps: 500
 
   # ── GPU / precision — set for your hardware before training ──
-  # A100 80GB (Colab Pro+): bf16: true,  fp16: false, gradient_checkpointing: false, workers: 4
-  # V100 32GB:              bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
-  # RTX 4090 24GB:          bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
-  # RTX 3080 10GB:          bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
-  # CPU / macOS:            bf16: false, fp16: false, gradient_checkpointing: false, workers: 0
-  bf16: false
-  fp16: true
-  gradient_checkpointing: true
-  dataloader_num_workers: 4
+  # A100 80GB (GWDG Grete):  bf16: true,  fp16: false, gradient_checkpointing: false, workers: 8
+  # A100 40GB:               bf16: true,  fp16: false, gradient_checkpointing: true,  workers: 8
+  # V100 32GB:               bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
+  # RTX 4090 24GB:           bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
+  # RTX 3080 10GB:           bf16: false, fp16: true,  gradient_checkpointing: true,  workers: 4
+  # CPU / macOS:             bf16: false, fp16: false, gradient_checkpointing: false, workers: 0
+  bf16: true
+  fp16: false
+  gradient_checkpointing: false
+  dataloader_num_workers: 8
 
   # ── Loss function ──
   focal_loss: true
