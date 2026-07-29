@@ -30,7 +30,7 @@ import joblib  # noqa: E402 — must come before torch
 from src.config import load_config, get_model_dir  # noqa: E402
 
 _cfg_early = load_config()
-_stage1_name = _cfg_early["stage1"]["model"]
+_stage1_name = _cfg_early.stage1.model
 _artifact_path = get_model_dir() / f"stage1_{_stage1_name}.joblib"
 if not _artifact_path.exists():
     print(f"[setup_stage2] ERROR: Stage 1 artifact not found at {_artifact_path}")
