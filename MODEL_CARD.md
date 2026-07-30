@@ -38,15 +38,29 @@
 
 Subgroup AUROC (fairness): Female=0.705, Male=0.704 (equal). Age: 18–40=0.723, 41–55=0.726, 56–70=0.706, 70+=0.660 (elderly patients harder to predict — noted as limitation).
 
-### Stage 2 — Clinical-Longformer (fine-tuned on 15k stratified notes, capped eval set of 3k)
+### Stage 2 — Clinical-Longformer v1 (fine-tuned on 15k stratified notes, capped eval set of 3k)
+
+> **Note:** A full retrain on 249k notes is running on GWDG KISSKI (A100 80GB, bf16) as of 2026-07-30.
+> Metrics below are from the v1 checkpoint. This section will be updated once retraining completes.
 
 | Metric | Value |
 |--------|-------|
 | AUROC | 0.6404 |
 | AUPRC | 0.3411 |
 | Best epoch | 2 / 5 (early stopping at epoch 4) |
-| Training notes | 15,000 (stratified subsample of 251k; 21.1% positive) |
-| Eval notes (checkpoint selection) | 3,000 (stratified cap) |
+| Training notes | 15,000 (stratified subsample; 21.1% positive) — v1 only |
+| Eval notes (checkpoint selection) | 3,000 (stratified cap) — v1 only |
+
+**Retraining config (v2, in progress):**
+
+| Parameter | Value |
+|-----------|-------|
+| Training notes | ~249,000 (~99% of available MIMIC-IV-Note training data) |
+| GPU | NVIDIA A100-SXM4-80GB (GWDG KISSKI) |
+| Precision | bf16 |
+| Batch size | 8 (effective 16 with grad. accum. ×2) |
+| Gradient checkpointing | disabled (80 GB VRAM sufficient) |
+| Sequence length | 2048 tokens |
 
 ### Stage 1+2 — Combined pipeline (notes cohort, thr₁=0.354, thr₂=0.3)
 
@@ -73,7 +87,7 @@ All Stage 1+2 recall figures are relative to the 11,186 positives *within the no
 
 **Operating point:** thr₂=0.3 — +21% precision over Stage 1 alone while retaining 70.9% of true positives in the notes cohort (F2=0.563 vs 0.632 baseline). thr₂=0.2 maximises F2 (0.623) with only a −8.8% recall cost if clinical completeness is the priority.
 
-**Calibration note:** Stage 2 scores cluster near the 0.5 boundary (no confirmed cases above 0.6), indicating underconfidence. Likely caused by training on only 15k notes (6% of available training data) under CPU constraints. Calibration scaling or GPU retraining on more notes would improve score spread.
+**Calibration note (v1):** Stage 2 scores cluster near the 0.5 boundary (no confirmed cases above 0.6), indicating underconfidence. This is attributable to training on only 15k notes (6% of available data). The v2 retrain on 249k notes on A100 80GB is expected to resolve this; per-group Platt scaling is applied post-training regardless.
 
 ## Limitations
 

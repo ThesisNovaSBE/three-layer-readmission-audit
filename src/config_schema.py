@@ -112,6 +112,7 @@ class Stage2Config(BaseModel):
     fp16: bool = False
     gradient_checkpointing: bool = False
     dataloader_num_workers: int = 0
+    save_steps: int = 500
     focal_loss: bool = True
     focal_gamma: float = 2.0
     age_group_loss_weights: dict[str, float] = {}

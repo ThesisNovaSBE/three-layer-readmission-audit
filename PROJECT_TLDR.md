@@ -24,7 +24,7 @@ Predict unplanned hospital readmission as accurately as possible using a two-sta
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC); see `docs/MODELING_PLAN.md`
 - Plan & approach: **`docs/MODELING_PLAN.md`**
 
-### Stage 2 — Clinical Encoder (Notes) — IMPLEMENTED
+### Stage 2 — Clinical Encoder (Notes) — IMPLEMENTED / RETRAINING ON HPC
 
 - Model: Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`, Li et al. 2023)
 - Input: Discharge notes (MIMIC-IV-Note) for patients flagged in Stage 1
@@ -33,6 +33,10 @@ Predict unplanned hospital readmission as accurately as possible using a two-sta
 - Calibration: Platt scaling per age group + recall-floor threshold selection (recall ≥ 0.65, maximise F2)
 - Requires real MIMIC-IV-Note; cannot run on synthetic data
 - Key modules: `src/stage2/splits.py`, `src/stage2/train.py`, `src/stage2/calibrate.py`, `src/stage2/evaluate.py`, `src/stage2/predict.py`
+- **Training scale:** 249k stratified notes (~99% of available MIMIC-IV-Note training data); 70+ group oversampled
+- **HPC training:** GWDG KISSKI cluster (A100 80GB, bf16, batch_size=8); job submitted 2026-07-30
+- **Job script:** `train_stage2.sh` — Slurm job with pre-flight checks; auto-resumes from checkpoint on resubmission
+- **Full setup:** `docs/HPC_DEPLOYMENT.md`
 
 ### Stage 3 — Explanation (Optional) — IMPLEMENTED
 

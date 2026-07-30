@@ -30,7 +30,7 @@ import joblib  # noqa: E402 — must come before torch
 from src.config import load_config, get_model_dir  # noqa: E402
 
 _cfg_early = load_config()
-_stage1_name = _cfg_early["stage1"]["model"]
+_stage1_name = _cfg_early.stage1.model
 _artifact_path = get_model_dir() / f"stage1_{_stage1_name}.joblib"
 if not _artifact_path.exists():
     print(f"[setup_stage2] ERROR: Stage 1 artifact not found at {_artifact_path}")
@@ -40,10 +40,12 @@ _preloaded_artifact = joblib.load(_artifact_path)
 print(f"[setup_stage2] Pre-loaded Stage 1 artifact from {_artifact_path}")
 
 # ── Step 2: NOW set env vars and import torch / transformers.
-# Must be set before torch or transformers are imported — prevents MPS from
-# auto-initialising, which causes a segfault with Longformer on macOS.
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# On macOS only: disable MPS/CUDA to prevent the C-extension segfault that
+# occurs when torch is imported after joblib on Apple Silicon.
+# On Linux (cluster): leave CUDA untouched so the GPU is used.
+if sys.platform == "darwin":
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Pre-load all heavy libraries here so they are fully initialised before any
 # function call. Lazy imports inside functions trigger the segfault on macOS.
@@ -63,16 +65,16 @@ from src.stage2.evaluate import evaluate        # noqa: E402
 
 
 
-def check_prerequisites(cfg: dict) -> None:
+def check_prerequisites(cfg) -> None:
     model_dir = get_model_dir()
-    stage1_name = cfg["stage1"]["model"]
+    stage1_name = cfg.stage1.model
     artifact = model_dir / f"stage1_{stage1_name}.joblib"
     if not artifact.exists():
         print(f"[setup_stage2] ERROR: Stage 1 artifact not found at {artifact}")
         print("  Run setup_demo.py then python -m src.model.train first.")
         sys.exit(1)
 
-    note_dir = cfg["data"].get("mimic_iv_note_dir", "")
+    note_dir = cfg.data.mimic_iv_note_dir
     if not note_dir or not Path(note_dir).exists():
         print("[setup_stage2] ERROR: MIMIC-IV-Note path not configured or not found.")
         print("  Set MIMIC_IV_NOTE_DIR in your .env file.")
@@ -91,17 +93,14 @@ def main():
 
     cfg = _cfg_early  # already loaded at module level (before torch)
     if args.mode:
-        cfg["run"]["mode"] = args.mode
+        cfg.run.mode = args.mode
 
     print("=" * 64)
     print("  Readmission Prediction — Stage 2 (Clinical-Longformer)")
     print("=" * 64)
-    print(f"  Mode:  {cfg['run']['mode']}")
-    print(f"  Model: {cfg['stage2']['model_name']}")
-    print(f"  Max sequence length: {cfg['stage2']['max_seq_length']} tokens")
-    max_train = getattr(cfg.stage2, 'max_train_notes', 0)
-    if max_train:
-        print(f"  Max training notes:  {max_train:,} (stratified subsample)")
+    print(f"  Mode:  {cfg.run.mode}")
+    print(f"  Model: {cfg.stage2.model_name}")
+    print(f"  Max sequence length: {cfg.stage2.max_seq_length} tokens")
     print()
 
     check_prerequisites(cfg)
