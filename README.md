@@ -69,13 +69,32 @@ pip install -r requirements.txt
 # 3. Stage 1: train XGBoost
 python -m src.model.train
 
-# 4. Stage 2: fine-tune Clinical-Longformer on discharge notes (~24h on CPU)
+# 4. Stage 2: fine-tune Clinical-Longformer on discharge notes
+#    GPU/HPC (recommended): sbatch train_stage2.sh          — see docs/HPC_DEPLOYMENT.md
+#    Local GPU:              python setup_stage2.py --mode full
 python setup_stage2.py --mode full
 
 # 5. Stage 3: generate explanations for confirmed patients
 #    Requires Ollama running + phi4-mini pulled: ollama pull phi4-mini
 python setup_stage3.py --limit 50   # --limit for demo; remove for full run
 ```
+
+---
+
+## GPU / HPC Training (GWDG KISSKI)
+
+Stage 2 training on 249k notes requires a capable GPU. The reference setup uses the GWDG KISSKI cluster (A100 80GB) via `train_stage2.sh`:
+
+```bash
+# On the cluster — submit the Slurm job
+sbatch train_stage2.sh
+
+# Monitor
+squeue -u $USER
+tail -f /projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_<jobid>.log
+```
+
+Full setup guide (SSH config, data transfer, conda env, crash recovery): **`docs/HPC_DEPLOYMENT.md`**
 
 ---
 
@@ -100,7 +119,7 @@ The dashboard has two views:
 | `setup_demo.py` | Synthetic data demo — no MIMIC needed |
 | `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
 | `setup_stage3.py --limit N` | Generate Stage 3 explanations (N = sample size) |
-| `train_stage2_gpu.py` | GPU-optimised Stage 2 training (for cloud/HPC runs) |
+| `train_stage2.sh` | Slurm job script for HPC/GPU training (GWDG KISSKI A100) |
 | `analyse_age_fairness.py` | Age-group fairness analysis on Stage 1 results |
 
 ---
@@ -124,7 +143,7 @@ The dashboard has two views:
 ├── setup_demo.py                # One-command demo (synthetic data)
 ├── setup_stage2.py              # Stage 2 fine-tuning runner
 ├── setup_stage3.py              # Stage 3 explanation runner
-├── train_stage2_gpu.py          # GPU-optimised Stage 2 training
+├── train_stage2.sh              # Slurm job script — GWDG KISSKI A100 80GB
 ├── analyse_age_fairness.py      # Age-group fairness analysis
 ├── frontend/                    # React + TS + Vite dashboard
 │   └── src/
@@ -151,7 +170,9 @@ The dashboard has two views:
 │   └── stage3/                  # Stage 3: explain, run
 ├── sessions/                    # Work session logs (read latest for context)
 ├── tests/                       # Unit & integration tests
-├── docs/                        # Modeling plan and documentation
+├── docs/
+│   ├── MODELING_PLAN.md         # Stage 1 modeling strategy
+│   └── HPC_DEPLOYMENT.md        # GWDG KISSKI cluster setup guide
 ├── data/                        # LOCAL ONLY — gitignored
 └── models/                      # Trained artifacts — gitignored
 ```
