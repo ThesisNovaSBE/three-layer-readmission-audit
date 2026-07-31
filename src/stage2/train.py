@@ -267,7 +267,9 @@ def _build_training_args(
         warmup_ratio=hp.warmup_ratio,
         weight_decay=hp.weight_decay,
         # Step-level eval + save so a crash never loses more than save_steps steps
-        eval_strategy="steps",
+        # evaluation_strategy is the name in Transformers <4.41; eval_strategy in >=4.41.
+        # Using the old name works on both (new versions alias it with a deprecation warning).
+        evaluation_strategy="steps",
         eval_steps=hp.save_steps,
         save_strategy="steps",
         save_steps=hp.save_steps,

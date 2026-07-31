@@ -99,10 +99,22 @@ rsync -av \
 ### Transfer updated code
 
 ```bash
-rsync -av --exclude='.git' --exclude='data/' --exclude='models/' --exclude='.venv/' \
-  /path/to/local/20260401_Thesis/ \
+rsync -av \
+  --exclude='.git' \
+  --exclude='data/' \
+  --exclude='models/' \
+  --exclude='.venv/' \
+  --exclude='.env' \
+  --exclude='__pycache__/' \
+  --exclude='*.pyc' \
+  --exclude='.pytest_cache/' \
+  ~/20260401_Thesis/ \
   kisski:~/thesis/
 ```
+
+> **Important:** `.env` is excluded from rsync — the cluster keeps its own `.env` with HPC paths.  
+> Never let the Mac `.env` overwrite the cluster's data paths.  
+> If you need to reset the cluster `.env`, see "Configure MIMIC data paths" above.
 
 ## Submitting the training job
 
