@@ -38,13 +38,19 @@ Predict unplanned hospital readmission as accurately as possible using a two-sta
 - **Job script:** `train_stage2.sh` — Slurm job with pre-flight checks; auto-resumes from checkpoint on resubmission
 - **Full setup:** `docs/HPC_DEPLOYMENT.md`
 
-### Stage 3 — Explanation (Optional) — IMPLEMENTED
+### Stage 3 — Cross-Modal Discordance Analysis + Explanation — REDESIGNED
 
 - Model: `phi4-mini` via Ollama
-- Input: Confirmed high-risk cases from Stage 2
-- Objective: Plain-language explanation of why a patient is flagged
-- Run: `ollama pull phi4-mini` then `python setup_stage3.py`
-- See `src/stage3/` for implementation
+- Input: **All** Stage 1 flagged patients (both confirmed AND rejected by Stage 2)
+- Objective (two levels):
+  1. **Per-patient**: clinician-facing explanation synthesising Stage 1 structured signals AND Stage 2 discharge note evidence
+  2. **Population-level**: empirical finding — which clinical domains in discharge notes explain the predictive gap between structured EHR data and free text?
+- Discordance classification per patient: `CONCORDANT` | `NOTE_MITIGATES` | `NOTE_AMPLIFIES`
+- Primary category taxonomy: `social_support`, `discharge_planning`, `functional_status`, `frailty_markers`, `medication_adherence`, `housing_social_risk`, `care_complexity`, `cognition`, `structured_confirmed`
+- Optional technical upgrade: extracts Clinical-Longformer attention spans (top-N sentences the model attended to) and feeds them into the phi4-mini prompt — Stage 3 is then mechanistically downstream of Stage 2's internals
+- Outputs: `models/stage3_discordance.csv` (per-patient) + `models/stage3_discordance_analysis.json` (population)
+- Run: `ollama pull phi4-mini` then `python setup_stage3.py --limit 500`
+- Key modules: `src/stage3/attention.py`, `src/stage3/shap_extract.py`, `src/stage3/explain.py`, `src/stage3/categorize.py`, `src/stage3/run.py`
 
 ## Data
 

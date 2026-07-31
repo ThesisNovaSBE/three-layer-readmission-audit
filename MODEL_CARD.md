@@ -89,6 +89,31 @@ All Stage 1+2 recall figures are relative to the 11,186 positives *within the no
 
 **Calibration note (v1):** Stage 2 scores cluster near the 0.5 boundary (no confirmed cases above 0.6), indicating underconfidence. This is attributable to training on only 15k notes (6% of available data). The v2 retrain on 249k notes on A100 80GB is expected to resolve this; per-group Platt scaling is applied post-training regardless.
 
+## Stage 3 — Cross-Modal Discordance Analysis (phi4-mini)
+
+Stage 3 processes **all** Stage 1 flagged patients (confirmed and rejected by Stage 2).
+For each patient, phi4-mini receives:
+- Top-k SHAP features from Stage 1 (structured risk drivers)
+- Top-n sentences from the discharge note with highest Clinical-Longformer attention weight
+- Stage 2 decision and probability
+
+**Output per patient:**
+
+| Field | Description |
+|-------|-------------|
+| `discordance_mode` | `CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES` |
+| `primary_category` | Dominant clinical domain driving any discordance |
+| `explanation` | One-sentence clinician-facing summary |
+
+**Discordance category taxonomy:**
+`social_support` · `discharge_planning` · `functional_status` · `frailty_markers` ·
+`medication_adherence` · `housing_social_risk` · `care_complexity` · `cognition` ·
+`structured_confirmed`
+
+**Research contribution:** The population-level aggregation of discordance modes and categories across all patients produces an empirical finding on which clinical domains in discharge notes explain the predictive gap between structured EHR data and free-text. This is a novel result enabled by the three-stage pipeline architecture.
+
+*Stage 3 results pending Stage 2 retraining on 249k notes (A100 80GB, in progress).*
+
 ## Limitations
 
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)

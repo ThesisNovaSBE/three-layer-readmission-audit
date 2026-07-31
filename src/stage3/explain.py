@@ -1,84 +1,116 @@
-"""Stage 3: generate plain-language readmission risk explanations via Ollama.
+"""Stage 3: cross-modal discordance annotation and clinician explanation.
 
-Uses a local generative model (default: phi4-mini) to write 3-5 sentence
-plain-language summaries of why a patient was confirmed high-risk.
+Each confirmed or rejected Stage 1 flag is annotated with:
 
-Prerequisites:
+1. ``discordance_mode`` — whether the discharge note and structured EHR data
+   tell the same story (CONCORDANT), the note is reassuring despite bad numbers
+   (NOTE_MITIGATES), or the note reveals additional risk not in the structured
+   data (NOTE_AMPLIFIES).
 
-- Ollama installed and running: https://ollama.com
-- Model pulled: ``ollama pull phi4-mini``
-- ``stage3.enabled: true`` in ``config.yaml``
+2. ``primary_category`` — the dominant clinical domain driving any discordance.
 
-Usage::
+3. ``explanation`` — a single sentence for the clinical record that synthesises
+   both Stage 1 structured signals and Stage 2 discharge note evidence.
 
-    python -m src.stage3.run
-    python -m src.stage3.run --input models/stage2_results.csv
+phi4-mini is called once per patient and asked to return a JSON object.
+``format="json"`` is passed to Ollama to enforce structured output.
+
+Constants
+---------
+DISCORDANCE_MODES      : valid values for the discordance_mode field.
+DISCORDANCE_CATEGORIES : valid values for the primary_category field.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import textwrap
 from typing import Any
 
 try:
     import ollama
-except ImportError as _ollama_err:
+except ImportError as _err:
     raise ImportError(
-        "Ollama is required for Stage 3. "
-        "Install with: pip install ollama  and  ollama pull phi4-mini"
-    ) from _ollama_err
+        "Ollama is required for Stage 3.  "
+        "Install with: pip install ollama  then  ollama pull phi4-mini"
+    ) from _err
 
 from src.config_schema import AppConfig
 
 
+# ── Taxonomy constants ─────────────────────────────────────────────────────────
+
+DISCORDANCE_MODES: tuple[str, ...] = (
+    "CONCORDANT",      # note and structured data tell the same story
+    "NOTE_MITIGATES",  # note has reassuring factors despite bad structured numbers
+    "NOTE_AMPLIFIES",  # note reveals additional risk not captured in structured data
+)
+
+DISCORDANCE_CATEGORIES: tuple[str, ...] = (
+    "social_support",       # family support, home care, social isolation
+    "discharge_planning",   # follow-up scheduled, care coordination quality
+    "functional_status",    # mobility, ADL capacity, independence level
+    "frailty_markers",      # explicit frailty language, debility, falls history
+    "medication_adherence", # patient understanding, pill management, polypharmacy
+    "housing_social_risk",  # lives alone, housing instability, homelessness
+    "care_complexity",      # multiple specialists, complex discharge regimen
+    "cognition",            # delirium, dementia, confusion documented in note
+    "structured_confirmed", # note mirrors / reinforces the lab or vital signals
+)
+
+
+# ── Prompt templates ───────────────────────────────────────────────────────────
+
 _SYSTEM_PROMPT = textwrap.dedent("""
-    You are a clinical decision support assistant helping hospital staff understand
-    readmission risk predictions made by an ML model.
+    You are a clinical NLP system.  Your task is to classify the relationship
+    between structured EHR risk signals (Stage 1) and discharge note evidence
+    (Stage 2) for hospital readmission prediction.
 
-    Your task is to translate model outputs and patient risk factors into a clear,
-    concise explanation for clinical review.
-
-    Rules:
-    - Write exactly 3 to 5 sentences.
-    - Use plain language; avoid unnecessary jargon.
-    - Only refer to factors explicitly present in the patient profile below.
-    - Do not diagnose, prescribe, or make clinical recommendations.
-    - Do not invent or infer information not stated in the profile.
+    Return ONLY a JSON object — no text outside the JSON.
+    Temperature is low; be consistent and precise.
 """).strip()
-
 
 _USER_TEMPLATE = textwrap.dedent("""
-    A patient has been flagged as high risk for unplanned 30-day hospital readmission
-    by a two-stage ML pipeline (Stage 1: structured EHR data; Stage 2: clinical notes).
+    A patient was processed by a two-stage readmission prediction pipeline:
+      Stage 1 (XGBoost on structured EHR data) flagged this patient as HIGH RISK.
+      Stage 2 (Clinical-Longformer on discharge note) {stage2_verdict}.
 
-    Patient risk profile:
-    - Age: {age} years
-    - Gender: {gender}
-    - Length of stay: {los_days} days
-    - Admission type: {admission_type}
-    - Came via emergency department: {came_via_ed}
-    - Discharged to: {discharge_location}
-    - Prior admissions (this hospitalisation): {n_prior_admissions}
-    - Days since last discharge: {days_since_last_discharge}
-    - Charlson Comorbidity Index: {charlson_index} (number of conditions: {n_comorbidities})
-    - Last creatinine: {creatinine}
-    - Last WBC: {wbc}
-    - Stage 1 risk score: {stage1_score} (flag threshold: {stage1_threshold})
-    - Stage 2 confirmation score: {stage2_score}
+    STAGE 1 — top risk drivers from structured data:
+    {shap_features}
 
-    Write a brief, plain-language explanation of why this patient is at elevated risk
-    of readmission within 30 days.
+    STAGE 2 — key sentences from discharge note (highest model attention):
+    {note_sentences}
+
+    TASK: Classify the relationship between the structured risk signal and the
+    discharge note evidence.
+
+    Return a JSON object with exactly these three fields:
+
+    "discordance_mode": one of {modes}
+      CONCORDANT     — note and structured data agree on risk level
+      NOTE_MITIGATES — note contains reassuring content despite bad structured numbers
+      NOTE_AMPLIFIES — note reveals additional risk not captured in structured data
+
+    "primary_category": the single most important clinical domain. Choose one of:
+      {categories}
+
+    "explanation": one sentence for the clinical record explaining, in plain
+      language, why Stage 2 {confirmed_or_rejected} the Stage 1 flag and what
+      information in the discharge note drove that decision.
+
+    Return ONLY valid JSON.  No commentary outside the JSON object.
 """).strip()
 
 
-def _fmt(val: Any, decimals: int = 1) -> str:
-    """Format a value for inclusion in the prompt, handling NaN/None cleanly."""
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _fmt(val: Any, decimals: int = 2) -> str:
     if val is None:
-        return "not available"
+        return "N/A"
     try:
         if math.isnan(float(val)):
-            return "not available"
+            return "N/A"
     except (TypeError, ValueError):
         pass
     if isinstance(val, float):
@@ -86,108 +118,162 @@ def _fmt(val: Any, decimals: int = 1) -> str:
     return str(val)
 
 
-def build_prompt(patient: dict) -> str:
-    """Construct the user prompt from a patient feature dict.
+def _parse_response(raw: str) -> dict:
+    """Parse phi4-mini JSON response; return safe defaults on failure."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # Try to salvage a partial JSON block
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                data = json.loads(raw[start:end])
+            except (json.JSONDecodeError, ValueError):
+                return {
+                    "discordance_mode": "CONCORDANT",
+                    "primary_category": "structured_confirmed",
+                    "explanation": raw.strip()[:300],
+                }
+        else:
+            return {
+                "discordance_mode": "CONCORDANT",
+                "primary_category": "structured_confirmed",
+                "explanation": raw.strip()[:300],
+            }
+
+    return {
+        "discordance_mode": data.get("discordance_mode", "CONCORDANT"),
+        "primary_category": data.get("primary_category", "structured_confirmed"),
+        "explanation": data.get("explanation", ""),
+    }
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def build_prompt(
+    stage2_confirmed: bool,
+    stage2_score: float,
+    shap_feature_strings: list[str],
+    attention_sentences: list[str],
+) -> str:
+    """Build the Stage 3 user prompt for one patient.
 
     Args:
-        patient: dict containing patient features and stage scores.
+        stage2_confirmed:     True if Stage 2 confirmed the Stage 1 flag.
+        stage2_score:         Stage 2 probability after calibration.
+        shap_feature_strings: top-k feature strings from extract_shap_features().
+        attention_sentences:  top-n sentences from extract_attention_spans().
 
     Returns:
-        Formatted prompt string ready to send to the LLM.
+        Formatted prompt string.
     """
+    verdict = (
+        f"CONFIRMED the flag (score={stage2_score:.3f})"
+        if stage2_confirmed
+        else f"REJECTED the flag (score={stage2_score:.3f})"
+    )
+    confirmed_or_rejected = "confirmed" if stage2_confirmed else "rejected"
+
+    if shap_feature_strings:
+        shap_block = "\n".join(f"  - {f}" for f in shap_feature_strings)
+    else:
+        shap_block = "  (not available)"
+
+    if attention_sentences:
+        note_block = "\n".join(
+            f"  [{j + 1}] {s}" for j, s in enumerate(attention_sentences)
+        )
+    else:
+        note_block = "  (discharge note not available)"
+
     return _USER_TEMPLATE.format(
-        age=_fmt(patient.get("age"), 0),
-        gender=patient.get("gender", "unknown"),
-        los_days=_fmt(patient.get("los_days")),
-        admission_type=(
-            "emergency" if patient.get("admission_type_emergency") else "non-emergency"
-        ),
-        came_via_ed="yes" if patient.get("came_via_ed") else "no",
-        discharge_location=(
-            "facility (SNF/rehab)" if patient.get("discharged_to_facility") else "home"
-        ),
-        n_prior_admissions=int(patient.get("n_prior_admissions", 0)),
-        days_since_last_discharge=_fmt(patient.get("days_since_last_discharge"), 0),
-        charlson_index=_fmt(patient.get("charlson_index"), 0),
-        n_comorbidities=int(patient.get("n_comorbidities", 0)),
-        creatinine=_fmt(patient.get("creatinine_last")),
-        wbc=_fmt(patient.get("white_blood_cells_last")),
-        stage1_score=_fmt(patient.get("stage1_score"), 3),
-        stage1_threshold=_fmt(patient.get("stage1_threshold"), 3),
-        stage2_score=_fmt(patient.get("stage2_score"), 3),
+        stage2_verdict=verdict,
+        shap_features=shap_block,
+        note_sentences=note_block,
+        modes=str(DISCORDANCE_MODES),
+        categories=str(DISCORDANCE_CATEGORIES),
+        confirmed_or_rejected=confirmed_or_rejected,
     )
 
 
-def generate_explanation(patient: dict, cfg: AppConfig) -> str:
-    """Call Ollama to generate a plain-language readmission risk explanation.
+def annotate_patient(
+    patient: dict,
+    shap_feature_strings: list[str],
+    attention_sentences: list[str],
+    cfg: AppConfig,
+) -> dict:
+    """Generate discordance annotation + clinician explanation for one patient.
 
     Args:
-        patient: dict containing patient features and stage scores.
-        cfg:     validated project config.
+        patient:              dict containing at least ``stage2_confirmed`` and
+                              ``stage2_score`` keys.
+        shap_feature_strings: from extract_shap_features(), may be empty.
+        attention_sentences:  from extract_attention_spans(), may be empty.
+        cfg:                  validated project config.
 
     Returns:
-        Explanation string. Empty string if ``stage3.enabled`` is ``False``.
-
-    Raises:
-        ollama.ResponseError: if Ollama is not running or model not pulled.
+        Dict with keys ``discordance_mode``, ``primary_category``,
+        ``explanation``.  On Ollama error, safe defaults are returned.
     """
-    if not cfg.stage3.enabled:
-        return ""
+    confirmed = bool(patient.get("stage2_confirmed", 0))
+    score = float(patient.get("stage2_score", 0.0))
+    prompt = build_prompt(confirmed, score, shap_feature_strings, attention_sentences)
 
-    model = cfg.stage3.ollama_model
-    temperature = cfg.stage3.temperature
+    try:
+        response = ollama.chat(
+            model=cfg.stage3.ollama_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.1},  # low temp for consistent classification
+            format="json",
+        )
+        raw = response["message"]["content"]
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return {
+            "discordance_mode": "CONCORDANT",
+            "primary_category": "structured_confirmed",
+            "explanation": f"[generation failed: {exc}]",
+        }
 
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": build_prompt(patient)},
-        ],
-        options={"temperature": temperature},
-    )
-    return response["message"]["content"].strip()
+    return _parse_response(raw)
 
 
-def generate_explanations_batch(
+def annotate_batch(
     patients: list[dict],
+    shap_features_list: list[list[str]],
+    attention_spans: dict[int, list[str]],
     cfg: AppConfig,
     verbose: bool = True,
 ) -> list[dict]:
-    """Generate explanations for a list of confirmed high-risk patients.
-
-    Returns the input list with an added ``'explanation'`` key per patient
-    dict. Failures per patient are caught individually so one bad call does
-    not abort the batch.
+    """Annotate a batch of patients with discordance labels and explanations.
 
     Args:
-        patients: list of patient feature dicts.
-        cfg:      validated project config.
-        verbose:  if ``True``, print a preview of each explanation.
+        patients:           list of patient dicts (must have ``hadm_id``,
+                            ``stage2_confirmed``, ``stage2_score``).
+        shap_features_list: one list of strings per patient (same order).
+        attention_spans:    dict mapping hadm_id -> list of top sentences.
+        cfg:                validated project config.
+        verbose:            print progress lines.
 
     Returns:
-        List of dicts with an added ``'explanation'`` key.
+        Input patients list with added keys: ``discordance_mode``,
+        ``primary_category``, ``explanation``.
     """
-    if not cfg.stage3.enabled:
-        print("[stage3] Disabled in config (stage3.enabled: false). Skipping.")
-        return [{**p, "explanation": ""} for p in patients]
-
     model = cfg.stage3.ollama_model
-    print(f"[stage3] Generating explanations with '{model}' for {len(patients):,} patients...")
+    n = len(patients)
+    print(f"[stage3/explain] Annotating {n:,} patients with '{model}' ...")
 
     results = []
-    for i, patient in enumerate(patients):
-        try:
-            explanation = generate_explanation(patient, cfg)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            # Catch all exceptions so a single failed API call does not abort
-            # the entire batch; the error is surfaced in the explanation field.
-            explanation = f"[generation failed: {exc}]"
+    for i, (patient, shap_strs) in enumerate(zip(patients, shap_features_list)):
+        hadm_id = int(patient.get("hadm_id", 0))
+        attn = attention_spans.get(hadm_id, [])
+        annotation = annotate_patient(patient, shap_strs, attn, cfg)
+        results.append({**patient, **annotation})
 
-        results.append({**patient, "explanation": explanation})
-
-        if verbose:
-            hadm = patient.get("hadm_id", i)
-            preview = explanation[:90].replace("\n", " ")
-            print(f"  [{i + 1}/{len(patients)}] hadm_id={hadm}: {preview}...")
+        if verbose and (i + 1) % 50 == 0:
+            print(f"  {i + 1}/{n}")
 
     return results

@@ -16,7 +16,8 @@ set -o pipefail # catch errors inside pipes
 
 # ── Environment ──────────────────────────────────────────────
 module load miniforge3
-source activate thesis-env
+eval "$(conda shell.bash hook)"   # initialise conda shell functions without needing `conda init`
+conda activate thesis-env
 cd ~/thesis
 
 # ── Pre-flight checks ────────────────────────────────────────

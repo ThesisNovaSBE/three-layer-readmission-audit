@@ -8,7 +8,7 @@ A three-stage "Triage-and-Verify" pipeline for predicting unplanned 30-day hospi
 
 **Stage 2 — Verify (Clinical-Longformer):** A fine-tuned `yikuan8/Clinical-Longformer` reads discharge notes of flagged patients and prunes false positives (+21% precision, retains 70.9% of true positives in the notes cohort).
 
-**Stage 3 — Explain (phi4-mini):** A local generative model (Ollama) writes plain-language readmission risk explanations for confirmed patients, delivered to the responsible clinician.
+**Stage 3 — Analyse + Explain (phi4-mini):** A local generative model (Ollama) annotates every Stage 1 flagged patient (confirmed and rejected) with a cross-modal discordance label — whether the discharge note agrees with, mitigates, or amplifies the structured EHR risk signal. Population-level aggregation across all patients produces a quantitative finding on what clinical domains in notes change readmission predictions beyond structured data. A clinician-facing explanation is also generated per patient.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
 
@@ -120,6 +120,7 @@ The dashboard has two views:
 | `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
 | `setup_stage3.py --limit N` | Generate Stage 3 explanations (N = sample size) |
 | `train_stage2.sh` | Slurm job script for HPC/GPU training (GWDG KISSKI A100) |
+| `diagnose_cluster.sh` | Cluster diagnostic job (checks env, GPU, paths) |
 | `analyse_age_fairness.py` | Age-group fairness analysis on Stage 1 results |
 
 ---
