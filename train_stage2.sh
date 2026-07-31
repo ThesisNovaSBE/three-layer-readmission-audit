@@ -16,8 +16,13 @@ set -o pipefail # catch errors inside pipes
 
 # ── Environment ──────────────────────────────────────────────
 module load miniforge3
-source activate thesis-env
+eval "$(conda shell.bash hook)"   # initialise conda shell functions without needing `conda init`
+conda activate thesis-env
 cd ~/thesis
+
+# Compute nodes have no internet — force HuggingFace to use local cache only.
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 # ── Pre-flight checks ────────────────────────────────────────
 echo "=== Pre-flight checks ==="
@@ -31,6 +36,9 @@ python --version
 
 echo "Checking Stage 1 artifact..."
 ls -lh models/stage1_xgboost.joblib
+
+echo "Checking local Clinical-Longformer model..."
+ls -lh models/clinical_longformer/config.json
 
 echo "Checking MIMIC-IV-Note path..."
 python -c "
