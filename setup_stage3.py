@@ -31,6 +31,8 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 from src.config import get_model_dir, load_config
 
 
@@ -126,7 +128,6 @@ def main() -> None:
 
     check_prerequisites(cfg, results_path)
 
-    import pandas as pd
     stage2_df = pd.read_csv(results_path)
     n_total = len(stage2_df)
     n_confirmed = int((stage2_df["stage2_confirmed"] == 1).sum())

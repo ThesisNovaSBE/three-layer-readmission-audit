@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this code in academic work, please cite it as below."
+type: software
+title: "Cross-Modal Discordance Analysis for 30-Day Hospital Readmission Prediction"
+abstract: >
+  A three-stage readmission prediction pipeline combining XGBoost on structured
+  EHR features (Stage 1), Clinical-Longformer on discharge notes (Stage 2), and
+  cross-modal discordance analysis via phi4-mini (Stage 3) to characterise
+  agreement and disagreement between structured and unstructured clinical data.
+  Trained and evaluated on MIMIC-IV.
+authors:
+  - family-names: Stenzel
+    given-names: Lennart
+    email: <email-removed>
+    affiliation: Nova School of Business and Economics
+version: "0.1.0"
+date-released: "2026-07-31"
+license: MIT
+repository-code: "https://github.com/LennartStenzel/readmission-prediction"
+keywords:
+  - hospital readmission prediction
+  - clinical NLP
+  - discharge notes
+  - MIMIC-IV
+  - XGBoost
+  - Clinical-Longformer
+  - cross-modal discordance analysis
+  - explainability
+  - SHAP
+preferred-citation:
+  type: thesis
+  title: "Cross-Modal Discordance Analysis for 30-Day Hospital Readmission Prediction: Combining Structured EHR Features with Clinical Discharge Notes"
+  authors:
+    - family-names: Stenzel
+      given-names: Lennart
+  institution:
+    name: Nova School of Business and Economics
+  year: 2026

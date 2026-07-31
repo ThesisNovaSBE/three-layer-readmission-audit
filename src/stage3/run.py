@@ -40,7 +40,7 @@ from src.schemas import TARGET_COL
 from src.stage2._utils import band_key
 from src.stage2.dataset import build_notes_dataframe, load_notes
 from src.stage3.attention import extract_attention_spans
-from src.stage3.categorize import aggregate_discordance, run_categorize
+from src.stage3.categorize import aggregate_discordance
 from src.stage3.explain import annotate_batch
 from src.stage3.shap_extract import extract_shap_features
 

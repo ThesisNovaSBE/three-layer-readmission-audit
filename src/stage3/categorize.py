@@ -46,52 +46,66 @@ def aggregate_discordance(df: pd.DataFrame) -> dict:
     confirmed = int(df["stage2_confirmed"].sum()) if "stage2_confirmed" in df.columns else n
     rejected = n - confirmed
 
-    # ── Mode distribution ─────────────────────────────────────────────────────
+    # Exclude annotation failures from distribution analysis
+    fail_col = "annotation_failed"
+    if fail_col in df.columns:
+        n_failed = int(df[fail_col].fillna(True).sum())
+        valid_df = df[~df[fail_col].fillna(True)]
+    else:
+        n_failed = 0
+        valid_df = df
+
+    n_valid = len(valid_df)
+    failure_rate = round(n_failed / max(n, 1) * 100, 1)
+
+    # ── Mode distribution (valid annotations only) ────────────────────────────
     mode_counts: dict[str, int] = {m: 0 for m in DISCORDANCE_MODES}
-    for mode in df.get("discordance_mode", []):
-        if mode in mode_counts:
-            mode_counts[mode] += 1
-        else:
-            mode_counts["CONCORDANT"] += 1
+    if "discordance_mode" in valid_df.columns:
+        for mode in valid_df["discordance_mode"].dropna():
+            if mode in mode_counts:
+                mode_counts[mode] += 1
 
-    mode_pct = {k: round(v / n * 100, 1) for k, v in mode_counts.items()}
+    denom = max(n_valid, 1)
+    mode_pct = {k: round(v / denom * 100, 1) for k, v in mode_counts.items()}
 
-    # ── Category distribution (overall) ───────────────────────────────────────
+    # ── Category distribution (overall, valid only) ───────────────────────────
     cat_counts: dict[str, int] = {c: 0 for c in DISCORDANCE_CATEGORIES}
-    for cat in df.get("primary_category", []):
-        if cat in cat_counts:
-            cat_counts[cat] += 1
-        else:
-            cat_counts["structured_confirmed"] += 1
+    if "primary_category" in valid_df.columns:
+        for cat in valid_df["primary_category"].dropna():
+            if cat in cat_counts:
+                cat_counts[cat] += 1
 
-    cat_pct = {k: round(v / n * 100, 1) for k, v in cat_counts.items()}
+    cat_pct = {k: round(v / denom * 100, 1) for k, v in cat_counts.items()}
 
-    # ── Category by discordance mode ──────────────────────────────────────────
+    # ── Category by discordance mode (valid only) ─────────────────────────────
     cat_by_mode: dict[str, dict[str, int]] = {}
     for mode in DISCORDANCE_MODES:
-        sub = df[df["discordance_mode"] == mode]
+        sub = valid_df[valid_df["discordance_mode"] == mode] if "discordance_mode" in valid_df.columns else pd.DataFrame()
         if len(sub) == 0:
             cat_by_mode[mode] = {}
             continue
         counts = sub["primary_category"].value_counts().to_dict()
         cat_by_mode[mode] = {k: int(v) for k, v in counts.items()}
 
-    # ── Category by age group (if age_band available) ─────────────────────────
+    # ── Category by age group (valid only) ────────────────────────────────────
     cat_by_age: dict[str, dict[str, int]] = {}
-    if "age_band" in df.columns:
-        for band, grp in df.groupby("age_band"):
+    if "age_band" in valid_df.columns and "primary_category" in valid_df.columns:
+        for band, grp in valid_df.groupby("age_band"):
             counts = grp["primary_category"].value_counts().to_dict()
             cat_by_age[str(band)] = {k: int(v) for k, v in counts.items()}
 
-    # ── Note_mitigates breakdown — most interesting for thesis ────────────────
-    mitigated = df[df["discordance_mode"] == "NOTE_MITIGATES"]
+    # ── Note_mitigates / amplifies breakdown ──────────────────────────────────
+    mitigated = valid_df[valid_df.get("discordance_mode", pd.Series(dtype=str)) == "NOTE_MITIGATES"] if "discordance_mode" in valid_df.columns else pd.DataFrame()
     mitigated_cats = mitigated["primary_category"].value_counts().to_dict() if len(mitigated) > 0 else {}
 
-    amplified = df[df["discordance_mode"] == "NOTE_AMPLIFIES"]
+    amplified = valid_df[valid_df["discordance_mode"] == "NOTE_AMPLIFIES"] if "discordance_mode" in valid_df.columns else pd.DataFrame()
     amplified_cats = amplified["primary_category"].value_counts().to_dict() if len(amplified) > 0 else {}
 
     return {
         "n_patients": n,
+        "n_valid_annotations": n_valid,
+        "n_annotation_failures": n_failed,
+        "annotation_failure_rate_pct": failure_rate,
         "n_confirmed": confirmed,
         "n_rejected": rejected,
         "pct_confirmed": round(confirmed / n * 100, 1),

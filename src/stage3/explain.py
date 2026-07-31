@@ -118,34 +118,49 @@ def _fmt(val: Any, decimals: int = 2) -> str:
     return str(val)
 
 
+_PARSE_FAILURE: dict = {
+    "discordance_mode": None,
+    "primary_category": None,
+    "explanation": "",
+    "annotation_failed": True,
+}
+
+
 def _parse_response(raw: str) -> dict:
-    """Parse phi4-mini JSON response; return safe defaults on failure."""
+    """Parse phi4-mini JSON response.
+
+    Returns a dict with ``annotation_failed=True`` (and ``None`` mode/category)
+    on any parse error so failures are excluded from population aggregation
+    rather than silently counted as CONCORDANT.
+    """
+    data: dict | None = None
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        # Try to salvage a partial JSON block
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start != -1 and end > start:
             try:
                 data = json.loads(raw[start:end])
             except (json.JSONDecodeError, ValueError):
-                return {
-                    "discordance_mode": "CONCORDANT",
-                    "primary_category": "structured_confirmed",
-                    "explanation": raw.strip()[:300],
-                }
-        else:
-            return {
-                "discordance_mode": "CONCORDANT",
-                "primary_category": "structured_confirmed",
-                "explanation": raw.strip()[:300],
-            }
+                pass
+
+    if data is None:
+        return {**_PARSE_FAILURE, "explanation": raw.strip()[:300]}
+
+    mode = data.get("discordance_mode", "")
+    cat = data.get("primary_category", "")
+    valid_mode = mode if mode in DISCORDANCE_MODES else None
+    valid_cat = cat if cat in DISCORDANCE_CATEGORIES else None
+
+    if valid_mode is None or valid_cat is None:
+        return {**_PARSE_FAILURE, "explanation": data.get("explanation", raw.strip()[:300])}
 
     return {
-        "discordance_mode": data.get("discordance_mode", "CONCORDANT"),
-        "primary_category": data.get("primary_category", "structured_confirmed"),
+        "discordance_mode": valid_mode,
+        "primary_category": valid_cat,
         "explanation": data.get("explanation", ""),
+        "annotation_failed": False,
     }
 
 
@@ -230,13 +245,9 @@ def annotate_patient(
             options={"temperature": 0.1},  # low temp for consistent classification
             format="json",
         )
-        raw = response["message"]["content"]
+        raw = response.message.content
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {
-            "discordance_mode": "CONCORDANT",
-            "primary_category": "structured_confirmed",
-            "explanation": f"[generation failed: {exc}]",
-        }
+        return {**_PARSE_FAILURE, "explanation": f"[ollama error: {exc}]"}
 
     return _parse_response(raw)
 
