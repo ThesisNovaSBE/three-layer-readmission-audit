@@ -76,7 +76,7 @@ def extract_shap_features(
     gains: np.ndarray | None = None
 
     try:
-        import shap  # optional dependency
+        import shap  # optional dependency  # pylint: disable=import-outside-toplevel
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             explainer = shap.TreeExplainer(model)

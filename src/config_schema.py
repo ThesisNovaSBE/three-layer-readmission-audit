@@ -130,10 +130,10 @@ class Stage3Config(BaseModel):
     enabled: bool = False
     ollama_model: str = "phi4-mini"
     temperature: float = 0.3
-    discordance_analysis: bool = True       # cross-modal concordance / discordance analysis
-    attention_extraction: bool = True       # extract Longformer attention spans (needs trained model)
-    top_attention_sentences: int = 5        # sentences to extract per patient
-    top_shap_features: int = 5              # Stage 1 SHAP features to include per patient
+    discordance_analysis: bool = True    # cross-modal concordance / discordance analysis
+    attention_extraction: bool = True    # extract Longformer attention spans (needs trained model)
+    top_attention_sentences: int = 5     # sentences to extract per patient
+    top_shap_features: int = 5           # Stage 1 SHAP features to include per patient
 
 
 class OutputConfig(BaseModel):

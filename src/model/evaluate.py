@@ -27,6 +27,17 @@ from src.data.features import load_feature_matrix, split_xy
 from src.model.metrics import full_report
 
 
+# Published AUROC benchmarks on MIMIC-IV 30-day readmission for context.
+# Sources: Rajkomar et al. (2018) Nature Medicine; Xiao et al. (2018) MIMIC-Extract;
+# van Walraven et al. (2010) LACE index; Fraccaro et al. (2016) EHR notes baseline.
+_PUBLISHED_AUROC = {
+    "LACE index (van Walraven 2010)": 0.694,
+    "EHR structured baseline (Xiao 2018)": 0.715,
+    "Deep EHR (Rajkomar 2018)": 0.773,
+    "Clinical notes baseline (Fraccaro 2016)": 0.684,
+}
+
+
 def _print_report(report: dict, name: str) -> None:
     """Print a human-readable evaluation summary to stdout."""
     print("\n" + "=" * 64)
@@ -52,6 +63,13 @@ def _print_report(report: dict, name: str) -> None:
             f"precision={row['precision']:.3f} specificity={row['specificity']:.3f} "
             f"(thr={row['threshold']:.4f})"
         )
+
+    print("\n  Published AUROC benchmarks (MIMIC-IV / MIMIC-III, 30-day readmission):")
+    our_auroc = report["auroc"]
+    for ref, val in _PUBLISHED_AUROC.items():
+        delta = our_auroc - val
+        sign = "+" if delta >= 0 else ""
+        print(f"    {ref:<44} {val:.3f}  (ours {sign}{delta:+.3f})")
 
     print("\n  Subgroup AUROC (fairness check):")
     for col, levels in report["subgroup_auroc"].items():
@@ -92,6 +110,7 @@ def evaluate(cfg: AppConfig) -> dict:
         cfg.stage1.recall_report_points, subgroups=sub_test,
     )
 
+    report["published_auroc_benchmarks"] = _PUBLISHED_AUROC
     _print_report(report, name)
 
     out_path = model_dir / f"{name}_metrics.json"

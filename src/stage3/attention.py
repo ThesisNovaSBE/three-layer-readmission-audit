@@ -6,6 +6,13 @@ from the [CLS] (classification) token.  These spans represent what Stage 2
 "looked at" when making its confirm / reject decision, and form the core of
 the cross-modal discordance analysis in Stage 3.
 
+Caveat (Jain & Wallace 2019 / Wiegreffe & Pinter 2019): raw attention weights
+are not guaranteed to be faithful explanations of model decisions.  They
+correlate with gradient-based attribution in many practical cases but should
+be treated as *indicative* rather than *causal* in the thesis.  The attention
+spans are used here only to ground the phi4-mini prompt with salient note
+context, not as standalone proofs of which sentences caused the prediction.
+
 If the fine-tuned model has not been saved yet (training in progress) or
 PyTorch is unavailable, returns empty lists so the rest of Stage 3 can still
 run without attention context.
@@ -16,16 +23,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from src.stage2._utils import get_stage2_model_path
+
 _TORCH_AVAILABLE = False
 try:
     import torch
-    from torch.utils.data import DataLoader
     from transformers import AutoTokenizer, LongformerForSequenceClassification
     _TORCH_AVAILABLE = True
 except ImportError:
     pass
-
-from src.stage2._utils import get_stage2_model_path
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -156,5 +162,5 @@ def extract_attention_spans(
         if (i + 1) % 100 == 0:
             print(f"  {i + 1}/{len(hadm_ids)}")
 
-    print(f"[stage3/attention] Done.")
+    print("[stage3/attention] Done.")
     return result

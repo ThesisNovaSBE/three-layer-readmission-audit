@@ -34,7 +34,8 @@ def extract_cohort(cfg: AppConfig | None = None) -> pd.DataFrame:
     Raises:
         FileNotFoundError: if MIMIC-IV data paths are not configured.
     """
-    from src.data.features import (  # imported here to avoid circular deps
+    # pylint: disable=import-outside-toplevel  # avoids circular import at module level
+    from src.data.features import (
         _apply_cohort_filters,
         compute_readmission_label,
         load_raw_tables,

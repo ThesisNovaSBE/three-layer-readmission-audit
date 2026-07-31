@@ -35,9 +35,8 @@ import pandas as pd
 
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
-from src.data.features import load_feature_matrix, split_xy
+from src.data.features import load_feature_matrix
 from src.schemas import TARGET_COL
-from src.stage2._utils import band_key
 from src.stage2.dataset import build_notes_dataframe, load_notes
 from src.stage3.attention import extract_attention_spans
 from src.stage3.categorize import aggregate_discordance
@@ -87,6 +86,60 @@ def _get_patient_features(
     return merged[available_feat].reset_index(drop=True)
 
 
+def _sample_stratified(df: pd.DataFrame, limit: int) -> pd.DataFrame:
+    """Stratified sample keeping confirmed/rejected representation."""
+    confirmed = df[df["stage2_confirmed"] == 1]
+    rejected = df[df["stage2_confirmed"] == 0]
+    n_conf = min(limit // 2, len(confirmed))
+    n_rej = min(limit - n_conf, len(rejected))
+    sampled = pd.concat([
+        confirmed.sample(n=n_conf, random_state=42),
+        rejected.sample(n=n_rej, random_state=42),
+    ]).reset_index(drop=True)
+    print(f"[stage3] Sampled {len(sampled):,} patients ({n_conf:,} confirmed, {n_rej:,} rejected).")
+    return sampled
+
+
+def _load_notes_map(df: pd.DataFrame, cfg: AppConfig) -> dict[int, str]:
+    """Return hadm_id -> discharge note text (empty dict on failure)."""
+    hadm_id_set = set(df["hadm_id"].astype(int).tolist())
+    try:
+        notes_raw = load_notes(cfg, hadm_ids=hadm_id_set)
+        notes_df = build_notes_dataframe(
+            notes_raw, df[["hadm_id", "subject_id", TARGET_COL]]
+        )
+        mapping = dict(zip(notes_df["hadm_id"].astype(int), notes_df["text"]))
+        print(f"[stage3] Discharge notes loaded for {len(mapping):,} patients.")
+        return mapping
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(f"[stage3] WARNING: Could not load discharge notes: {exc}")
+        return {}
+
+
+def _get_attention_spans(
+    df: pd.DataFrame,
+    hadm_to_text: dict[int, str],
+    model_dir: Path,
+    cfg: AppConfig,
+) -> dict[int, list[str]]:
+    """Extract attention spans; returns empty dict if disabled or model missing."""
+    if not cfg.stage3.attention_extraction or not hadm_to_text:
+        return {}
+    ordered_ids = [int(h) for h in df["hadm_id"]]
+    ordered_texts = [hadm_to_text.get(h, "") for h in ordered_ids]
+    ids_with_notes = [h for h, t in zip(ordered_ids, ordered_texts) if t]
+    texts_with_notes = [t for t in ordered_texts if t]
+    if not ids_with_notes:
+        return {}
+    return extract_attention_spans(
+        ids_with_notes,
+        texts_with_notes,
+        model_dir,
+        top_n=cfg.stage3.top_attention_sentences,
+        max_length=cfg.stage2.max_seq_length,
+    )
+
+
 def run_stage3(
     cfg: AppConfig,
     results_path: Path | None = None,
@@ -112,82 +165,40 @@ def run_stage3(
     model_dir = get_model_dir()
     results_path = results_path or model_dir / "stage2_results.csv"
 
-    # ── 1. Load Stage 2 results ───────────────────────────────────────────────
+    # ── 1. Load + optionally sample Stage 2 results ──────────────────────────
     df = _load_results(model_dir)
     print(
         f"[stage3] {len(df):,} Stage 1 flagged patients "
         f"({int(df['stage2_confirmed'].sum()):,} confirmed, "
         f"{int((df['stage2_confirmed'] == 0).sum()):,} rejected by Stage 2)"
     )
-
-    # ── 2. Attach age band ────────────────────────────────────────────────────
     df = _merge_age_band(df, cfg)
-
-    # ── 3. Sampling (if --limit) ──────────────────────────────────────────────
     if limit and len(df) > limit:
-        # Stratify by confirmed flag so both groups are represented
-        confirmed = df[df["stage2_confirmed"] == 1]
-        rejected = df[df["stage2_confirmed"] == 0]
-        n_conf = min(limit // 2, len(confirmed))
-        n_rej = min(limit - n_conf, len(rejected))
-        df = pd.concat([
-            confirmed.sample(n=n_conf, random_state=42),
-            rejected.sample(n=n_rej, random_state=42),
-        ]).reset_index(drop=True)
-        print(f"[stage3] Sampled {len(df):,} patients ({n_conf:,} confirmed, {n_rej:,} rejected).")
+        df = _sample_stratified(df, limit)
 
-    # ── 4. Load Stage 1 artifact + SHAP ──────────────────────────────────────
+    # ── 2. SHAP features ─────────────────────────────────────────────────────
     try:
         artifact = _load_artifact(cfg)
-        patient_features = _get_patient_features(df, artifact, cfg)
         shap_features_list = extract_shap_features(
-            artifact, patient_features, top_k=cfg.stage3.top_shap_features
+            artifact, _get_patient_features(df, artifact, cfg),
+            top_k=cfg.stage3.top_shap_features,
         )
         print(f"[stage3] SHAP features extracted for {len(df):,} patients.")
     except FileNotFoundError as exc:
         print(f"[stage3] WARNING: {exc}  — proceeding without SHAP features.")
         shap_features_list = [[] for _ in range(len(df))]
 
-    # ── 5. Load discharge notes ───────────────────────────────────────────────
-    hadm_id_set = set(df["hadm_id"].astype(int).tolist())
-    try:
-        notes_raw = load_notes(cfg, hadm_ids=hadm_id_set)
-        notes_df = build_notes_dataframe(
-            notes_raw, df[["hadm_id", "subject_id", TARGET_COL]]
-        )
-        hadm_to_text = dict(zip(notes_df["hadm_id"].astype(int), notes_df["text"]))
-        print(f"[stage3] Discharge notes loaded for {len(hadm_to_text):,} patients.")
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        print(f"[stage3] WARNING: Could not load discharge notes: {exc}")
-        hadm_to_text = {}
+    # ── 3. Discharge notes + attention spans ─────────────────────────────────
+    hadm_to_text = _load_notes_map(df, cfg)
+    attention_spans = _get_attention_spans(df, hadm_to_text, model_dir, cfg)
 
-    # ── 6. Attention extraction (optional) ────────────────────────────────────
-    attention_spans: dict[int, list[str]] = {}
-    if cfg.stage3.attention_extraction and hadm_to_text:
-        ordered_ids = [int(h) for h in df["hadm_id"]]
-        ordered_texts = [hadm_to_text.get(h, "") for h in ordered_ids]
-        # Only extract for patients that have a note
-        ids_with_notes = [h for h, t in zip(ordered_ids, ordered_texts) if t]
-        texts_with_notes = [t for t in ordered_texts if t]
-        if ids_with_notes:
-            attention_spans = extract_attention_spans(
-                ids_with_notes,
-                texts_with_notes,
-                model_dir,
-                top_n=cfg.stage3.top_attention_sentences,
-                max_length=cfg.stage2.max_seq_length,
-            )
-
-    # Add note text to patient dicts for explainability
+    # ── 4. phi4-mini annotation ───────────────────────────────────────────────
     patients = df.to_dict(orient="records")
     for p in patients:
         p["note_text"] = hadm_to_text.get(int(p.get("hadm_id", 0)), "")
 
-    # ── 7. phi4-mini annotation ───────────────────────────────────────────────
     annotated = annotate_batch(patients, shap_features_list, attention_spans, cfg)
     out_df = pd.DataFrame(annotated)
-
-    # Drop raw note text from saved output (MIMIC data must not persist)
     if "note_text" in out_df.columns:
         out_df = out_df.drop(columns=["note_text"])
 
@@ -195,7 +206,7 @@ def run_stage3(
     out_df.to_csv(out_path, index=False)
     print(f"[stage3] Saved per-patient results -> {out_path}")
 
-    # ── 8. Population-level aggregation ──────────────────────────────────────
+    # ── 5. Population-level aggregation ──────────────────────────────────────
     if cfg.stage3.discordance_analysis:
         analysis = aggregate_discordance(out_df)
         analysis_path = model_dir / "stage3_discordance_analysis.json"
