@@ -73,7 +73,9 @@ stage1:
 #   - Authors explicitly recommend it over Clinical-BigBird for limited-resource settings
 #   - Trained on MIMIC-III clinical notes — same domain as this project
 stage2:
-  model_name: "yikuan8/Clinical-Longformer"
+  # Local path set after running download_model.sh on the login node.
+  # Compute nodes on KISSKI have no internet — model must be pre-downloaded.
+  model_name: "models/clinical_longformer"
 
   # ── Sequence length ──
   # 2048 captures ~100% of the average MIMIC discharge note (~1900 tokens).
