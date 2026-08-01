@@ -37,7 +37,6 @@ from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import TARGET_COL
-from src.stage2.dataset import build_notes_dataframe, load_notes
 from src.stage3.attention import extract_attention_spans
 from src.stage3.categorize import aggregate_discordance
 from src.stage3.explain import annotate_batch
@@ -102,6 +101,9 @@ def _sample_stratified(df: pd.DataFrame, limit: int) -> pd.DataFrame:
 
 def _load_notes_map(df: pd.DataFrame, cfg: AppConfig) -> dict[int, str]:
     """Return hadm_id -> discharge note text (empty dict on failure)."""
+    # pylint: disable=import-outside-toplevel  # deferred: importing dataset.py
+    # initialises PyTorch/MPS, which must happen AFTER joblib XGBoost load
+    from src.stage2.dataset import build_notes_dataframe, load_notes
     hadm_id_set = set(df["hadm_id"].astype(int).tolist())
     try:
         notes_raw = load_notes(cfg, hadm_ids=hadm_id_set)
@@ -165,7 +167,17 @@ def run_stage3(
     model_dir = get_model_dir()
     results_path = results_path or model_dir / "stage2_results.csv"
 
-    # ── 1. Load + optionally sample Stage 2 results ──────────────────────────
+    # ── 1. Load Stage 1 artifact FIRST (must precede any large numpy allocation)
+    # On macOS ARM, joblib-deserialising an XGBoost pickle after a large
+    # pandas DataFrame is already in memory triggers a SIGSEGV in XGBoost's
+    # C++ layer.  Loading the artifact before the feature matrix avoids this.
+    try:
+        artifact = _load_artifact(cfg)
+    except FileNotFoundError as exc:
+        print(f"[stage3] WARNING: {exc}  — proceeding without SHAP features.")
+        artifact = None
+
+    # ── 2. Load + optionally sample Stage 2 results ──────────────────────────
     df = _load_results(model_dir)
     print(
         f"[stage3] {len(df):,} Stage 1 flagged patients "
@@ -176,23 +188,21 @@ def run_stage3(
     if limit and len(df) > limit:
         df = _sample_stratified(df, limit)
 
-    # ── 2. SHAP features ─────────────────────────────────────────────────────
-    try:
-        artifact = _load_artifact(cfg)
+    # ── 3. SHAP features ─────────────────────────────────────────────────────
+    if artifact is not None:
         shap_features_list = extract_shap_features(
             artifact, _get_patient_features(df, artifact, cfg),
             top_k=cfg.stage3.top_shap_features,
         )
         print(f"[stage3] SHAP features extracted for {len(df):,} patients.")
-    except FileNotFoundError as exc:
-        print(f"[stage3] WARNING: {exc}  — proceeding without SHAP features.")
+    else:
         shap_features_list = [[] for _ in range(len(df))]
 
-    # ── 3. Discharge notes + attention spans ─────────────────────────────────
+    # ── 4. Discharge notes + attention spans ─────────────────────────────────
     hadm_to_text = _load_notes_map(df, cfg)
     attention_spans = _get_attention_spans(df, hadm_to_text, model_dir, cfg)
 
-    # ── 4. phi4-mini annotation ───────────────────────────────────────────────
+    # ── 5. phi4-mini annotation ───────────────────────────────────────────────
     patients = df.to_dict(orient="records")
     for p in patients:
         p["note_text"] = hadm_to_text.get(int(p.get("hadm_id", 0)), "")
@@ -206,7 +216,7 @@ def run_stage3(
     out_df.to_csv(out_path, index=False)
     print(f"[stage3] Saved per-patient results -> {out_path}")
 
-    # ── 5. Population-level aggregation ──────────────────────────────────────
+    # ── 6. Population-level aggregation ──────────────────────────────────────
     if cfg.stage3.discordance_analysis:
         analysis = aggregate_discordance(out_df)
         analysis_path = model_dir / "stage3_discordance_analysis.json"
