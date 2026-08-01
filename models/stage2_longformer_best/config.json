@@ -1,4 +1,5 @@
 {
+  "_name_or_path": "models/clinical_longformer",
   "architectures": [
     "LongformerForSequenceClassification"
   ],
@@ -19,7 +20,6 @@
     512
   ],
   "bos_token_id": 0,
-  "dtype": "float32",
   "eos_token_id": 2,
   "gradient_checkpointing": false,
   "hidden_act": "gelu",
@@ -37,9 +37,9 @@
   "pad_token_id": 1,
   "position_embedding_type": "absolute",
   "sep_token_id": 2,
-  "tie_word_embeddings": true,
-  "transformers_version": "5.12.1",
+  "torch_dtype": "float32",
+  "transformers_version": "4.40.0",
   "type_vocab_size": 1,
-  "use_cache": false,
+  "use_cache": true,
   "vocab_size": 50265
 }
