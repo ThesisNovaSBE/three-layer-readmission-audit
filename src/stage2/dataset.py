@@ -13,17 +13,17 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.config_schema import AppConfig
+
 try:
     import torch
-    from torch.utils.data import Dataset
+    from torch.utils.data import Dataset as _TorchDataset
     from transformers import PreTrainedTokenizerBase
-except ImportError as _torch_err:
-    raise ImportError(
-        "Stage 2 requires PyTorch and Transformers. "
-        "Install with: pip install torch transformers"
-    ) from _torch_err
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+    _TorchDataset = object  # type: ignore[misc,assignment]  # sentinel base class
 
-from src.config_schema import AppConfig
 from src.schemas import TARGET_COL
 
 
@@ -126,7 +126,7 @@ def build_notes_dataframe(
     return merged.reset_index(drop=True)
 
 
-class ClinicalNotesDataset(Dataset):
+class ClinicalNotesDataset(_TorchDataset):  # type: ignore[valid-type]
     """PyTorch Dataset: tokenized clinical note + binary readmission label.
 
     Tokenizes lazily (one note per ``__getitem__`` call) rather than all at
@@ -139,7 +139,7 @@ class ClinicalNotesDataset(Dataset):
         self,
         texts: list[str],
         labels: list[int],
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: "PreTrainedTokenizerBase",
         max_length: int = 1024,
         group_weights: list[float] | None = None,
     ) -> None:
@@ -152,6 +152,11 @@ class ClinicalNotesDataset(Dataset):
             max_length:    maximum tokenization length (tokens).
             group_weights: optional per-sample age-group loss multipliers.
         """
+        if not _TORCH_AVAILABLE:
+            raise ImportError(
+                "Stage 2 requires PyTorch and Transformers. "
+                "Install with: pip install torch transformers"
+            )
         self.texts = texts
         self.labels = labels
         self.tokenizer = tokenizer

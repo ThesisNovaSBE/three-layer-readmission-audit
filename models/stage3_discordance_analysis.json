@@ -1,16 +1,16 @@
 {
-  "n_patients": 50,
-  "n_valid_annotations": 50,
+  "n_patients": 500,
+  "n_valid_annotations": 500,
   "n_annotation_failures": 0,
   "annotation_failure_rate_pct": 0.0,
-  "n_confirmed": 25,
-  "n_rejected": 25,
+  "n_confirmed": 250,
+  "n_rejected": 250,
   "pct_confirmed": 50.0,
   "mode_distribution": {
     "counts": {
-      "CONCORDANT": 25,
+      "CONCORDANT": 250,
       "NOTE_MITIGATES": 0,
-      "NOTE_AMPLIFIES": 25
+      "NOTE_AMPLIFIES": 250
     },
     "percentages": {
       "CONCORDANT": 50.0,
@@ -21,64 +21,68 @@
   "category_distribution": {
     "counts": {
       "social_support": 0,
-      "discharge_planning": 15,
+      "discharge_planning": 164,
       "functional_status": 0,
-      "frailty_markers": 1,
-      "medication_adherence": 10,
+      "frailty_markers": 6,
+      "medication_adherence": 94,
       "housing_social_risk": 0,
-      "care_complexity": 22,
+      "care_complexity": 215,
       "cognition": 0,
-      "structured_confirmed": 2
+      "structured_confirmed": 21
     },
     "percentages": {
       "social_support": 0.0,
-      "discharge_planning": 30.0,
+      "discharge_planning": 32.8,
       "functional_status": 0.0,
-      "frailty_markers": 2.0,
-      "medication_adherence": 20.0,
+      "frailty_markers": 1.2,
+      "medication_adherence": 18.8,
       "housing_social_risk": 0.0,
-      "care_complexity": 44.0,
+      "care_complexity": 43.0,
       "cognition": 0.0,
-      "structured_confirmed": 4.0
+      "structured_confirmed": 4.2
     }
   },
   "category_by_discordance_mode": {
     "CONCORDANT": {
-      "care_complexity": 15,
-      "medication_adherence": 9,
-      "frailty_markers": 1
+      "care_complexity": 159,
+      "medication_adherence": 84,
+      "frailty_markers": 6,
+      "discharge_planning": 1
     },
     "NOTE_MITIGATES": {},
     "NOTE_AMPLIFIES": {
-      "discharge_planning": 15,
-      "care_complexity": 7,
-      "structured_confirmed": 2,
-      "medication_adherence": 1
+      "discharge_planning": 163,
+      "care_complexity": 56,
+      "structured_confirmed": 21,
+      "medication_adherence": 10
     }
   },
   "category_by_age_group": {
     "18-40": {
-      "discharge_planning": 3,
-      "medication_adherence": 1,
-      "care_complexity": 1
+      "discharge_planning": 42,
+      "care_complexity": 32,
+      "medication_adherence": 10,
+      "structured_confirmed": 1
     },
     "41-55": {
-      "care_complexity": 6,
-      "discharge_planning": 3,
-      "medication_adherence": 2,
-      "structured_confirmed": 1
+      "care_complexity": 49,
+      "discharge_planning": 35,
+      "medication_adherence": 22,
+      "structured_confirmed": 5
     },
     "56-70": {
-      "care_complexity": 8,
-      "discharge_planning": 4,
-      "medication_adherence": 2,
-      "frailty_markers": 1
+      "care_complexity": 74,
+      "discharge_planning": 45,
+      "medication_adherence": 25,
+      "structured_confirmed": 6,
+      "frailty_markers": 4
     },
     "70+": {
-      "care_complexity": 7,
-      "medication_adherence": 5,
-      "discharge_planning": 5,
-      "structured_confirmed": 1
+      "care_complexity": 60,
+      "discharge_planning": 42,
+      "medication_adherence": 37,
+      "structured_confirmed": 9,
+      "frailty_markers": 2
     }
   },
   "note_mitigates": {
@@ -87,13 +91,13 @@
     "top_categories": {}
   },
   "note_amplifies": {
-    "n": 25,
+    "n": 250,
     "pct_of_confirmed": 100.0,
     "top_categories": {
-      "discharge_planning": 15,
-      "care_complexity": 7,
-      "structured_confirmed": 2,
-      "medication_adherence": 1
+      "discharge_planning": 163,
+      "care_complexity": 56,
+      "structured_confirmed": 21,
+      "medication_adherence": 10
     }
   }
 }

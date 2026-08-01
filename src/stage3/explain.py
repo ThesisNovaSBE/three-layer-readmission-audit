@@ -166,11 +166,15 @@ def _parse_response(raw: str) -> dict:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+_NOTE_TRUNCATE_CHARS = 1_500  # chars of raw note to pass when attention is absent
+
+
 def build_prompt(
     stage2_confirmed: bool,
     stage2_score: float,
     shap_feature_strings: list[str],
     attention_sentences: list[str],
+    note_text: str = "",
 ) -> str:
     """Build the Stage 3 user prompt for one patient.
 
@@ -179,6 +183,8 @@ def build_prompt(
         stage2_score:         Stage 2 probability after calibration.
         shap_feature_strings: top-k feature strings from extract_shap_features().
         attention_sentences:  top-n sentences from extract_attention_spans().
+        note_text:            raw discharge note text; used as fallback when
+                              attention_sentences is empty (e.g. --no-attention).
 
     Returns:
         Formatted prompt string.
@@ -199,6 +205,9 @@ def build_prompt(
         note_block = "\n".join(
             f"  [{j + 1}] {s}" for j, s in enumerate(attention_sentences)
         )
+    elif note_text.strip():
+        truncated = note_text.strip()[:_NOTE_TRUNCATE_CHARS]
+        note_block = f"  [full note, truncated to {_NOTE_TRUNCATE_CHARS} chars]\n  {truncated}"
     else:
         note_block = "  (discharge note not available)"
 
@@ -233,7 +242,8 @@ def annotate_patient(
     """
     confirmed = bool(patient.get("stage2_confirmed", 0))
     score = float(patient.get("stage2_score", 0.0))
-    prompt = build_prompt(confirmed, score, shap_feature_strings, attention_sentences)
+    note_text = str(patient.get("note_text", ""))
+    prompt = build_prompt(confirmed, score, shap_feature_strings, attention_sentences, note_text)
 
     try:
         response = ollama.chat(

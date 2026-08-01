@@ -77,6 +77,14 @@ def test_build_prompt_fallback_when_no_attention():
     assert "not available" in prompt
 
 
+def test_build_prompt_uses_note_text_when_no_attention():
+    """Raw note text must appear in prompt when attention spans are absent."""
+    note = "Patient is doing well. Follow-up arranged with PCP in two weeks."
+    prompt = build_prompt(False, 0.15, [], [], note_text=note)
+    assert "(discharge note not available)" not in prompt
+    assert "Patient is doing well" in prompt
+
+
 def test_build_prompt_modes_in_prompt():
     prompt = build_prompt(True, 0.5, [], [])
     for mode in DISCORDANCE_MODES:
