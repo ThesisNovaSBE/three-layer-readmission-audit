@@ -20,18 +20,19 @@ run without attention context.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
 from src.stage2._utils import get_stage2_model_path
 
-_TORCH_AVAILABLE = False
-try:
-    import torch
-    from transformers import AutoTokenizer, LongformerForSequenceClassification
-    _TORCH_AVAILABLE = True
-except ImportError:
-    pass
+# Check availability without importing — importing torch at module level
+# initialises PyTorch/MPS on macOS ARM and corrupts XGBoost joblib
+# deserialisation when a large numpy array is later allocated (SIGSEGV).
+_TORCH_AVAILABLE = (
+    importlib.util.find_spec("torch") is not None
+    and importlib.util.find_spec("transformers") is not None
+)
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -107,6 +108,10 @@ def extract_attention_spans(
     if not _TORCH_AVAILABLE:
         print("[stage3/attention] PyTorch not available — skipping.")
         return empty
+
+    # pylint: disable=import-outside-toplevel
+    import torch
+    from transformers import AutoTokenizer, LongformerForSequenceClassification
 
     try:
         stage2_path = get_stage2_model_path(model_dir)

@@ -109,10 +109,17 @@ def main() -> None:
         help="Process this many patients (stratified sample; default: all). "
              "500 patients ≈ 30-60 min with phi4-mini."
     )
+    parser.add_argument(
+        "--no-attention", action="store_true",
+        help="Skip Longformer attention extraction (required on CPU/Mac — "
+             "loading 2048-token attention matrices OOMs without a GPU)."
+    )
     args = parser.parse_args()
 
     cfg = load_config()
     cfg.stage3.enabled = True  # force-enable for this script
+    if args.no_attention:
+        cfg.stage3.attention_extraction = False
 
     model_dir = get_model_dir()
     results_path = args.input or model_dir / "stage2_results.csv"
