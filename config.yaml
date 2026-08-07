@@ -155,10 +155,8 @@ stage2:
 #     more than medical domain pre-training here
 # To enable: set enabled: true and run `ollama pull phi4-mini`
 stage3:
-  enabled: false
   ollama_model: "phi4-mini"
   temperature: 0.3
-  discordance_analysis: true     # cross-modal concordance/discordance analysis (research contribution)
   attention_extraction: true     # extract Longformer attention spans (requires fine-tuned model)
   top_attention_sentences: 5     # sentences extracted per patient from attention weights
   top_shap_features: 5           # Stage 1 SHAP features included per patient in prompt

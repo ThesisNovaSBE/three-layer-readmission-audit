@@ -113,3 +113,23 @@ def extract_shap_features(
         results.append(features)
 
     return results
+
+
+def extract_shap_for_patient(
+    artifact: dict,
+    patient_row: pd.Series,
+    top_k: int = 5,
+) -> list[str]:
+    """Single-patient wrapper around :func:`extract_shap_features`.
+
+    Args:
+        artifact:    Stage 1 artifact dict (keys: estimator, feature_cols).
+        patient_row: One patient's feature values as a pandas Series.
+        top_k:       Number of top features to return.
+
+    Returns:
+        List of up to top_k human-readable feature strings.
+    """
+    row_df = pd.DataFrame([patient_row])
+    result = extract_shap_features(artifact, row_df, top_k=top_k)
+    return result[0] if result else []

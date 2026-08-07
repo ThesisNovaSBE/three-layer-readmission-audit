@@ -1,30 +1,24 @@
-"""Stage 3: cross-modal discordance annotation and clinician explanation.
+"""Stage 3 prompt construction and phi4-mini response parsing.
 
-Each confirmed or rejected Stage 1 flag is annotated with:
+For a single patient, builds a prompt that reasons about the *tension* between
+what Stage 1 (structured EHR data) and Stage 2 (discharge note) said, then
+calls phi4-mini to produce a clinical narrative explaining that tension.
 
-1. ``discordance_mode`` — whether the discharge note and structured EHR data
-   tell the same story (CONCORDANT), the note is reassuring despite bad numbers
-   (NOTE_MITIGATES), or the note reveals additional risk not in the structured
-   data (NOTE_AMPLIFIES).
-
-2. ``primary_category`` — the dominant clinical domain driving any discordance.
-
-3. ``explanation`` — a single sentence for the clinical record that synthesises
-   both Stage 1 structured signals and Stage 2 discharge note evidence.
-
-phi4-mini is called once per patient and asked to return a JSON object.
-``format="json"`` is passed to Ollama to enforce structured output.
+The key input the prompt uses that the old single-sentence approach lacked is
+the **score delta**: Stage 2 score minus Stage 1 score.  A large negative delta
+means the note strongly reassured; near zero means the modalities agreed; a
+large positive delta means the note revealed additional risk.  phi4-mini is
+asked to explain *why* that delta exists, citing specific note content.
 
 Constants
 ---------
-DISCORDANCE_MODES      : valid values for the discordance_mode field.
-DISCORDANCE_CATEGORIES : valid values for the primary_category field.
+DISCORDANCE_MODES      : valid values for the ``discordance_mode`` field.
+DISCORDANCE_CATEGORIES : valid values for the ``primary_category`` field.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import textwrap
 from typing import Any
 
@@ -32,106 +26,135 @@ try:
     import ollama
 except ImportError as _err:
     raise ImportError(
-        "Ollama is required for Stage 3.  "
+        "Ollama is required for Stage 3. "
         "Install with: pip install ollama  then  ollama pull phi4-mini"
     ) from _err
 
 from src.config_schema import AppConfig
 
 
-# ── Taxonomy constants ─────────────────────────────────────────────────────────
+# ── Taxonomy ───────────────────────────────────────────────────────────────────
 
 DISCORDANCE_MODES: tuple[str, ...] = (
-    "CONCORDANT",      # note and structured data tell the same story
-    "NOTE_MITIGATES",  # note has reassuring factors despite bad structured numbers
+    "CONCORDANT",      # note and structured data agree on risk level
+    "NOTE_MITIGATES",  # note contains reassuring factors despite bad numbers
     "NOTE_AMPLIFIES",  # note reveals additional risk not captured in structured data
 )
 
 DISCORDANCE_CATEGORIES: tuple[str, ...] = (
     "social_support",       # family support, home care, social isolation
-    "discharge_planning",   # follow-up scheduled, care coordination quality
+    "discharge_planning",   # follow-up arranged, care coordination quality
     "functional_status",    # mobility, ADL capacity, independence level
     "frailty_markers",      # explicit frailty language, debility, falls history
-    "medication_adherence", # patient understanding, pill management, polypharmacy
-    "housing_social_risk",  # lives alone, housing instability, homelessness
+    "medication_adherence", # patient understanding, polypharmacy management
+    "housing_social_risk",  # lives alone, housing instability
     "care_complexity",      # multiple specialists, complex discharge regimen
     "cognition",            # delirium, dementia, confusion documented in note
-    "structured_confirmed", # note mirrors / reinforces the lab or vital signals
+    "structured_confirmed", # note directly mirrors the lab or vital signals
 )
+
+_NOTE_TRUNCATE_CHARS = 1_500
 
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = textwrap.dedent("""
-    You are a clinical NLP system.  Your task is to classify the relationship
-    between structured EHR risk signals (Stage 1) and discharge note evidence
-    (Stage 2) for hospital readmission prediction.
+    You are a clinical decision support system explaining a two-stage hospital
+    readmission prediction model to clinicians.
 
-    Return ONLY a JSON object — no text outside the JSON.
-    Temperature is low; be consistent and precise.
+    Your job: explain in plain clinical language why the discharge note agreed
+    or disagreed with the structured EHR risk signal for one specific patient.
+    Be precise — cite actual clinical content from the note.
+    Do not invent information not present in the inputs.
+    Return ONLY valid JSON. No text outside the JSON object.
 """).strip()
 
 _USER_TEMPLATE = textwrap.dedent("""
-    A patient was processed by a two-stage readmission prediction pipeline:
-      Stage 1 (XGBoost on structured EHR data) flagged this patient as HIGH RISK.
-      Stage 2 (Clinical-Longformer on discharge note) {stage2_verdict}.
+    A patient was assessed by a two-stage 30-day readmission prediction system.
 
-    STAGE 1 — top risk drivers from structured data:
-    {shap_features}
+    ── STAGE 1 (XGBoost · structured EHR) ──────────────────────────────
+    Score: {stage1_score:.3f}   Flagged at threshold ≥ {stage1_threshold:.3f}
+    Top structured risk factors (SHAP-ranked):
+    {shap_block}
 
-    STAGE 2 — key sentences from discharge note (highest model attention):
-    {note_sentences}
+    ── STAGE 2 (Clinical-Longformer · discharge note) ───────────────────
+    Score: {stage2_score:.3f}   Threshold: {stage2_threshold:.3f}
+    Decision: {verdict}
+    Score delta (Stage 2 − Stage 1): {delta:+.3f}  [{delta_label}]
 
-    TASK: Classify the relationship between the structured risk signal and the
-    discharge note evidence.
+    Key discharge note content:
+    {note_block}
 
-    Return a JSON object with exactly these three fields:
+    ── HOW TO READ THE DELTA ────────────────────────────────────────────
+      Strongly negative → the note contained reassuring content that
+                          outweighs what the structured numbers implied.
+      Near zero         → both modalities agree on the risk level.
+      Strongly positive → the note revealed additional risk not present
+                          in the structured data.
+
+    ── YOUR TASK ────────────────────────────────────────────────────────
+    Explain why Stage 2 {confirmed_or_rejected} the Stage 1 flag.
+    Be specific: what clinical content in the note explains the delta?
+    How does the note relate to the top structured risk factors above?
+
+    Return ONLY a JSON object with exactly these three fields:
 
     "discordance_mode": one of {modes}
-      CONCORDANT     — note and structured data agree on risk level
-      NOTE_MITIGATES — note contains reassuring content despite bad structured numbers
-      NOTE_AMPLIFIES — note reveals additional risk not captured in structured data
+      CONCORDANT     — note and structured data agree on risk
+      NOTE_MITIGATES — note contains reassuring content despite bad numbers
+      NOTE_AMPLIFIES — note reveals additional risk not in structured data
 
-    "primary_category": the single most important clinical domain. Choose one of:
+    "primary_category": the single most relevant clinical domain, one of:
       {categories}
 
-    "explanation": one sentence for the clinical record explaining, in plain
-      language, why Stage 2 {confirmed_or_rejected} the Stage 1 flag and what
-      information in the discharge note drove that decision.
-
-    Return ONLY valid JSON.  No commentary outside the JSON object.
+    "narrative": 2-3 sentences in plain clinical language. Cite specific
+      content from the note. Explain the connection between the structured
+      risk factors and what the note says.
 """).strip()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _fmt(val: Any, decimals: int = 2) -> str:
-    if val is None:
-        return "N/A"
-    try:
-        if math.isnan(float(val)):
-            return "N/A"
-    except (TypeError, ValueError):
-        pass
-    if isinstance(val, float):
-        return f"{val:.{decimals}f}"
-    return str(val)
+def _delta_label(delta: float) -> str:
+    """Return a short human-readable interpretation of the score delta."""
+    if delta < -0.30:
+        return "note strongly mitigates structured risk"
+    if delta < -0.10:
+        return "note somewhat mitigates structured risk"
+    if delta <= 0.10:
+        return "modalities broadly agree"
+    if delta <= 0.30:
+        return "note somewhat amplifies risk"
+    return "note strongly amplifies risk"
 
 
-_PARSE_FAILURE: dict = {
+def _note_block(attention_sentences: list[str], note_text: str) -> str:
+    """Return the best available note representation for the prompt."""
+    if attention_sentences:
+        lines = "\n".join(
+            f"  [{i + 1}] {s}" for i, s in enumerate(attention_sentences)
+        )
+        return f"(top-attended sentences from Clinical-Longformer)\n{lines}"
+    if note_text.strip():
+        truncated = note_text.strip()[:_NOTE_TRUNCATE_CHARS]
+        return f"(discharge note, truncated to {_NOTE_TRUNCATE_CHARS} chars)\n  {truncated}"
+    return "  (discharge note not available)"
+
+
+_PARSE_FAILURE: dict[str, Any] = {
     "discordance_mode": None,
     "primary_category": None,
-    "explanation": "",
+    "narrative": "",
     "annotation_failed": True,
 }
 
 
-def _parse_response(raw: str) -> dict:
-    """Parse phi4-mini JSON response.
+def _parse_response(raw: str) -> dict[str, Any]:
+    """Parse phi4-mini JSON response into a flat annotation dict.
 
-    Returns a dict with ``annotation_failed=True`` (and ``None`` mode/category)
-    on any parse error so failures are excluded from population aggregation
-    rather than silently counted as CONCORDANT.
+    Returns ``annotation_failed=True`` (with ``None`` mode/category) on any
+    parse error so callers can distinguish a real CONCORDANT from a silent
+    failure.
     """
     data: dict | None = None
     try:
@@ -146,7 +169,7 @@ def _parse_response(raw: str) -> dict:
                 pass
 
     if data is None:
-        return {**_PARSE_FAILURE, "explanation": raw.strip()[:300]}
+        return {**_PARSE_FAILURE, "narrative": raw.strip()[:300]}
 
     mode = data.get("discordance_mode", "")
     cat = data.get("primary_category", "")
@@ -154,24 +177,24 @@ def _parse_response(raw: str) -> dict:
     valid_cat = cat if cat in DISCORDANCE_CATEGORIES else None
 
     if valid_mode is None or valid_cat is None:
-        return {**_PARSE_FAILURE, "explanation": data.get("explanation", raw.strip()[:300])}
+        return {**_PARSE_FAILURE, "narrative": data.get("narrative", raw.strip()[:300])}
 
     return {
         "discordance_mode": valid_mode,
         "primary_category": valid_cat,
-        "explanation": data.get("explanation", ""),
+        "narrative": data.get("narrative", ""),
         "annotation_failed": False,
     }
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-_NOTE_TRUNCATE_CHARS = 1_500  # chars of raw note to pass when attention is absent
-
-
 def build_prompt(
-    stage2_confirmed: bool,
+    stage1_score: float,
+    stage1_threshold: float,
     stage2_score: float,
+    stage2_threshold: float,
+    stage2_confirmed: bool,
     shap_feature_strings: list[str],
     attention_sentences: list[str],
     note_text: str = "",
@@ -179,72 +202,60 @@ def build_prompt(
     """Build the Stage 3 user prompt for one patient.
 
     Args:
+        stage1_score:         XGBoost probability for this patient.
+        stage1_threshold:     Stage 1 flag threshold.
+        stage2_score:         Calibrated Longformer probability.
+        stage2_threshold:     Stage 2 decision threshold for this age group.
         stage2_confirmed:     True if Stage 2 confirmed the Stage 1 flag.
-        stage2_score:         Stage 2 probability after calibration.
-        shap_feature_strings: top-k feature strings from extract_shap_features().
-        attention_sentences:  top-n sentences from extract_attention_spans().
-        note_text:            raw discharge note text; used as fallback when
-                              attention_sentences is empty (e.g. --no-attention).
+        shap_feature_strings: Top-k SHAP strings from extract_shap_for_patient().
+        attention_sentences:  Top-n attended sentences (empty if not extracted).
+        note_text:            Raw discharge note; used when attention is absent.
 
     Returns:
-        Formatted prompt string.
+        Formatted prompt string ready for phi4-mini.
     """
+    delta = stage2_score - stage1_score
     verdict = (
-        f"CONFIRMED the flag (score={stage2_score:.3f})"
+        f"CONFIRMED (score {stage2_score:.3f} ≥ threshold {stage2_threshold:.3f})"
         if stage2_confirmed
-        else f"REJECTED the flag (score={stage2_score:.3f})"
+        else f"REJECTED (score {stage2_score:.3f} < threshold {stage2_threshold:.3f})"
     )
     confirmed_or_rejected = "confirmed" if stage2_confirmed else "rejected"
 
-    if shap_feature_strings:
-        shap_block = "\n".join(f"  - {f}" for f in shap_feature_strings)
-    else:
-        shap_block = "  (not available)"
-
-    if attention_sentences:
-        note_block = "\n".join(
-            f"  [{j + 1}] {s}" for j, s in enumerate(attention_sentences)
-        )
-    elif note_text.strip():
-        truncated = note_text.strip()[:_NOTE_TRUNCATE_CHARS]
-        note_block = f"  [full note, truncated to {_NOTE_TRUNCATE_CHARS} chars]\n  {truncated}"
-    else:
-        note_block = "  (discharge note not available)"
+    shap_block = (
+        "\n".join(f"  - {f}" for f in shap_feature_strings)
+        if shap_feature_strings
+        else "  (not available)"
+    )
 
     return _USER_TEMPLATE.format(
-        stage2_verdict=verdict,
-        shap_features=shap_block,
-        note_sentences=note_block,
+        stage1_score=stage1_score,
+        stage1_threshold=stage1_threshold,
+        stage2_score=stage2_score,
+        stage2_threshold=stage2_threshold,
+        verdict=verdict,
+        delta=delta,
+        delta_label=_delta_label(delta),
+        shap_block=shap_block,
+        note_block=_note_block(attention_sentences, note_text),
+        confirmed_or_rejected=confirmed_or_rejected,
         modes=str(DISCORDANCE_MODES),
         categories=str(DISCORDANCE_CATEGORIES),
-        confirmed_or_rejected=confirmed_or_rejected,
     )
 
 
-def annotate_patient(
-    patient: dict,
-    shap_feature_strings: list[str],
-    attention_sentences: list[str],
-    cfg: AppConfig,
-) -> dict:
-    """Generate discordance annotation + clinician explanation for one patient.
+def call_phi4mini(prompt: str, cfg: AppConfig) -> dict[str, Any]:
+    """Call phi4-mini via Ollama and return the parsed annotation dict.
 
     Args:
-        patient:              dict containing at least ``stage2_confirmed`` and
-                              ``stage2_score`` keys.
-        shap_feature_strings: from extract_shap_features(), may be empty.
-        attention_sentences:  from extract_attention_spans(), may be empty.
-        cfg:                  validated project config.
+        prompt: built by :func:`build_prompt`.
+        cfg:    validated project config (reads ``stage3.ollama_model`` and
+                ``stage3.temperature``).
 
     Returns:
         Dict with keys ``discordance_mode``, ``primary_category``,
-        ``explanation``.  On Ollama error, safe defaults are returned.
+        ``narrative``, ``annotation_failed``.
     """
-    confirmed = bool(patient.get("stage2_confirmed", 0))
-    score = float(patient.get("stage2_score", 0.0))
-    note_text = str(patient.get("note_text", ""))
-    prompt = build_prompt(confirmed, score, shap_feature_strings, attention_sentences, note_text)
-
     try:
         response = ollama.chat(
             model=cfg.stage3.ollama_model,
@@ -252,49 +263,11 @@ def annotate_patient(
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            options={"temperature": 0.1},  # low temp for consistent classification
+            options={"temperature": cfg.stage3.temperature},
             format="json",
         )
         raw = response.message.content
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "explanation": f"[ollama error: {exc}]"}
+        return {**_PARSE_FAILURE, "narrative": f"[ollama error: {exc}]"}
 
     return _parse_response(raw)
-
-
-def annotate_batch(
-    patients: list[dict],
-    shap_features_list: list[list[str]],
-    attention_spans: dict[int, list[str]],
-    cfg: AppConfig,
-    verbose: bool = True,
-) -> list[dict]:
-    """Annotate a batch of patients with discordance labels and explanations.
-
-    Args:
-        patients:           list of patient dicts (must have ``hadm_id``,
-                            ``stage2_confirmed``, ``stage2_score``).
-        shap_features_list: one list of strings per patient (same order).
-        attention_spans:    dict mapping hadm_id -> list of top sentences.
-        cfg:                validated project config.
-        verbose:            print progress lines.
-
-    Returns:
-        Input patients list with added keys: ``discordance_mode``,
-        ``primary_category``, ``explanation``.
-    """
-    model = cfg.stage3.ollama_model
-    n = len(patients)
-    print(f"[stage3/explain] Annotating {n:,} patients with '{model}' ...")
-
-    results = []
-    for i, (patient, shap_strs) in enumerate(zip(patients, shap_features_list)):
-        hadm_id = int(patient.get("hadm_id", 0))
-        attn = attention_spans.get(hadm_id, [])
-        annotation = annotate_patient(patient, shap_strs, attn, cfg)
-        results.append({**patient, **annotation})
-
-        if verbose and (i + 1) % 50 == 0:
-            print(f"  {i + 1}/{n}")
-
-    return results
