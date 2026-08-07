@@ -26,7 +26,7 @@ min-public-methods=1
 [TYPECHECK]
 # Optional heavy deps that may not be installed in the lint environment.
 # We guard these with try/except ImportError in each file.
-ignored-modules=torch,torchvision,transformers,xgboost,optuna,ollama
+ignored-modules=torch,torchvision,transformers,xgboost,optuna,ollama,fastapi,uvicorn,starlette
 
 [BASIC]
 # Allow single-letter 'n' used as count variable in synthetic data helpers.
