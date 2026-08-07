@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config_schema import AppConfig
+from src.schemas import TARGET_COL
 
 try:
     import torch
@@ -23,8 +24,6 @@ try:
 except ImportError:
     _TORCH_AVAILABLE = False
     _TorchDataset = object  # type: ignore[misc,assignment]  # sentinel base class
-
-from src.schemas import TARGET_COL
 
 
 def load_notes(cfg: AppConfig, hadm_ids: set | None = None) -> pd.DataFrame:
