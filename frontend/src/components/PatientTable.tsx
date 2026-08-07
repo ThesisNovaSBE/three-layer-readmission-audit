@@ -15,19 +15,18 @@ function RiskBadge({ score }: { score: number }) {
   );
 }
 
-function ScoreBar({ value, max = 1, color }: { value: number; max?: number; color: string }) {
+function ScoreBar({ value, color }: { value: number; color: string }) {
   return (
     <div className="flex items-center gap-2">
       <div className="w-20 bg-slate-100 rounded-full h-1.5">
-        <div
-          className={`h-1.5 rounded-full ${color}`}
-          style={{ width: `${(value / max) * 100}%` }}
-        />
+        <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${value * 100}%` }} />
       </div>
       <span className="text-xs text-slate-500">{value.toFixed(2)}</span>
     </div>
   );
 }
+
+type SortKey = "stage1_score" | "stage2_score";
 
 export default function PatientTable({
   patients,
@@ -36,7 +35,7 @@ export default function PatientTable({
   patients: Patient[];
   onSelect: (p: Patient) => void;
 }) {
-  const [sortKey, setSortKey] = useState<"stage1_score" | "stage2_score" | "age">("stage1_score");
+  const [sortKey, setSortKey] = useState<SortKey>("stage1_score");
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
 
   const sorted = [...patients].sort((a, b) => {
@@ -44,22 +43,27 @@ export default function PatientTable({
     return sortDir === "desc" ? -diff : diff;
   });
 
-  function toggleSort(key: typeof sortKey) {
+  function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
     else { setSortKey(key); setSortDir("desc"); }
   }
 
-  function SortBtn({ col, label }: { col: typeof sortKey; label: string }) {
+  function SortBtn({ col, label }: { col: SortKey; label: string }) {
     const active = sortKey === col;
     return (
       <button
         onClick={() => toggleSort(col)}
-        className={`text-xs font-semibold flex items-center gap-1 ${active ? "text-blue-600" : "text-slate-500"}`}
+        className={`text-xs font-semibold flex items-center gap-1 ${
+          active ? "text-blue-600" : "text-slate-500"
+        }`}
       >
         {label} {active ? (sortDir === "desc" ? "↓" : "↑") : "↕"}
       </button>
     );
   }
+
+  const fmt = (v: number | null, digits = 0) =>
+    v != null ? (digits ? v.toFixed(digits) : String(Math.round(v))) : "—";
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
@@ -72,13 +76,14 @@ export default function PatientTable({
         </div>
         <span className="text-sm text-slate-400">{patients.length} shown</span>
       </div>
+
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
           <tr>
             <th className="px-4 py-3 text-left">Admission ID</th>
             <th className="px-4 py-3 text-left">Age / Band</th>
             <th className="px-4 py-3 text-left">Gender</th>
-            <th className="px-4 py-3 text-left">LOS (days)</th>
+            <th className="px-4 py-3 text-left">LOS (d)</th>
             <th className="px-4 py-3 text-left">Charlson</th>
             <th className="px-4 py-3 text-left">
               <SortBtn col="stage1_score" label="Stage 1" />
@@ -99,12 +104,12 @@ export default function PatientTable({
             >
               <td className="px-4 py-3 font-mono text-slate-600 text-xs">{p.hadm_id}</td>
               <td className="px-4 py-3 text-slate-700">
-                {p.age}y
+                {p.age != null ? `${Math.round(p.age)}y` : "—"}
                 <span className="ml-1 text-xs text-slate-400">({p.age_band})</span>
               </td>
-              <td className="px-4 py-3 text-slate-600">{p.gender}</td>
-              <td className="px-4 py-3 text-slate-600">{p.los_days}</td>
-              <td className="px-4 py-3 text-slate-600">{p.charlson_index}</td>
+              <td className="px-4 py-3 text-slate-600">{p.gender ?? "—"}</td>
+              <td className="px-4 py-3 text-slate-600">{fmt(p.los_days, 1)}</td>
+              <td className="px-4 py-3 text-slate-600">{fmt(p.charlson_index)}</td>
               <td className="px-4 py-3">
                 <RiskBadge score={p.stage1_score} />
               </td>
@@ -112,10 +117,16 @@ export default function PatientTable({
                 <ScoreBar value={p.stage2_score} color="bg-violet-400" />
               </td>
               <td className="px-4 py-3">
-                {p.readmitted ? (
-                  <span className="text-xs font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">Yes</span>
+                {p.readmitted === true ? (
+                  <span className="text-xs font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">
+                    Yes
+                  </span>
+                ) : p.readmitted === false ? (
+                  <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
+                    No
+                  </span>
                 ) : (
-                  <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">No</span>
+                  <span className="text-xs text-slate-300">—</span>
                 )}
               </td>
               <td className="px-4 py-3">
