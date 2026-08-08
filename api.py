@@ -76,6 +76,13 @@ class PatientOut(BaseModel):
     white_blood_cells_last: float | None = None
 
 
+class PatientsPage(BaseModel):
+    """Paginated patient list response."""
+
+    patients: list[PatientOut]
+    total: int
+
+
 class HealthOut(BaseModel):
     """Health check response."""
 
@@ -330,21 +337,42 @@ def get_health(request: Request) -> HealthOut:
     )
 
 
-@app.get("/api/patients", response_model=list[PatientOut])
-def list_patients(request: Request, confirmed_only: bool = True) -> list[PatientOut]:
-    """Return Stage-2-processed patients, optionally filtered to confirmed only.
+@app.get("/api/patients", response_model=PatientsPage)
+def list_patients(
+    request: Request,
+    confirmed_only: bool = True,
+    limit: int = 50,
+    offset: int = 0,
+    q: str = "",
+) -> PatientsPage:
+    """Return a paginated, optionally searched slice of Stage-2-processed patients.
 
     Args:
-        confirmed_only: When ``True`` (default), return only patients where
-                        Stage 2 confirmed the Stage 1 flag.  Pass ``false``
-                        to see all Stage-2-scored patients.
+        confirmed_only: When ``True`` (default), only return Stage 2 confirmed patients.
+        limit: Maximum number of patients to return.
+        offset: Number of patients to skip (cursor for "load more").
+        q: Optional search term matched against hadm_id, age_band, and gender.
     """
     df: pd.DataFrame = request.app.state.patients_df
     if df.empty:
-        return []
+        return PatientsPage(patients=[], total=0)
     if confirmed_only and "stage2_confirmed" in df.columns:
         df = df[df["stage2_confirmed"].astype(int) == 1]
-    return [_row_to_patient(row) for _, row in df.iterrows()]
+    if q:
+        q_low = q.lower()
+        mask = df["hadm_id"].astype(str).str.contains(q_low, case=False, na=False, regex=False)
+        for col in ("age_band", "gender"):
+            if col in df.columns:
+                mask = mask | df[col].astype(str).str.contains(
+                    q_low, case=False, na=False, regex=False
+                )
+        df = df[mask]
+    total = len(df)
+    page = df.iloc[offset: offset + limit]
+    return PatientsPage(
+        patients=[_row_to_patient(row) for _, row in page.iterrows()],
+        total=total,
+    )
 
 
 @app.get("/api/patients/{hadm_id}", response_model=PatientOut)

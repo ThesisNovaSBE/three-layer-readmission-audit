@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchHealth, fetchPatients } from "./api";
 import PatientModal from "./components/PatientModal";
 import PatientTable from "./components/PatientTable";
@@ -8,19 +8,29 @@ import "./index.css";
 
 type Tab = "pipeline" | "patients";
 
+const PAGE_SIZE = 50;
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("pipeline");
   const [patients, setPatients] = useState<Patient[]>([]);
+  const [total, setTotal] = useState(0);
+  const [nextOffset, setNextOffset] = useState(PAGE_SIZE);
+  const [search, setSearch] = useState("");
+  const [loadingMore, setLoadingMore] = useState(false);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Patient | null>(null);
+  const searchMounted = useRef(false);
 
+  // Initial load
   useEffect(() => {
-    Promise.all([fetchHealth(), fetchPatients()])
-      .then(([h, ps]) => {
+    Promise.all([fetchHealth(), fetchPatients({ limit: PAGE_SIZE, offset: 0 })])
+      .then(([h, page]) => {
         setHealth(h);
-        setPatients(ps);
+        setPatients(page.patients);
+        setTotal(page.total);
+        setNextOffset(PAGE_SIZE);
       })
       .catch(() =>
         setError(
@@ -29,6 +39,34 @@ export default function App() {
       )
       .finally(() => setLoading(false));
   }, []);
+
+  // Re-fetch when search changes (debounced, skip initial mount)
+  useEffect(() => {
+    if (!searchMounted.current) {
+      searchMounted.current = true;
+      return;
+    }
+    const id = setTimeout(() => {
+      fetchPatients({ limit: PAGE_SIZE, offset: 0, q: search })
+        .then((page) => {
+          setPatients(page.patients);
+          setTotal(page.total);
+          setNextOffset(PAGE_SIZE);
+        })
+        .catch(() => {});
+    }, 250);
+    return () => clearTimeout(id);
+  }, [search]);
+
+  function handleLoadMore() {
+    setLoadingMore(true);
+    fetchPatients({ limit: PAGE_SIZE, offset: nextOffset, q: search })
+      .then((page) => {
+        setPatients((prev) => [...prev, ...page.patients]);
+        setNextOffset((prev) => prev + PAGE_SIZE);
+      })
+      .finally(() => setLoadingMore(false));
+  }
 
   if (loading) {
     return (
@@ -159,7 +197,15 @@ export default function App() {
                   : "Stage 2 confirmed · calibrated per-age-group thresholds · click any row for details"}
               </p>
             </div>
-            <PatientTable patients={patients} onSelect={setSelected} />
+            <PatientTable
+              patients={patients}
+              total={total}
+              search={search}
+              onSearchChange={setSearch}
+              onLoadMore={handleLoadMore}
+              loadingMore={loadingMore}
+              onSelect={setSelected}
+            />
           </>
         )}
       </main>

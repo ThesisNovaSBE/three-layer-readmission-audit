@@ -36,6 +36,11 @@ export interface ExplanationResult {
   annotation_failed: boolean;
 }
 
+export interface PatientsPage {
+  patients: Patient[];
+  total: number;
+}
+
 export interface HealthStatus {
   status: string;
   patients_loaded: number;

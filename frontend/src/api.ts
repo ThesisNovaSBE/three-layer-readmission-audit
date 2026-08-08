@@ -1,4 +1,4 @@
-import type { ExplanationResult, HealthStatus, Patient } from "./types";
+import type { ExplanationResult, HealthStatus, PatientsPage } from "./types";
 
 const BASE = "/api";
 
@@ -15,8 +15,20 @@ export function fetchHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
 }
 
-export function fetchPatients(confirmedOnly = true): Promise<Patient[]> {
-  return request<Patient[]>(`/patients?confirmed_only=${confirmedOnly}`);
+export function fetchPatients(params: {
+  confirmedOnly?: boolean;
+  limit?: number;
+  offset?: number;
+  q?: string;
+} = {}): Promise<PatientsPage> {
+  const { confirmedOnly = true, limit = 50, offset = 0, q = "" } = params;
+  const qs = new URLSearchParams({
+    confirmed_only: String(confirmedOnly),
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (q) qs.set("q", q);
+  return request<PatientsPage>(`/patients?${qs}`);
 }
 
 export function explainPatient(hadmId: number): Promise<ExplanationResult> {

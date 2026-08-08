@@ -30,9 +30,19 @@ type SortKey = "stage1_score" | "stage2_score";
 
 export default function PatientTable({
   patients,
+  total,
+  search,
+  onSearchChange,
+  onLoadMore,
+  loadingMore,
   onSelect,
 }: {
   patients: Patient[];
+  total: number;
+  search: string;
+  onSearchChange: (q: string) => void;
+  onLoadMore: () => void;
+  loadingMore: boolean;
   onSelect: (p: Patient) => void;
 }) {
   const [sortKey, setSortKey] = useState<SortKey>("stage1_score");
@@ -67,14 +77,43 @@ export default function PatientTable({
 
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-      <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-        <div>
-          <h2 className="text-base font-bold text-slate-800">Confirmed High-Risk Patients</h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Stage 2 confirmed · calibrated per-age-group thresholds · Click a row for details
-          </p>
+      <div className="px-6 py-4 border-b border-slate-100 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-bold text-slate-800">Confirmed High-Risk Patients</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Stage 2 confirmed · calibrated per-age-group thresholds · Click a row for details
+            </p>
+          </div>
+          <span className="text-sm text-slate-400 shrink-0 ml-4">
+            {patients.length.toLocaleString()} of {total.toLocaleString()} shown
+          </span>
         </div>
-        <span className="text-sm text-slate-400">{patients.length} shown</span>
+        <div className="relative">
+          <svg
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400"
+            fill="none" stroke="currentColor" strokeWidth={2}
+            viewBox="0 0 24 24"
+          >
+            <circle cx={11} cy={11} r={8} />
+            <path d="M21 21l-4.35-4.35" strokeLinecap="round" />
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search by admission ID, age group (e.g. 70+), or gender…"
+            className="w-full pl-8 pr-4 py-1.5 text-sm border border-slate-200 rounded-lg bg-slate-50 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
+          />
+          {search && (
+            <button
+              onClick={() => onSearchChange("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs leading-none"
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </div>
 
       <table className="w-full text-sm">
@@ -136,6 +175,25 @@ export default function PatientTable({
           ))}
         </tbody>
       </table>
+
+      {patients.length < total && (
+        <div className="px-6 py-4 border-t border-slate-100 text-center">
+          <button
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            className="px-6 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-medium transition-colors"
+          >
+            {loadingMore
+              ? "Loading…"
+              : `Load 50 more  (${patients.length.toLocaleString()} of ${total.toLocaleString()})`}
+          </button>
+        </div>
+      )}
+      {patients.length > 0 && patients.length === total && (
+        <div className="px-6 py-3 border-t border-slate-100 text-center text-xs text-slate-400">
+          All {total.toLocaleString()} patients shown
+        </div>
+      )}
     </div>
   );
 }
