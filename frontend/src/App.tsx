@@ -119,7 +119,7 @@ export default function App() {
                     : "text-slate-500 hover:bg-slate-100"
                 }`}
               >
-                {t === "pipeline" ? "Pipeline" : `Patients (${patients.length})`}
+                {t === "pipeline" ? "Pipeline" : "Patients"}
               </button>
             ))}
           </nav>

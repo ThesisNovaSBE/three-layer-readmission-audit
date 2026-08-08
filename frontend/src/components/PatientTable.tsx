@@ -26,7 +26,7 @@ function ScoreBar({ value, color }: { value: number; color: string }) {
   );
 }
 
-type SortKey = "stage1_score" | "stage2_score";
+type SortKey = "hadm_id" | "age" | "los_days" | "charlson_index" | "stage1_score" | "stage2_score";
 
 export default function PatientTable({
   patients,
@@ -49,8 +49,9 @@ export default function PatientTable({
   const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
 
   const sorted = [...patients].sort((a, b) => {
-    const diff = a[sortKey] - b[sortKey];
-    return sortDir === "desc" ? -diff : diff;
+    const av = (a[sortKey] as number | null) ?? -Infinity;
+    const bv = (b[sortKey] as number | null) ?? -Infinity;
+    return sortDir === "desc" ? bv - av : av - bv;
   });
 
   function toggleSort(key: SortKey) {
@@ -119,11 +120,19 @@ export default function PatientTable({
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-xs text-slate-500 uppercase tracking-wide">
           <tr>
-            <th className="px-4 py-3 text-left">Admission ID</th>
-            <th className="px-4 py-3 text-left">Age / Band</th>
+            <th className="px-4 py-3 text-left">
+              <SortBtn col="hadm_id" label="Admission ID" />
+            </th>
+            <th className="px-4 py-3 text-left">
+              <SortBtn col="age" label="Age / Band" />
+            </th>
             <th className="px-4 py-3 text-left">Gender</th>
-            <th className="px-4 py-3 text-left">LOS (d)</th>
-            <th className="px-4 py-3 text-left">Charlson</th>
+            <th className="px-4 py-3 text-left">
+              <SortBtn col="los_days" label="LOS (d)" />
+            </th>
+            <th className="px-4 py-3 text-left">
+              <SortBtn col="charlson_index" label="Charlson" />
+            </th>
             <th className="px-4 py-3 text-left">
               <SortBtn col="stage1_score" label="Stage 1" />
             </th>
