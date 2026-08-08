@@ -47,12 +47,6 @@ _CORS_ORIGINS = [
     "http://localhost:3000",
 ]
 
-# Columns already present in stage2_results.csv — skip when merging feature matrix.
-_RESULTS_COLS: frozenset[str] = frozenset({
-    "subject_id", "age_band",
-    "stage1_score", "stage1_threshold",
-    "stage2_score", "stage2_confirmed",
-})
 
 
 # ── Response models ───────────────────────────────────────────────────────────
@@ -224,10 +218,19 @@ def _build_patients_df(
     if feature_matrix is None or feature_matrix.empty:
         out = results_df.copy()
     else:
+        existing = set(results_df.columns)
         feat_cols = ["hadm_id"] + [
-            c for c in feature_matrix.columns if c not in _RESULTS_COLS
+            c for c in feature_matrix.columns if c not in existing and c != "hadm_id"
         ]
         out = results_df.merge(feature_matrix[feat_cols], on="hadm_id", how="left")
+    if "age_band" not in out.columns:
+        if "age" in out.columns:
+            out["age_band"] = pd.cut(
+                out["age"], bins=[17, 40, 55, 70, 120],
+                labels=["18-40", "41-55", "56-70", "70+"],
+            ).astype(str)
+        else:
+            out["age_band"] = "unknown"
     out["stage2_threshold"] = out["age_band"].astype(str).apply(
         lambda ab: _get_threshold(ab, thresholds, cfg)
     )
