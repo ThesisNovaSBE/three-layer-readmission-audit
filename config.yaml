@@ -19,7 +19,7 @@ run:
     cv_folds: 3
   full:
     n_rows: 0
-    optuna_trials: 150
+    optuna_trials: 400
     cv_folds: 5
 
 # ── Cohort definition ──
