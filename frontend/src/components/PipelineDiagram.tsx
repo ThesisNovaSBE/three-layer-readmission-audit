@@ -1,6 +1,21 @@
-import { PIPELINE_METRICS } from "../data/mockPatients";
+// Real metrics from training runs — Stage 1 from full MIMIC-IV, Stage 2 from KISSKI A100 job.
+const STAGE1 = {
+  nPatients: 521_191,
+  auroc: 0.706,
+  recall: 0.848,
+  precision: 0.256,
+  threshold: 0.354,
+  notesCohort: 43_776,
+};
 
-const m = PIPELINE_METRICS;
+const STAGE2 = {
+  auroc: 0.676,
+  recall: 0.908,
+  precision: 0.289,
+  f2: 0.635,
+  confirmed: 35_187,
+  pruned: 8_589,
+};
 
 function StageBox({
   number,
@@ -50,9 +65,7 @@ function Arrow() {
 export default function PipelineDiagram() {
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-6">
-      <h2 className="text-lg font-bold text-slate-800 mb-1">
-        Triage-and-Verify Pipeline
-      </h2>
+      <h2 className="text-lg font-bold text-slate-800 mb-1">Triage-and-Verify Pipeline</h2>
       <p className="text-sm text-slate-500 mb-5">
         Three-stage pipeline for predicting unplanned 30-day hospital readmissions from MIMIC-IV.
       </p>
@@ -65,11 +78,11 @@ export default function PipelineDiagram() {
           model="XGBoost"
           color="border-blue-200"
           metrics={[
-            { label: "Dataset", value: `${m.stage1.n_patients.toLocaleString()} admissions` },
-            { label: "AUROC", value: m.stage1.auroc.toFixed(3) },
-            { label: "Recall @ thr", value: m.stage1.recall.toFixed(3) },
-            { label: "Precision", value: m.stage1.precision.toFixed(3) },
-            { label: "Patients flagged", value: m.stage1.flagged.toLocaleString() },
+            { label: "Dataset",          value: `${STAGE1.nPatients.toLocaleString()} admissions` },
+            { label: "AUROC",            value: STAGE1.auroc.toFixed(3) },
+            { label: "Recall @ thr",     value: STAGE1.recall.toFixed(3) },
+            { label: "Precision",        value: STAGE1.precision.toFixed(3) },
+            { label: "Notes cohort",     value: STAGE1.notesCohort.toLocaleString() },
           ]}
         />
         <Arrow />
@@ -80,27 +93,27 @@ export default function PipelineDiagram() {
           model="Clinical-Longformer"
           color="border-violet-200"
           metrics={[
-            { label: "With notes", value: m.stage2.notes_cohort.toLocaleString() },
-            { label: "AUROC", value: m.stage2.auroc.toFixed(3) },
-            { label: "Confirmed", value: m.stage2.confirmed.toLocaleString() },
-            { label: "Precision ↑", value: `${m.stage2.precision.toFixed(3)} (+21%)` },
-            { label: "Recall (notes)", value: m.stage2.recall_notes.toFixed(3) },
-            { label: "Threshold", value: "Calibrated per age group" },
+            { label: "With notes",   value: STAGE1.notesCohort.toLocaleString() },
+            { label: "AUROC",        value: STAGE2.auroc.toFixed(3) },
+            { label: "Recall",       value: STAGE2.recall.toFixed(3) },
+            { label: "Precision",    value: STAGE2.precision.toFixed(3) },
+            { label: "F2",           value: STAGE2.f2.toFixed(3) },
+            { label: "Confirmed",    value: `${STAGE2.confirmed.toLocaleString()} (${((STAGE2.confirmed / STAGE1.notesCohort) * 100).toFixed(0)}%)` },
           ]}
         />
         <Arrow />
         <StageBox
           number="3"
           title="Explain"
-          subtitle="Plain-language risk narrative for clinicians"
+          subtitle="On-demand clinical narrative for one patient"
           model="phi4-mini (Ollama)"
           color="border-emerald-200"
           metrics={[
-            { label: "Input", value: "Stage 2 confirmed" },
-            { label: "Output", value: "3–5 sentence summary" },
-            { label: "Runtime", value: "~5 sec/patient" },
-            { label: "Deployment", value: "Local (on-device)" },
-            { label: "Training", value: "None — inference only" },
+            { label: "Trigger",     value: "Clinician request" },
+            { label: "Input",       value: "SHAP + attention + delta" },
+            { label: "Output",      value: "2–3 sentence narrative" },
+            { label: "Deployment",  value: "Local (on-device)" },
+            { label: "Training",    value: "None — inference only" },
           ]}
         />
       </div>
@@ -111,12 +124,14 @@ export default function PipelineDiagram() {
           <div className="text-xs text-blue-500">MIMIC-IV admissions</div>
         </div>
         <div className="bg-violet-50 rounded-lg p-3 text-center">
-          <div className="text-xl font-bold text-violet-700">+21%</div>
-          <div className="text-xs text-violet-500">precision gain (Stage 1→2)</div>
+          <div className="text-xl font-bold text-violet-700">
+            {STAGE2.confirmed.toLocaleString()}
+          </div>
+          <div className="text-xs text-violet-500">Stage 2 confirmed</div>
         </div>
         <div className="bg-emerald-50 rounded-lg p-3 text-center">
-          <div className="text-xl font-bold text-emerald-700">0.706</div>
-          <div className="text-xs text-emerald-500">Stage 1 AUROC</div>
+          <div className="text-xl font-bold text-emerald-700">{STAGE2.auroc.toFixed(3)}</div>
+          <div className="text-xs text-emerald-500">Stage 2 AUROC</div>
         </div>
       </div>
     </div>
