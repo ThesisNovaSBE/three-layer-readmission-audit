@@ -1,8 +1,13 @@
-"""Stage 2 inference: classify Stage 1 flagged patients with Clinical-Longformer.
+"""Stage 2 inference: classify Stage 1 flagged patients with FusionLongformer.
 
 Loads the Stage 1 artifact to identify flagged admissions (score >= threshold),
-then runs the fine-tuned Clinical-Longformer on their discharge notes to
-confirm or reject each flag.
+then runs the fine-tuned FusionLongformer on their discharge notes to confirm
+or reject each flag.
+
+If ``models/stage2_fusion_config.json`` exists, the inference model is a
+:class:`~src.stage2.model.FusionLongformer` (structured feature fusion).
+Otherwise the script falls back to a plain ``LongformerForSequenceClassification``
+for compatibility with checkpoints trained before the fusion update.
 
 If ``models/stage2_calibration.json`` exists, applies Platt-scaled per-age-group
 thresholds. Falls back to the global threshold from ``config.yaml`` if not found.
@@ -38,21 +43,29 @@ except ImportError as _torch_err:
         "Install with: pip install torch transformers"
     ) from _torch_err
 
-# DataLoader, tqdm, AutoTokenizer, LongformerForSequenceClassification are
-# used by _run_inference() defined later in this module.
-
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
 from src.schemas import TARGET_COL
-from src.stage2._utils import band_key, get_stage2_model_path
-from src.stage2.dataset import ClinicalNotesDataset, build_notes_dataframe, load_notes
+from src.stage2._utils import STRUCT_FEATURE_COLS, band_key, get_stage2_model_path
+from src.stage2.dataset import (
+    ClinicalNotesDataset,
+    build_notes_dataframe,
+    load_notes,
+    normalize_struct_features,
+)
+from src.stage2.model import FusionLongformer
 
 
 def _prepare_flagged(
     artifact: dict, matrix: pd.DataFrame
 ) -> pd.DataFrame:
-    """Identify Stage 1 flagged admissions and attach age_band_key.
+    """Identify Stage 1 flagged admissions and attach struct features.
+
+    Scores all test-partition admissions with Stage 1 and returns only those
+    at or above the threshold.  The structured feature columns required by
+    :class:`FusionLongformer` are pulled from the feature matrix and attached
+    so they are available for inference.
 
     Args:
         artifact: pre-loaded Stage 1 artifact.
@@ -61,7 +74,8 @@ def _prepare_flagged(
     Returns:
         DataFrame of flagged admissions with columns:
         hadm_id, subject_id, age_band, readmission_30d,
-        stage1_score, stage1_threshold, age_band_key.
+        stage1_score, stage1_threshold, age_band_key,
+        plus all available struct feature columns.
     """
     features = split_xy(matrix)[0]
     test_idx = artifact["test_idx"]
@@ -69,8 +83,9 @@ def _prepare_flagged(
     stage1_scores = artifact["estimator"].predict_proba(x_test)[:, 1]
     stage1_threshold = artifact["threshold"]
 
+    struct_cols = [c for c in STRUCT_FEATURE_COLS if c in matrix.columns]
     test_meta = matrix.iloc[test_idx][
-        ["hadm_id", "subject_id", "age_band", TARGET_COL]
+        ["hadm_id", "subject_id", "age_band", TARGET_COL] + struct_cols
     ].reset_index(drop=True)
     test_meta["stage1_score"] = stage1_scores
     test_meta["stage1_threshold"] = stage1_threshold
@@ -87,33 +102,77 @@ def _prepare_flagged(
     return flagged
 
 
-def _run_inference(
-    notes_df: pd.DataFrame,
-    stage2_path: object,
-    batch_size: int,
-    max_length: int,
-) -> list[float]:
-    """Run Longformer inference and return softmax probabilities for class 1.
+def _load_model(stage2_path) -> object:
+    """Load FusionLongformer if available, else fall back to plain Longformer.
+
+    Fusion config and weights are saved inside ``stage2_path`` by
+    :func:`~src.stage2.train._save_results`.
 
     Args:
-        notes_df:    DataFrame with ``text`` and ``TARGET_COL`` columns.
         stage2_path: path to the fine-tuned model directory.
-        batch_size:  inference batch size.
-        max_length:  tokenization max length.
+
+    Returns:
+        An unfitted model ready for ``.eval()`` and inference.
+    """
+    fusion_cfg_path = stage2_path / "stage2_fusion_config.json"
+    if fusion_cfg_path.exists():
+        fusion_cfg = json.loads(fusion_cfg_path.read_text())
+        model = FusionLongformer(str(stage2_path), fusion_cfg["n_struct_features"])
+        weights_path = stage2_path / "fusion_weights.pt"
+        model.load_state_dict(
+            torch.load(str(weights_path), map_location="cpu", weights_only=True)
+        )
+        print(f"[stage2/predict] Loaded FusionLongformer "
+              f"(n_struct={fusion_cfg['n_struct_features']}) from {stage2_path}")
+        return model
+    print(f"[stage2/predict] No fusion config found — loading plain Longformer from {stage2_path}")
+    return LongformerForSequenceClassification.from_pretrained(str(stage2_path))
+
+
+def _run_inference(
+    notes_df: pd.DataFrame,
+    stage2_path,
+    batch_size: int,
+    max_length: int,
+    scaler_stats: dict | None,
+) -> list[float]:
+    """Run inference and return softmax probabilities for class 1.
+
+    Supports both :class:`FusionLongformer` (with structured features) and the
+    legacy plain ``LongformerForSequenceClassification``.
+
+    Args:
+        notes_df:     DataFrame with ``text``, ``TARGET_COL``, and any struct
+                      feature columns.
+        stage2_path:  path to the fine-tuned model directory.
+        model_dir:    project model directory.
+        batch_size:   inference batch size.
+        max_length:   tokenization max sequence length.
+        scaler_stats: normalisation stats from training (``means`` + ``stds``).
+                      ``None`` for legacy (non-fusion) models.
 
     Returns:
         List of float probabilities (one per row in notes_df).
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(str(stage2_path))
-    dataset = ClinicalNotesDataset(
-        notes_df["text"].tolist(), notes_df[TARGET_COL].tolist(),
-        tokenizer, max_length,
-    )
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    model = LongformerForSequenceClassification.from_pretrained(str(stage2_path))
+    model = _load_model(stage2_path)
     model.to(device)
     model.eval()
+
+    struct_arr: np.ndarray | None = None
+    if scaler_stats is not None:
+        struct_arr, _, _ = normalize_struct_features(
+            notes_df,
+            means=scaler_stats.get("means"),
+            stds=scaler_stats.get("stds"),
+        )
+
+    dataset = ClinicalNotesDataset(
+        notes_df["text"].tolist(), notes_df[TARGET_COL].tolist(),
+        tokenizer, max_length, struct_features=struct_arr,
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     all_probs: list[float] = []
     with torch.no_grad():
@@ -209,6 +268,12 @@ def predict_stage2(
             f"using global threshold={global_threshold:.3f}"
         )
 
+    scaler_json_path = model_dir / "stage2_struct_scaler.json"
+    scaler_stats: dict | None = None
+    if scaler_json_path.exists():
+        scaler_stats = json.loads(scaler_json_path.read_text())
+        print(f"[stage2/predict] Loaded struct scaler from {scaler_json_path}")
+
     if artifact is None:
         artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
@@ -220,12 +285,22 @@ def predict_stage2(
     notes_df = build_notes_dataframe(
         notes, flagged[["hadm_id", "subject_id", TARGET_COL]]
     )
+
+    # Attach struct feature columns from the flagged DataFrame for fusion inference
+    struct_cols = [c for c in STRUCT_FEATURE_COLS if c in flagged.columns]
+    if struct_cols and scaler_stats is not None:
+        notes_df = notes_df.merge(
+            flagged[["hadm_id"] + struct_cols], on="hadm_id", how="left"
+        )
+
     print(
         f"[stage2/predict] Discharge notes available for "
         f"{len(notes_df):,} flagged admissions"
     )
 
-    all_probs = _run_inference(notes_df, stage2_path, batch_size, max_length)
+    all_probs = _run_inference(
+        notes_df, stage2_path, batch_size, max_length, scaler_stats
+    )
 
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = all_probs

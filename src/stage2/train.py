@@ -1,14 +1,20 @@
 """Fine-tune Clinical-Longformer for Stage 2 false-positive pruning.
 
-Key improvements over v1:
-
-- 2048-token sequences (was 512) — captures full average discharge note
-- Age × label stratified training sample — 70+ oversampled
-- Focal loss (gamma=2.0) — upweights hard examples (elderly ambiguous notes)
-- Per-age-group loss multipliers — direct fairness pressure during training
-- Proper patient-level splits: finetune / validation / calibration
-- Gradient checkpointing support for smaller GPUs
-- bf16 / fp16 switches for GPU precision
+Key features
+------------
+- 2048-token sequences with **head+tail truncation** (first 1024 + last 1024
+  tokens) — preserves both the admission summary and the discharge plan.
+- **Structured feature fusion**: Stage 1 probability score + top structured
+  features (age, LOS, Charlson, etc.) fed through a small MLP, concatenated
+  with the Longformer [CLS] embedding before the classifier head.
+- Age × label stratified training sample — 70+ oversampled.
+- Focal loss (gamma=2.0) — upweights hard examples (elderly ambiguous notes).
+- Per-age-group loss multipliers — direct fairness pressure during training.
+- Proper patient-level splits: finetune / validation / calibration.
+- Gradient checkpointing support for smaller GPUs.
+- bf16 / fp16 switches for GPU precision.
+- Automatic crash recovery: resumes from the latest checkpoint if the job is
+  restarted.
 
 Requires:
 
@@ -27,8 +33,10 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import joblib
+import numpy as np
 import pandas as pd
 
 try:
@@ -38,7 +46,6 @@ try:
     from transformers import (
         AutoTokenizer,
         EarlyStoppingCallback,
-        LongformerForSequenceClassification,
         Trainer,
         TrainingArguments,
     )
@@ -50,10 +57,16 @@ except ImportError as _torch_err:
 
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
-from src.data.features import load_feature_matrix
+from src.data.features import load_feature_matrix, split_xy
 from src.schemas import TARGET_COL
-from src.stage2._utils import band_key
-from src.stage2.dataset import ClinicalNotesDataset, build_notes_dataframe, load_notes
+from src.stage2._utils import STRUCT_FEATURE_COLS, band_key
+from src.stage2.dataset import (
+    ClinicalNotesDataset,
+    build_notes_dataframe,
+    load_notes,
+    normalize_struct_features,
+)
+from src.stage2.model import FusionLongformer
 from src.stage2.splits import build_splits
 
 
@@ -108,6 +121,38 @@ def _parse_hparams(cfg: AppConfig) -> _TrainHparams:
     )
 
 
+# ── Structured feature helpers ────────────────────────────────────────────────
+
+class _StructData(NamedTuple):
+    """Normalised structured feature arrays + scaler statistics."""
+
+    train: np.ndarray
+    val: np.ndarray
+    scaler: dict
+
+
+def _make_struct_data(
+    ft_notes: pd.DataFrame,
+    train_df: pd.DataFrame,
+    val_notes: pd.DataFrame,
+) -> _StructData:
+    """Fit z-score scaler on the fine-tune set and transform train + val.
+
+    Args:
+        ft_notes:  full fine-tune notes DataFrame (pre-sampling; scaler is fit
+                   on the full distribution, not the sampled subset).
+        train_df:  age-stratified sampled fine-tune notes (passed to training).
+        val_notes: validation notes DataFrame.
+
+    Returns:
+        :class:`_StructData` with normalised arrays and the scaler dict.
+    """
+    _, means, stds = normalize_struct_features(ft_notes)
+    train_arr, _, _ = normalize_struct_features(train_df, means, stds)
+    val_arr, _, _ = normalize_struct_features(val_notes, means, stds)
+    return _StructData(train=train_arr, val=val_arr, scaler={"means": means, "stds": stds})
+
+
 # ── Data helpers ──────────────────────────────────────────────────────────────
 
 def _compute_metrics(eval_pred: tuple) -> dict:
@@ -137,7 +182,7 @@ def _build_age_stratified_sample(
         seed:     random seed for reproducibility.
 
     Returns:
-        Shuffled DataFrame of sampled notes.
+        Shuffled DataFrame of sampled notes (including all original columns).
     """
     parts = []
     for key, n_target in targets.items():
@@ -177,7 +222,11 @@ def _load_split_notes(
     ft_hadm_ids: set,
     val_hadm_ids: set,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load and split discharge notes for the finetune and validation sets.
+    """Load and split discharge notes, augmented with Stage 1 scores + struct features.
+
+    Computes Stage 1 probability scores for the training partition and joins
+    them together with the structured feature columns from the feature matrix
+    so that both are available for :class:`FusionLongformer` training.
 
     Args:
         cfg:          validated project config.
@@ -187,21 +236,35 @@ def _load_split_notes(
 
     Returns:
         Tuple ``(ft_notes, val_notes)`` — each a notes DataFrame with
-        ``age_band``, ``text``, and ``TARGET_COL`` columns.
+        ``age_band``, ``text``, ``TARGET_COL``, ``stage1_score``, and any
+        available structured feature columns.
     """
     matrix = load_feature_matrix(cfg, artifact["mode"])
-    labels_df = matrix[["hadm_id", "subject_id", "age_band", TARGET_COL]]
+    all_feats = split_xy(matrix)[0]
+    train_idx = artifact["train_idx"]
+
+    # Compute Stage 1 probability scores for the training partition
+    x_train = all_feats.iloc[train_idx][artifact["feature_cols"]]
+    s1_scores = artifact["estimator"].predict_proba(x_train)[:, 1]
+
+    struct_cols = [c for c in STRUCT_FEATURE_COLS if c in matrix.columns]
+    labels_df = matrix.iloc[train_idx][
+        ["hadm_id", "subject_id", "age_band", TARGET_COL] + struct_cols
+    ].copy().reset_index(drop=True)
+    labels_df["stage1_score"] = s1_scores
 
     all_needed = ft_hadm_ids | val_hadm_ids
     print(f"[stage2/train] Loading notes for {len(all_needed):,} admissions ...")
     notes = load_notes(cfg, hadm_ids=all_needed)
 
-    def _build_split_df(hadm_ids: set) -> pd.DataFrame:
+    merge_cols = ["hadm_id", "age_band"] + struct_cols + ["stage1_score"]
+
+    def _build(hadm_ids: set) -> pd.DataFrame:
         sub = labels_df[labels_df["hadm_id"].isin(hadm_ids)]
         df = build_notes_dataframe(notes, sub[["hadm_id", "subject_id", TARGET_COL]])
-        return df.merge(labels_df[["hadm_id", "age_band"]], on="hadm_id", how="left")
+        return df.merge(sub[merge_cols], on="hadm_id", how="left")
 
-    return _build_split_df(ft_hadm_ids), _build_split_df(val_hadm_ids)
+    return _build(ft_hadm_ids), _build(val_hadm_ids)
 
 
 # ── Training setup helpers ────────────────────────────────────────────────────
@@ -233,9 +296,7 @@ def _compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
     """Return a [neg_weight, pos_weight] tensor for cross-entropy loss."""
     pos = int((train_df[TARGET_COL] == 1).sum())
     neg = int((train_df[TARGET_COL] == 0).sum())
-    print(
-        f"[stage2/train] Class weights: neg=1.0  pos={neg / pos:.2f}"
-    )
+    print(f"[stage2/train] Class weights: neg=1.0  pos={neg / pos:.2f}")
     return torch.tensor([1.0, neg / pos], dtype=torch.float32)
 
 
@@ -266,14 +327,11 @@ def _build_training_args(
         learning_rate=hp.learning_rate,
         warmup_ratio=hp.warmup_ratio,
         weight_decay=hp.weight_decay,
-        # Step-level eval + save so a crash never loses more than save_steps steps
-        # evaluation_strategy is the name in Transformers <4.41; eval_strategy in >=4.41.
-        # Using the old name works on both (new versions alias it with a deprecation warning).
         evaluation_strategy="steps",
         eval_steps=hp.save_steps,
         save_strategy="steps",
         save_steps=hp.save_steps,
-        save_total_limit=3,          # keep only the 3 most recent checkpoints
+        save_total_limit=3,
         load_best_model_at_end=True,
         metric_for_best_model="auprc",
         greater_is_better=True,
@@ -292,12 +350,29 @@ def _save_results(
     val_dataset: ClinicalNotesDataset,
     model_dir,
     tokenizer: object,
+    scaler_stats: dict,
 ) -> None:
-    """Save the best model, tokenizer, and validation metrics."""
+    """Save the best model, tokenizer, struct scaler, fusion config, and val metrics."""
     save_path = model_dir / "stage2_longformer_best"
-    trainer.save_model(str(save_path))
+
+    # Save Longformer backbone (config + weights) for standalone loading
+    trainer.model.longformer.save_pretrained(str(save_path))
     tokenizer.save_pretrained(str(save_path))  # type: ignore[union-attr]
-    print(f"[stage2/train] Saved fine-tuned model -> {save_path}")
+
+    # Full model state dict (fine-tuned Longformer + struct MLP + classifier head)
+    torch.save(trainer.model.state_dict(), str(save_path / "fusion_weights.pt"))
+
+    # Fusion config needed to reconstruct the model at inference time
+    fusion_cfg = {
+        "n_struct_features": trainer.model.n_struct_features,
+        "num_labels": trainer.model.classifier.out_features,
+    }
+    (save_path / "stage2_fusion_config.json").write_text(json.dumps(fusion_cfg))
+
+    # Normalisation stats for reproducing the same scaling at inference
+    (model_dir / "stage2_struct_scaler.json").write_text(json.dumps(scaler_stats))
+
+    print(f"[stage2/train] Saved fusion model -> {save_path}")
 
     results = trainer.evaluate(val_dataset)
     auprc_val = results.get("eval_auprc", float("nan"))
@@ -312,7 +387,7 @@ def _save_results(
 # ── Main training function ────────────────────────────────────────────────────
 
 def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
-    """Fine-tune Clinical-Longformer for Stage 2.
+    """Fine-tune FusionLongformer for Stage 2.
 
     Args:
         cfg:      validated project config.
@@ -348,7 +423,11 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
     if not hp.age_targets:
         print(f"[stage2/train] No age targets — using all {len(train_df):,} fine-tune notes")
 
+    # Normalise structured features: fit on full fine-tune set, apply to train + val
+    struct_data = _make_struct_data(ft_notes, train_df, val_notes)
+
     print(f"[stage2/train] Train: {len(train_df):,}  |  Val: {len(val_notes):,}")
+    print(f"[stage2/train] Struct features: {struct_data.train.shape[1]} columns")
 
     train_gw = (
         [hp.group_lw.get(band_key(b), 1.0) for b in train_df["age_band"]]
@@ -360,19 +439,20 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
 
     train_dataset = ClinicalNotesDataset(
         train_df["text"].tolist(), train_df[TARGET_COL].tolist(),
-        tokenizer, hp.max_length, group_weights=train_gw,
+        tokenizer, hp.max_length,
+        struct_features=struct_data.train,
+        group_weights=train_gw,
     )
     val_dataset = ClinicalNotesDataset(
         val_notes["text"].tolist(), val_notes[TARGET_COL].tolist(),
         tokenizer, hp.max_length,
+        struct_features=struct_data.val,
     )
 
-    print(f"[stage2/train] Loading model from '{hp.model_name}' ...")
-    model = LongformerForSequenceClassification.from_pretrained(
-        hp.model_name, num_labels=2, ignore_mismatched_sizes=True
-    )
+    print(f"[stage2/train] Loading FusionLongformer from '{hp.model_name}' ...")
+    model = FusionLongformer(hp.model_name, n_struct_features=struct_data.train.shape[1])
     if hp.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        model.longformer.gradient_checkpointing_enable()
         print("[stage2/train] Gradient checkpointing enabled")
 
     class_weights = _compute_class_weights(train_df)
@@ -383,11 +463,6 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
 
     device = _detect_device()
     training_args = _build_training_args(hp, model_dir, device, seed)
-
-    # Capture loop-scoped variables for use inside the Trainer closure.
-    _use_focal = hp.use_focal
-    _focal_gamma = hp.focal_gamma
-    _class_weights = class_weights
 
     class FocalGroupWeightedTrainer(Trainer):
         """Custom Trainer applying focal loss and per-group loss weights."""
@@ -401,12 +476,12 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
 
             ce = F.cross_entropy(
                 logits, labels,
-                weight=_class_weights.to(logits.device),
+                weight=class_weights.to(logits.device),
                 reduction="none",
             )
-            if _use_focal:
+            if hp.use_focal:
                 pt = torch.exp(-ce)
-                ce = ((1.0 - pt) ** _focal_gamma) * ce
+                ce = ((1.0 - pt) ** hp.focal_gamma) * ce
             if group_weight is not None:
                 ce = ce * group_weight.to(logits.device)
 
@@ -426,7 +501,7 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
         resume_from_checkpoint=_find_resume_checkpoint(model_dir / "stage2_checkpoints")
     )
 
-    _save_results(trainer, val_dataset, model_dir, tokenizer)
+    _save_results(trainer, val_dataset, model_dir, tokenizer, struct_data.scaler)
     print("[stage2/train] Done. Run calibrate.py next.")
 
 
