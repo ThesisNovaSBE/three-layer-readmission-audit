@@ -30,6 +30,14 @@ from src.data import synthetic as synth
 from src.data.comorbidity import charlson_per_admission
 from src.schemas import ID_COLS, TARGET_COL
 
+# MIMIC-IV v3 uses "EW EMER." / "DIRECT EMER." — not the legacy "EMERGENCY" string.
+# The legacy string is retained so synthetic data (which uses "EMERGENCY") still works.
+_EMERGENCY_TYPES = frozenset({"EMERGENCY", "EW EMER.", "DIRECT EMER."})
+_OBSERVATION_TYPES = frozenset({
+    "EU OBSERVATION", "OBSERVATION ADMIT",
+    "DIRECT OBSERVATION", "AMBULATORY OBSERVATION",
+})
+
 # ── Curated MIMIC-IV itemid maps (adjust against d_labitems if needed) ──
 LAB_ITEMIDS = {
     "glucose": [50931, 50809], "creatinine": [50912], "hemoglobin": [51222, 50811],
@@ -196,6 +204,27 @@ def _aggregate_measurements(
     return out.reset_index() if out is not None else pd.DataFrame({"hadm_id": []})
 
 
+def _load_note_hadm_ids(cfg: AppConfig) -> set | None:
+    """Return the set of hadm_ids that have a discharge note, or None if unavailable.
+
+    Reads only the ``hadm_id`` column — no text loaded — so the call is fast
+    even against the multi-GB notes file.  Returns None when the notes directory
+    is not configured or the file cannot be found, which the caller treats as
+    unknown (NaN) rather than absent (0).
+    """
+    note_dir = cfg.data.mimic_iv_note_dir
+    if not note_dir:
+        return None
+    for candidate in [
+        Path(note_dir) / "note" / "discharge.csv.gz",
+        Path(note_dir) / "discharge.csv.gz",
+    ]:
+        if candidate.exists():
+            ids = pd.read_csv(candidate, usecols=["hadm_id"])["hadm_id"].dropna()
+            return set(ids.astype("int64"))
+    return None
+
+
 def build_features(tables: dict[str, pd.DataFrame], cfg: AppConfig) -> pd.DataFrame:
     """Build the Stage 1 feature matrix from raw data tables.
 
@@ -221,7 +250,15 @@ def build_features(tables: dict[str, pd.DataFrame], cfg: AppConfig) -> pd.DataFr
     # Index-admission traits
     adm["los_days"] = (adm["dischtime"] - adm["admittime"]).dt.total_seconds() / 86400
     adm["admission_type_emergency"] = (
-        adm["admission_type"].str.upper() == "EMERGENCY"
+        adm["admission_type"].str.upper().isin(_EMERGENCY_TYPES)
+    ).astype(int)
+    adm["admission_type_observation"] = (
+        adm["admission_type"].str.upper().isin(_OBSERVATION_TYPES)
+    ).astype(int)
+    adm["is_medicaid_medicare"] = (
+        adm["insurance"].str.upper().isin({"MEDICAID", "MEDICARE"})
+        if "insurance" in adm.columns
+        else 0
     ).astype(int)
     adm["came_via_ed"] = (
         adm["edregtime"].notna()
@@ -259,6 +296,14 @@ def build_features(tables: dict[str, pd.DataFrame], cfg: AppConfig) -> pd.DataFr
     adm["age"] = adm["anchor_age"]
     adm["gender_M"] = (adm["gender"].str.upper() == "M").astype(int)
 
+    # Note availability — NaN when notes directory not configured (XGBoost routes
+    # NaN to its learned default branch; no imputation needed).
+    note_ids = _load_note_hadm_ids(cfg)
+    if note_ids is not None:
+        adm["has_discharge_note"] = adm["hadm_id"].isin(note_ids).astype(int)
+    else:
+        adm["has_discharge_note"] = float("nan")
+
     # Comorbidity index
     como = charlson_per_admission(diagnoses)
     adm = adm.merge(como, on="hadm_id", how="left")
@@ -282,8 +327,11 @@ def build_features(tables: dict[str, pd.DataFrame], cfg: AppConfig) -> pd.DataFr
 
     # Assemble final matrix
     feature_cols = [
-        "age", "gender_M", "los_days", "admission_type_emergency", "came_via_ed",
-        "discharged_to_facility", "admit_hour", "admit_is_weekend", "admit_is_night",
+        "age", "gender_M", "los_days",
+        "admission_type_emergency", "admission_type_observation",
+        "is_medicaid_medicare", "has_discharge_note",
+        "came_via_ed", "discharged_to_facility",
+        "admit_hour", "admit_is_weekend", "admit_is_night",
         "n_prior_admissions", "n_prior_ed_visits", "days_since_last_discharge",
         "charlson_index", "n_comorbidities",
     ]

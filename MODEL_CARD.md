@@ -1,12 +1,19 @@
 # Model Card — Readmission Prediction Pipeline
 
+> **See `docs/ARCHITECTURE.md` for the current design.** The Stage 1/Stage 2
+> metrics below are from before the 2026-08-25 session (recall-floor
+> threshold, 2048-token window) and are kept as the last known-good
+> reference point — retraining under the new config (capacity-constrained
+> threshold, 4096-token window) is pending. The Stage 3 section has been
+> rewritten to match the new independent-auditor design, already in code.
+
 ## Model Details
 
-- **Stage 1:** Classical ML classifiers (Logistic Regression, XGBoost, HistGradientBoosting) on structured EHR features
-- **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`) on discharge notes — 4096-token context, trained on MIMIC-III
-- **Stage 3 (optional):** Local generative explanation via Ollama (`phi4-mini`)
+- **Stage 1:** Classical ML classifiers (Logistic Regression, XGBoost, HistGradientBoosting) on structured EHR features; capacity-constrained operating point (primary, since 2026-08-25) with recall-floor kept as a secondary comparison table
+- **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`) on discharge notes — 4096-token context (raised from 2048 on 2026-08-25), trained on MIMIC-III; produces an independent combined risk estimate, not a gate on Stage 1's flag
+- **Stage 3:** Independent LLM audit via Ollama (`phi4-mini`, temperature=0) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
-- **Model type:** Two-stage triage-and-verify classification pipeline
+- **Model type:** Three-layer LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
 
 ## Intended Use
@@ -89,30 +96,44 @@ All Stage 1+2 recall figures are relative to the 11,186 positives *within the no
 
 **Calibration note (v1):** Stage 2 scores cluster near the 0.5 boundary (no confirmed cases above 0.6), indicating underconfidence. This is attributable to training on only 15k notes (6% of available data). The v2 retrain on 249k notes on A100 80GB is expected to resolve this; per-group Platt scaling is applied post-training regardless.
 
-## Stage 3 — Cross-Modal Discordance Analysis (phi4-mini)
+## Stage 3 — Independent LLM Audit (phi4-mini)
 
-Stage 3 processes **all** Stage 1 flagged patients (confirmed and rejected by Stage 2).
-For each patient, phi4-mini receives:
-- Top-k SHAP features from Stage 1 (structured risk drivers)
-- Top-n sentences from the discharge note with highest Clinical-Longformer attention weight
-- Stage 2 decision and probability
+Rewritten 2026-08-25. Stage 3 is on-demand (one patient per call, via the
+API), not yet run in batch. For each patient, phi4-mini receives:
+- Stage 1's score + top-k SHAP-ranked structured risk factors
+- Stage 2's independently-derived combined score
+- A quantitatively pre-computed discordance mode (never chosen by the LLM)
+- The discharge note itself (near-full text, ~20,000-char safety cap — not a
+  5-sentence attention summary)
+
+phi4-mini reaches its **own** independent decision — it is not asked to
+narrate or classify a decision Stage 2 already made.
 
 **Output per patient:**
 
 | Field | Description |
 |-------|-------------|
-| `discordance_mode` | `CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES` |
-| `primary_category` | Dominant clinical domain driving any discordance |
-| `explanation` | One-sentence clinician-facing summary |
+| `decision` | `uphold` / `override` — phi4-mini's own judgment |
+| `primary_clinical_domain` | Dominant clinical domain behind the decision |
+| `clinical_justification` | 2-4 sentence justification citing note content |
+| `r1`, `r2`, `displacement`, `discordance_mode` | Quantitative context (percentile ranks + mode), computed before the LLM call |
 
-**Discordance category taxonomy:**
-`social_support` · `discharge_planning` · `functional_status` · `frailty_markers` ·
-`medication_adherence` · `housing_social_risk` · `care_complexity` · `cognition` ·
-`structured_confirmed`
+**Clinical domain taxonomy:**
+`social_support` · `frailty` · `palliative_intent` · `care_coordination` ·
+`clinical_trajectory` · `other`
 
-**Research contribution:** The population-level aggregation of discordance modes and categories across all patients produces an empirical finding on which clinical domains in discharge notes explain the predictive gap between structured EHR data and free-text. This is a novel result enabled by the three-stage pipeline architecture.
+**Discordance mode** is computed from percentile-rank displacement of
+stage1_score vs. stage2_score within the flagged+noted cohort — not raw
+score subtraction, which was tried and rejected as fragile to unequal
+calibration between the two model families (see `docs/ARCHITECTURE.md`).
 
-*Stage 3 results pending Stage 2 retraining on 249k notes (A100 80GB, in progress).*
+**Research contribution:** No prior work in the literature review's
+49-study systematic search uses an LLM as an independent auditor of another
+model's output (as opposed to predictor, feature extractor, or explainer of
+its own prediction). A batch runner producing Stage 3 decisions across the
+full test partition — needed to evaluate RQ2 (net reclassification vs.
+structured triage) and RQ3 (disagreement characterisation) at scale — does
+not exist yet; see `docs/ARCHITECTURE.md` §4.
 
 ## Limitations
 

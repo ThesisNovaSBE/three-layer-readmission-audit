@@ -1,3 +1,9 @@
+> **Superseded 2026-08-25.** Most C1-C12/N1-N8 items here predate the Stage 2
+> fairness rebuild, the Stage 3 rewrite, and the capacity-constrained
+> operating point. See `docs/ARCHITECTURE.md` for current state and
+> `sessions/2026-08-25_session-15.md` for what changed. Kept for history —
+> useful background on why decisions were made, not a current task list.
+
 # Thesis Sanity Check & Working Backlog — Revision 2 (2026-07-06)
 
 > **Purpose.** A single honest review of (1) where the code actually stands, (2) whether the

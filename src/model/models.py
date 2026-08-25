@@ -70,13 +70,19 @@ def suggest_params(name: str, trial: object) -> dict:
     if name == "xgboost":
         return {
             "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            "max_depth": trial.suggest_int("max_depth", 3, 12),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+            "colsample_bynode": trial.suggest_float("colsample_bynode", 0.5, 1.0),
+            "gamma": trial.suggest_float("gamma", 0.0, 10.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 20.0, log=True),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 20.0, log=True),
+            # max_delta_step > 0 makes updates more conservative on imbalanced data
+            "max_delta_step": trial.suggest_int("max_delta_step", 0, 10),
+            # max_bin controls histogram granularity for hist tree method
+            "max_bin": trial.suggest_int("max_bin", 128, 512),
         }
     if name == "histgradientboosting":
         return {

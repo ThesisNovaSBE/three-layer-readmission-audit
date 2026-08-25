@@ -1,19 +1,35 @@
-"""Stage 3 prompt construction and phi4-mini response parsing.
+"""Stage 3: independent LLM auditing of Stage 1-flagged admissions.
 
-For a single patient, builds a prompt that reasons about the *tension* between
-what Stage 1 (structured EHR data) and Stage 2 (discharge note) said, then
-calls phi4-mini to produce a clinical narrative explaining that tension.
+Rewritten 2026-08-25 (session 15). Prior versions asked phi4-mini either to
+narrate Stage 1's own SHAP values (session 11's "old Stage 3" — rejected as a
+well-trodden explainer pattern with no novel finding) or to freely classify a
+9-category discordance taxonomy while also acting as an explainer of Stage 2's
+decision. Neither implements what the literature review's own gap analysis
+calls for: an LLM that independently audits *another model's* output.
 
-The key input the prompt uses that the old single-sentence approach lacked is
-the **score delta**: Stage 2 score minus Stage 1 score.  A large negative delta
-means the note strongly reassured; near zero means the modalities agreed; a
-large positive delta means the note revealed additional risk.  phi4-mini is
-asked to explain *why* that delta exists, citing specific note content.
+The design here — confirmed across three planning artifacts (the 2026-08-16
+methodological evaluation, the 2026-08-17 Project Brief, and the Working
+Paper) — has phi4-mini act as a deliberating auditor. It receives Stage 1's
+score and SHAP attributions, Stage 2's independently-derived combined score,
+and the discharge note itself, and returns its own uphold/override judgment —
+not a narration of a decision already made by Stage 2.
 
-Constants
----------
-DISCORDANCE_MODES      : valid values for the ``discordance_mode`` field.
-DISCORDANCE_CATEGORIES : valid values for the ``primary_category`` field.
+Two things are deliberately NOT delegated to the LLM:
+
+1. **Discordance mode.** Computed quantitatively from percentile-rank
+   displacement of stage1_score vs. stage2_score within the flagged+noted
+   cohort (see :func:`compute_discordance`), not asked of the model. Percentile
+   rank is used instead of a raw-probability difference (the original design)
+   because Stage 1 and Stage 2 are different model families and are not
+   guaranteed to be equally well-calibrated even after isotonic calibration —
+   rank displacement is invariant to that risk. This also removed the need for
+   Stage 1 and Stage 2 to share an identical feature space "for the discordance
+   measure to be valid": they don't (Stage 1 uses ~40 features including labs
+   and vitals; Stage 2 uses 8), and no claim of clean attribution to the note
+   alone is made — the two models simply use different information, and when
+   they disagree, that is what Stage 3 investigates.
+2. **Whether the auditor's own decision is reproducible.** Ollama temperature
+   is pinned at 0 (``cfg.stage3.temperature``) for every evaluation run.
 """
 
 from __future__ import annotations
@@ -21,6 +37,8 @@ from __future__ import annotations
 import json
 import textwrap
 from typing import Any
+
+import numpy as np
 
 try:
     import ollama
@@ -35,116 +53,188 @@ from src.config_schema import AppConfig
 
 # ── Taxonomy ───────────────────────────────────────────────────────────────────
 
+DECISIONS: tuple[str, ...] = ("uphold", "override")
+
 DISCORDANCE_MODES: tuple[str, ...] = (
-    "CONCORDANT",      # note and structured data agree on risk level
-    "NOTE_MITIGATES",  # note contains reassuring factors despite bad numbers
-    "NOTE_AMPLIFIES",  # note reveals additional risk not captured in structured data
+    "CONCORDANT",      # Stage 1 and Stage 2 rank this patient similarly
+    "NOTE_MITIGATES",  # Stage 2 ranks the patient markedly lower risk than Stage 1
+    "NOTE_AMPLIFIES",  # Stage 2 ranks the patient markedly higher risk than Stage 1
 )
 
-DISCORDANCE_CATEGORIES: tuple[str, ...] = (
-    "social_support",       # family support, home care, social isolation
-    "discharge_planning",   # follow-up arranged, care coordination quality
-    "functional_status",    # mobility, ADL capacity, independence level
-    "frailty_markers",      # explicit frailty language, debility, falls history
-    "medication_adherence", # patient understanding, polypharmacy management
-    "housing_social_risk",  # lives alone, housing instability
-    "care_complexity",      # multiple specialists, complex discharge regimen
-    "cognition",            # delirium, dementia, confusion documented in note
-    "structured_confirmed", # note directly mirrors the lab or vital signals
+CLINICAL_DOMAINS: tuple[str, ...] = (
+    "social_support",     # family support, home care, social isolation, living alone
+    "frailty",             # explicit frailty language, debility, falls history
+    "palliative_intent",   # hospice, comfort-focused care, goals-of-care discussion
+    "care_coordination",   # follow-up arranged, discharge planning quality, polypharmacy
+    "clinical_trajectory", # trend in labs/vitals/course not captured by static features
+    "other",
 )
 
-_NOTE_TRUNCATE_CHARS = 1_500
+# Generous safety cap, not a routine truncation. Session 14 measured median
+# MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
+# (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
+# The old cap (1,500 chars, ~250 words) truncated to ~6% of what Stage 2 sees
+# and was flagged in the Working Paper as an unresolved confound for
+# discordance interpretation — this raises it so both stages read materially
+# the same document for all but pathologically long notes.
+_NOTE_MAX_CHARS = 20_000
 
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = textwrap.dedent("""
-    You are a clinical decision support system explaining a two-stage hospital
-    readmission prediction model to clinicians.
+    You are an independent clinical auditor reviewing a 30-day hospital
+    readmission risk alert raised by a structured EHR model.
 
-    Your job: explain in plain clinical language why the discharge note agreed
-    or disagreed with the structured EHR risk signal for one specific patient.
-    Be precise — cite actual clinical content from the note.
-    Do not invent information not present in the inputs.
+    You will be given: the structured model's risk score and its stated
+    reasons (SHAP attributions), a second, independently-derived risk estimate
+    from a model that reads the discharge note, and the discharge note itself.
+
+    Your job is to reach your OWN judgment about whether this alert should be
+    upheld or overridden — you are not explaining or narrating a decision
+    someone else already made. Read the note as a clinician would. Be
+    specific and cite actual clinical content. Do not invent information not
+    present in the inputs.
+
     Return ONLY valid JSON. No text outside the JSON object.
 """).strip()
 
 _USER_TEMPLATE = textwrap.dedent("""
-    A patient was assessed by a two-stage 30-day readmission prediction system.
+    A structured model flagged this patient as high-risk for 30-day
+    readmission.
 
-    ── STAGE 1 (XGBoost · structured EHR) ──────────────────────────────
-    Score: {stage1_score:.3f}   Flagged at threshold ≥ {stage1_threshold:.3f}
+    ── STRUCTURED RISK ESTIMATE (XGBoost) ────────────────────────────────
+    Score: {stage1_score:.3f}   Flagged at threshold >= {stage1_threshold:.3f}
     Top structured risk factors (SHAP-ranked):
     {shap_block}
 
-    ── STAGE 2 (Clinical-Longformer · discharge note) ───────────────────
-    Score: {stage2_score:.3f}   Threshold: {stage2_threshold:.3f}
-    Decision: {verdict}
-    Score delta (Stage 2 − Stage 1): {delta:+.3f}  [{delta_label}]
+    ── COMBINED RISK ESTIMATE (structured features + discharge note) ─────
+    Score: {stage2_score:.3f}
+    This model saw the same structured features as above, plus the discharge
+    note. It was trained independently and does not know the score above.
 
-    Key discharge note content:
+    ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
+    Within the cohort of flagged, note-covered patients, this patient ranks
+    at the {r1:.0f}th percentile on the structured estimate and the
+    {r2:.0f}th percentile on the combined estimate (displacement:
+    {displacement:+.0f} percentile points -> {mode}).
+      NOTE_MITIGATES -> the combined estimate ranks this patient markedly
+                         lower risk than the structured estimate alone.
+      NOTE_AMPLIFIES -> the combined estimate ranks this patient markedly
+                         higher risk than the structured estimate alone.
+      CONCORDANT     -> the two estimates rank this patient similarly.
+    This is context, not a conclusion — reach your own judgment from the
+    evidence below.
+
+    ── DISCHARGE NOTE ───────────────────────────────────────────────────────
     {note_block}
+    {attention_block}
 
-    ── HOW TO READ THE DELTA ────────────────────────────────────────────
-      Strongly negative → the note contained reassuring content that
-                          outweighs what the structured numbers implied.
-      Near zero         → both modalities agree on the risk level.
-      Strongly positive → the note revealed additional risk not present
-                          in the structured data.
-
-    ── YOUR TASK ────────────────────────────────────────────────────────
-    Explain why Stage 2 {confirmed_or_rejected} the Stage 1 flag.
-    Be specific: what clinical content in the note explains the delta?
-    How does the note relate to the top structured risk factors above?
+    ── YOUR TASK ────────────────────────────────────────────────────────────
+    Decide, independently, whether this readmission-risk alert should be
+    upheld or overridden. Base your decision on the discharge note and both
+    risk estimates together — not on the discordance label alone.
 
     Return ONLY a JSON object with exactly these three fields:
 
-    "discordance_mode": one of {modes}
-      CONCORDANT     — note and structured data agree on risk
-      NOTE_MITIGATES — note contains reassuring content despite bad numbers
-      NOTE_AMPLIFIES — note reveals additional risk not in structured data
+    "decision": one of {decisions}
+      uphold   — the alert should stand; the note does not provide grounds
+                 to suppress it
+      override — the note provides specific, documented grounds to suppress
+                 this alert (e.g. a planned return, a robust support system,
+                 or explicitly reassuring clinical trajectory)
 
-    "primary_category": the single most relevant clinical domain, one of:
-      {categories}
+    "primary_clinical_domain": the single most relevant domain, one of:
+      {domains}
 
-    "narrative": 2-3 sentences in plain clinical language. Cite specific
-      content from the note. Explain the connection between the structured
-      risk factors and what the note says.
+    "clinical_justification": 2-4 sentences. Cite specific content from the
+      note. State what drove your decision.
 """).strip()
+
+
+# ── Discordance (quantitative, not LLM-determined) ──────────────────────────────
+
+def _percentile_rank(value: float, population: np.ndarray) -> float:
+    """Return the percentile rank of ``value`` within ``population`` (0-100)."""
+    population = np.asarray(population, dtype=float)
+    if population.size == 0:
+        return 50.0
+    return float((population <= value).mean() * 100.0)
+
+
+def compute_discordance(
+    stage1_score: float,
+    stage2_score: float,
+    cohort_stage1_scores: np.ndarray,
+    cohort_stage2_scores: np.ndarray,
+    displacement_pp: float = 20.0,
+) -> dict[str, float | str]:
+    """Return percentile-rank displacement and discordance mode for one patient.
+
+    Displacement is invariant to any residual, unequal miscalibration between
+    Stage 1 (XGBoost) and Stage 2 (FusionLongformer) — two different model
+    families are not guaranteed to share the same calibration error even after
+    isotonic calibration, so a raw ``stage2_score - stage1_score`` difference
+    is not a reliable measure of disagreement. Rank displacement only requires
+    that each score is a meaningful risk ordering within its own cohort.
+
+    Args:
+        stage1_score:          this patient's Stage 1 probability.
+        stage2_score:          this patient's Stage 2 probability.
+        cohort_stage1_scores:  Stage 1 scores for the flagged+noted cohort.
+        cohort_stage2_scores:  Stage 2 scores for the same cohort.
+        displacement_pp:       |displacement| >= this (percentile points)
+                                is classified as discordant.
+
+    Returns:
+        Dict with ``r1``, ``r2``, ``displacement``, ``mode``.
+    """
+    r1 = _percentile_rank(stage1_score, cohort_stage1_scores)
+    r2 = _percentile_rank(stage2_score, cohort_stage2_scores)
+    displacement = r2 - r1
+    if displacement <= -displacement_pp:
+        mode = "NOTE_MITIGATES"
+    elif displacement >= displacement_pp:
+        mode = "NOTE_AMPLIFIES"
+    else:
+        mode = "CONCORDANT"
+    return {"r1": r1, "r2": r2, "displacement": displacement, "mode": mode}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _delta_label(delta: float) -> str:
-    """Return a short human-readable interpretation of the score delta."""
-    if delta < -0.30:
-        return "note strongly mitigates structured risk"
-    if delta < -0.10:
-        return "note somewhat mitigates structured risk"
-    if delta <= 0.10:
-        return "modalities broadly agree"
-    if delta <= 0.30:
-        return "note somewhat amplifies risk"
-    return "note strongly amplifies risk"
+def _note_block(note_text: str) -> str:
+    """Return the discharge note, capped at a generous safety limit."""
+    text = note_text.strip()
+    if not text:
+        return "  (discharge note not available)"
+    if len(text) > _NOTE_MAX_CHARS:
+        text = text[:_NOTE_MAX_CHARS]
+        return f"(discharge note, capped at {_NOTE_MAX_CHARS:,} chars)\n  {text}"
+    return f"(full discharge note, {len(text):,} chars)\n  {text}"
 
 
-def _note_block(attention_sentences: list[str], note_text: str) -> str:
-    """Return the best available note representation for the prompt."""
-    if attention_sentences:
-        lines = "\n".join(
-            f"  [{i + 1}] {s}" for i, s in enumerate(attention_sentences)
-        )
-        return f"(top-attended sentences from Clinical-Longformer)\n{lines}"
-    if note_text.strip():
-        truncated = note_text.strip()[:_NOTE_TRUNCATE_CHARS]
-        return f"(discharge note, truncated to {_NOTE_TRUNCATE_CHARS} chars)\n  {truncated}"
-    return "  (discharge note not available)"
+def _attention_block(attention_sentences: list[str]) -> str:
+    """Return an optional auxiliary hint of what Stage 2 attended to most.
+
+    Informational only — per Jain & Wallace (2019), attention weights are not
+    a faithful explanation of Stage 2's decision. Never presented as "the
+    reason", only as "regions of the note Stage 2's attention concentrated on".
+    """
+    if not attention_sentences:
+        return ""
+    lines = "\n".join(f"  [{i + 1}] {s}" for i, s in enumerate(attention_sentences))
+    return (
+        "\n(For reference only — regions of the note the combined model's "
+        "attention concentrated on, not a faithful explanation of its score:)\n"
+        f"{lines}"
+    )
 
 
 _PARSE_FAILURE: dict[str, Any] = {
-    "discordance_mode": None,
-    "primary_category": None,
-    "narrative": "",
+    "decision": None,
+    "primary_clinical_domain": None,
+    "clinical_justification": "",
     "annotation_failed": True,
 }
 
@@ -152,8 +242,8 @@ _PARSE_FAILURE: dict[str, Any] = {
 def _parse_response(raw: str) -> dict[str, Any]:
     """Parse phi4-mini JSON response into a flat annotation dict.
 
-    Returns ``annotation_failed=True`` (with ``None`` mode/category) on any
-    parse error so callers can distinguish a real CONCORDANT from a silent
+    Returns ``annotation_failed=True`` (with ``None`` decision/domain) on any
+    parse error so callers can distinguish a real "uphold" from a silent
     failure.
     """
     data: dict | None = None
@@ -169,20 +259,25 @@ def _parse_response(raw: str) -> dict[str, Any]:
                 pass
 
     if data is None:
-        return {**_PARSE_FAILURE, "narrative": raw.strip()[:300]}
+        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:300]}
 
-    mode = data.get("discordance_mode", "")
-    cat = data.get("primary_category", "")
-    valid_mode = mode if mode in DISCORDANCE_MODES else None
-    valid_cat = cat if cat in DISCORDANCE_CATEGORIES else None
+    decision = data.get("decision", "")
+    domain = data.get("primary_clinical_domain", "")
+    valid_decision = decision if decision in DECISIONS else None
+    valid_domain = domain if domain in CLINICAL_DOMAINS else None
 
-    if valid_mode is None or valid_cat is None:
-        return {**_PARSE_FAILURE, "narrative": data.get("narrative", raw.strip()[:300])}
+    if valid_decision is None or valid_domain is None:
+        return {
+            **_PARSE_FAILURE,
+            "clinical_justification": data.get(
+                "clinical_justification", raw.strip()[:300]
+            ),
+        }
 
     return {
-        "discordance_mode": valid_mode,
-        "primary_category": valid_cat,
-        "narrative": data.get("narrative", ""),
+        "decision": valid_decision,
+        "primary_clinical_domain": valid_domain,
+        "clinical_justification": data.get("clinical_justification", ""),
         "annotation_failed": False,
     }
 
@@ -193,35 +288,25 @@ def build_prompt(
     stage1_score: float,
     stage1_threshold: float,
     stage2_score: float,
-    stage2_threshold: float,
-    stage2_confirmed: bool,
+    discordance: dict[str, float | str],
     shap_feature_strings: list[str],
-    attention_sentences: list[str],
-    note_text: str = "",
+    note_text: str,
+    attention_sentences: list[str] | None = None,
 ) -> str:
     """Build the Stage 3 user prompt for one patient.
 
     Args:
-        stage1_score:         XGBoost probability for this patient.
-        stage1_threshold:     Stage 1 flag threshold.
-        stage2_score:         Calibrated Longformer probability.
-        stage2_threshold:     Stage 2 decision threshold for this age group.
-        stage2_confirmed:     True if Stage 2 confirmed the Stage 1 flag.
-        shap_feature_strings: Top-k SHAP strings from extract_shap_for_patient().
-        attention_sentences:  Top-n attended sentences (empty if not extracted).
-        note_text:            Raw discharge note; used when attention is absent.
+        stage1_score:          XGBoost probability for this patient.
+        stage1_threshold:      Stage 1 flag threshold.
+        stage2_score:          Calibrated FusionLongformer probability.
+        discordance:           output of :func:`compute_discordance`.
+        shap_feature_strings:  top-k SHAP strings from extract_shap_for_patient().
+        note_text:             raw discharge note text.
+        attention_sentences:   optional Stage 2 attention spans (auxiliary only).
 
     Returns:
         Formatted prompt string ready for phi4-mini.
     """
-    delta = stage2_score - stage1_score
-    verdict = (
-        f"CONFIRMED (score {stage2_score:.3f} ≥ threshold {stage2_threshold:.3f})"
-        if stage2_confirmed
-        else f"REJECTED (score {stage2_score:.3f} < threshold {stage2_threshold:.3f})"
-    )
-    confirmed_or_rejected = "confirmed" if stage2_confirmed else "rejected"
-
     shap_block = (
         "\n".join(f"  - {f}" for f in shap_feature_strings)
         if shap_feature_strings
@@ -232,15 +317,15 @@ def build_prompt(
         stage1_score=stage1_score,
         stage1_threshold=stage1_threshold,
         stage2_score=stage2_score,
-        stage2_threshold=stage2_threshold,
-        verdict=verdict,
-        delta=delta,
-        delta_label=_delta_label(delta),
+        r1=discordance["r1"],
+        r2=discordance["r2"],
+        displacement=discordance["displacement"],
+        mode=discordance["mode"],
         shap_block=shap_block,
-        note_block=_note_block(attention_sentences, note_text),
-        confirmed_or_rejected=confirmed_or_rejected,
-        modes=str(DISCORDANCE_MODES),
-        categories=str(DISCORDANCE_CATEGORIES),
+        note_block=_note_block(note_text),
+        attention_block=_attention_block(attention_sentences or []),
+        decisions=str(DECISIONS),
+        domains=str(CLINICAL_DOMAINS),
     )
 
 
@@ -250,11 +335,11 @@ def call_phi4mini(prompt: str, cfg: AppConfig) -> dict[str, Any]:
     Args:
         prompt: built by :func:`build_prompt`.
         cfg:    validated project config (reads ``stage3.ollama_model`` and
-                ``stage3.temperature``).
+                ``stage3.temperature`` — pinned at 0 for reproducibility).
 
     Returns:
-        Dict with keys ``discordance_mode``, ``primary_category``,
-        ``narrative``, ``annotation_failed``.
+        Dict with keys ``decision``, ``primary_clinical_domain``,
+        ``clinical_justification``, ``annotation_failed``.
     """
     try:
         response = ollama.chat(
@@ -268,6 +353,6 @@ def call_phi4mini(prompt: str, cfg: AppConfig) -> dict[str, Any]:
         )
         raw = response.message.content
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "narrative": f"[ollama error: {exc}]"}
+        return {**_PARSE_FAILURE, "clinical_justification": f"[ollama error: {exc}]"}
 
     return _parse_response(raw)

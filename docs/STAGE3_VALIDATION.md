@@ -1,12 +1,22 @@
 # Stage 3 Manual Validation Plan
 
+> **Partly superseded 2026-08-25.** As of the current `src/stage3/explain.py`,
+> phi4-mini no longer chooses the discordance mode — that is computed
+> quantitatively (percentile-rank displacement; see `docs/ARCHITECTURE.md`).
+> phi4-mini now outputs `decision` (uphold/override) and
+> `primary_clinical_domain` (6-item taxonomy, not 9). The validation
+> *protocol* below (sampling design, kappa methodology) is still sound —
+> re-target it at agreement on `decision` and `primary_clinical_domain`
+> rather than on `discordance_mode`, which is no longer LLM-generated and so
+> has nothing to validate against human judgment.
+
 ## Motivation
 
-Stage 3 uses phi4-mini to classify each patient into one of three discordance
-modes (CONCORDANT / NOTE_MITIGATES / NOTE_AMPLIFIES) and one of nine clinical
-categories.  Because this is LLM-generated output, the thesis must report how
-well it agrees with human clinical judgment — otherwise the population-level
-finding has no validity anchor.
+Stage 3 uses phi4-mini to independently decide, per patient, whether to
+uphold or override the structured risk alert, and to classify the primary
+clinical domain behind that decision.  Because this is LLM-generated output,
+the thesis must report how well it agrees with human clinical judgment —
+otherwise the population-level finding has no validity anchor.
 
 ## Target Sample
 

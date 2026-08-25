@@ -1,3 +1,10 @@
+> **Superseded 2026-08-25** for architecture/Stage 3 mechanics — see
+> `docs/ARCHITECTURE.md` for the current pipeline design. The storytelling
+> framing (alert fatigue, second-reader) below is still broadly in use, but
+> the score-delta discordance mechanic it references has been replaced with
+> percentile-rank displacement, and Stage 3 now makes its own independent
+> decision rather than narrating Stage 2's.
+
 # Thesis Narrative & Storytelling Guide
 
 > **Purpose.** How we tell the story of this thesis — the framing options, the recommended

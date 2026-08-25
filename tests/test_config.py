@@ -23,7 +23,7 @@ def test_default_stage1_model():
 def test_stage2_fields_present():
     """Key Stage 2 config fields must be present and in valid ranges."""
     cfg = load_config()
-    assert cfg.stage2.max_seq_length == 2048
+    assert cfg.stage2.max_seq_length == 4096
     assert cfg.stage2.focal_loss is True
     assert cfg.stage2.batch_size > 0
     assert 0 < cfg.stage2.val_fraction < 1
