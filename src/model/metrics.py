@@ -84,6 +84,50 @@ def metrics_at_recall_points(
     return out
 
 
+def select_threshold_for_capacity(y_score: np.ndarray, capacity_k: float) -> float:
+    """Return the threshold that flags exactly the top ``capacity_k`` fraction.
+
+    Rationale: a recall floor answers "how many alerts until we catch enough
+    true positives" — it says nothing about whether a hospital can act on the
+    resulting alert volume. A capacity constraint answers a different,
+    deployable question directly: "given a transitional-care team that can
+    follow up on K% of discharges, who are the highest-risk K%?" This is the
+    primary Stage 1 operating-point policy as of session 15 (2026-08-25);
+    ``select_threshold_for_recall`` is retained for comparability with prior
+    literature, which mostly reports recall-floor operating points.
+
+    Args:
+        y_score:    predicted probabilities.
+        capacity_k: fraction of the population to flag, in (0, 1].
+
+    Returns:
+        The score threshold such that approximately ``capacity_k`` of
+        ``y_score`` is >= threshold.
+    """
+    if not 0.0 < capacity_k <= 1.0:
+        raise ValueError(f"capacity_k must be in (0, 1], got {capacity_k}")
+    return float(np.quantile(y_score, 1.0 - capacity_k))
+
+
+def metrics_at_capacity_points(
+    y_true: np.ndarray, y_score: np.ndarray, capacity_points: list[float]
+) -> list[dict]:
+    """Return precision@K / lift@K / recall@K at several capacity fractions K.
+
+    ``lift`` is precision@K divided by the base rate — how many times better
+    than randomly screening K% of admissions the model does.
+    """
+    base_rate = float(np.mean(y_true))
+    out = []
+    for k in capacity_points:
+        thr = select_threshold_for_capacity(y_score, k)
+        op = operating_point(y_true, y_score, thr)
+        op["capacity_k"] = float(k)
+        op["lift"] = float(op["precision"] / base_rate) if base_rate > 0 else 0.0
+        out.append(op)
+    return out
+
+
 def subgroup_auroc(
     y_true: np.ndarray, y_score: np.ndarray, subgroups: pd.DataFrame
 ) -> dict:
@@ -117,8 +161,17 @@ def full_report(
     threshold: float,
     recall_points: list[float],
     subgroups: pd.DataFrame | None = None,
+    capacity_points: list[float] | None = None,
 ) -> dict:
-    """Return a complete evaluation report dict."""
+    """Return a complete evaluation report dict.
+
+    ``operating_point`` is evaluated at ``threshold`` — the model's primary,
+    already-selected operating point (capacity-constrained as of session 15,
+    2026-08-25; see ``select_threshold_for_capacity``). ``recall_tradeoff`` is
+    reported for comparability with prior literature. ``capacity_tradeoff`` is
+    reported when ``capacity_points`` is given, independent of which policy
+    produced ``threshold``.
+    """
     report = {
         "auprc": auprc(y_true, y_score),
         "auroc": auroc(y_true, y_score),
@@ -127,6 +180,10 @@ def full_report(
         "operating_point": operating_point(y_true, y_score, threshold),
         "recall_tradeoff": metrics_at_recall_points(y_true, y_score, recall_points),
     }
+    if capacity_points:
+        report["capacity_tradeoff"] = metrics_at_capacity_points(
+            y_true, y_score, capacity_points
+        )
     if subgroups is not None:
         report["subgroup_auroc"] = subgroup_auroc(y_true, y_score, subgroups)
     return report

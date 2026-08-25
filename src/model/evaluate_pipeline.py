@@ -164,8 +164,16 @@ def _eval_stage2(
     sub_test: pd.DataFrame,
     s1_scores: np.ndarray,
     s1_threshold: float,
-) -> tuple[dict, np.ndarray]:
+) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
     """Load Stage 2 results for the test partition and compute evaluation report.
+
+    C9 fallback (session 15, 2026-08-25): ~37% of Stage 1-flagged patients have
+    no discharge note and therefore no Stage 2 score. The old pipeline_pred
+    silently scored these as negative (0), which is wrong — they were never
+    seen by Stage 2 at all, so Stage 1's own flag is the only available
+    prediction for them. ``pipeline_pred_full`` now uses, per admission:
+    not flagged -> 0; flagged + has note -> stage2_confirmed;
+    flagged + no note -> 1 (Stage 1 fallback).
 
     Args:
         model_dir:     path to models directory.
@@ -176,12 +184,16 @@ def _eval_stage2(
         s1_threshold:  Stage 1 classification threshold.
 
     Returns:
-        (s2_report, pipeline_pred) — pipeline_pred is the final binary output.
+        (s2_report, pipeline_pred_full, has_s2, flagged) — ``pipeline_pred_full``
+        is the C9-corrected final binary output over the whole test partition;
+        ``has_s2`` and ``flagged`` are boolean masks used to build the
+        notes-cohort vs. full-cohort split.
     """
+    flagged = s1_scores >= s1_threshold
     s2_path = model_dir / "stage2_results.csv"
     if not s2_path.exists():
         print("[pipeline_eval] stage2_results.csv not found — skipping Stage 2 layer.")
-        return {"available": False}, (s1_scores >= s1_threshold).astype(int)
+        return {"available": False}, flagged.astype(int), np.zeros_like(flagged), flagged
 
     s2_all = pd.read_csv(s2_path)
     s2_rows = s2_all[s2_all["hadm_id"].isin(set(hadm_test))].set_index("hadm_id")
@@ -190,17 +202,26 @@ def _eval_stage2(
     s2_conf_arr = np.array([s2_rows["stage2_confirmed"].get(h, 0) for h in hadm_test], dtype=int)
     has_s2 = ~np.isnan(s2_scores_arr)
 
+    # C9: flagged-but-no-note patients fall back to Stage 1's own positive flag.
+    pipeline_pred_full = np.where(has_s2, s2_conf_arr, flagged.astype(int))
+    pipeline_pred_full = np.where(flagged, pipeline_pred_full, 0)
+
     if has_s2.sum() == 0:
-        return {"available": False}, s2_conf_arr
+        return {"available": False}, pipeline_pred_full, has_s2, flagged
 
     sub_s2 = sub_test[has_s2].reset_index(drop=True)
     report = _stage2_report(y_test[has_s2], s2_scores_arr[has_s2], s2_conf_arr[has_s2], sub_s2)
     report["available"] = True
     report["n_test_with_s2_scores"] = int(has_s2.sum())
-    print(f"[pipeline_eval] Stage 2 (flagged+notes n={has_s2.sum():,}): "
+    report["n_flagged_no_note"] = int((flagged & ~has_s2).sum())
+    report["note_coverage_of_flagged"] = (
+        float(has_s2.sum() / flagged.sum()) if flagged.sum() else 0.0
+    )
+    print(f"[pipeline_eval] Stage 2 (flagged+notes n={has_s2.sum():,}, "
+          f"note coverage of flagged={report['note_coverage_of_flagged']:.1%}): "
           f"AUROC={report.get('auroc', 'n/a')}  "
           f"recall={report['recall']:.3f}  precision={report['precision']:.3f}")
-    return report, s2_conf_arr
+    return report, pipeline_pred_full, has_s2, flagged
 
 
 # ── main evaluation ───────────────────────────────────────────────────────────
@@ -224,26 +245,51 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
           f"AUROC={s1_report['auroc']:.4f}  "
           f"recall={s1_report['recall']:.3f}  precision={s1_report['precision']:.3f}")
 
-    s2_report, pipeline_pred = _eval_stage2(
+    s2_report, pipeline_pred_full, has_s2, flagged = _eval_stage2(
         model_dir, hadm_test, y_test, sub_test, s1_scores, artifact["threshold"]
     )
-    pipe_report = _pipeline_report(y_test, pipeline_pred, sub_test)
-    print(f"[pipeline_eval] Pipeline end-to-end (n={pipe_report['n']:,}): "
-          f"precision={pipe_report['precision']:.3f}  "
-          f"recall={pipe_report['recall']:.3f}  "
-          f"F1={pipe_report['f1']:.3f}  F2={pipe_report['f2']:.3f}")
+
+    # Full cohort (C9, primary): every test admission, note-less flagged
+    # patients fall back to Stage 1's own flag rather than being silently
+    # scored negative.
+    full_report_ = _pipeline_report(y_test, pipeline_pred_full, sub_test)
+    print(f"[pipeline_eval] Pipeline, full cohort (n={full_report_['n']:,}, C9 fallback applied): "
+          f"precision={full_report_['precision']:.3f}  "
+          f"recall={full_report_['recall']:.3f}  "
+          f"F1={full_report_['f1']:.3f}  F2={full_report_['f2']:.3f}")
+
+    # Notes cohort (secondary): restricted to admissions Stage 2 actually saw
+    # (not flagged, or flagged with a note) — matches how "+21% precision"
+    # style claims were computed before the C9 fix. Kept for comparability;
+    # never report this number alone (P2/C9 in the 2026-08-19 review).
+    notes_mask = (~flagged) | has_s2
+    sub_notes = sub_test[notes_mask].reset_index(drop=True)
+    notes_report = _pipeline_report(
+        y_test[notes_mask], pipeline_pred_full[notes_mask], sub_notes
+    )
+    print(f"[pipeline_eval] Pipeline, notes cohort only (n={notes_report['n']:,}, "
+          f"excludes {int((~notes_mask).sum()):,} flagged-no-note admissions): "
+          f"precision={notes_report['precision']:.3f}  recall={notes_report['recall']:.3f}")
 
     report = {
         "note": (
-            "Stage 1 test partition used for all three layers. "
-            "Stage 2 scores come from stage2_results.csv — "
-            "patients in Stage 1's test partition are out-of-sample for Stage 2."
+            "Stage 1 test partition used for all three layers. Stage 2 scores "
+            "come from stage2_results.csv — patients in Stage 1's test "
+            "partition are out-of-sample for Stage 2. 'pipeline.full_cohort' "
+            "is the primary, deployable number (100% of test admissions; "
+            "flagged-no-note patients fall back to the Stage 1 flag per the "
+            "C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes "
+            "flagged-no-note admissions and must always be reported alongside "
+            "full_cohort, never alone."
         ),
         "stage1": s1_report,
         "stage2": s2_report,
-        "pipeline": pipe_report,
+        "pipeline": {
+            "full_cohort": full_report_,
+            "notes_cohort": notes_report,
+        },
     }
-    _print_band_table(s1_report, s2_report, pipe_report)
+    _print_band_table(s1_report, s2_report, full_report_)
 
     out_path = model_dir / "pipeline_evaluation.json"
     out_path.write_text(json.dumps(report, indent=2))

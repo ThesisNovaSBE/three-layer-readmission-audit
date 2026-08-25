@@ -26,7 +26,12 @@ from src.config import load_config, get_model_dir
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
 from src.model.cv import oof_predict
-from src.model.metrics import auprc, auroc, select_threshold_for_recall
+from src.model.metrics import (
+    auprc,
+    auroc,
+    select_threshold_for_capacity,
+    select_threshold_for_recall,
+)
 from src.model.models import build_estimator, default_params, fit_estimator
 from src.model.splits import grouped_train_test_split
 
@@ -39,6 +44,35 @@ def _load_params(name: str, model_dir) -> dict:
         return json.loads(path.read_text())
     print("[train] No tuned params found — using defaults.")
     return default_params(name)
+
+
+def _select_thresholds(cfg: AppConfig, y_train, oof) -> dict:
+    """Select both operating-point thresholds and log them.
+
+    Returns a dict with ``threshold`` (the one actually used, per
+    ``cfg.stage1.threshold_strategy``), ``strategy``, ``recall_floor_threshold``,
+    and ``capacity_threshold`` — the latter two always both computed so the
+    unused strategy remains available for secondary reporting.
+    """
+    target_recall = cfg.stage1.target_recall
+    recall_floor_threshold = select_threshold_for_recall(y_train, oof, target_recall)
+    capacity_threshold = select_threshold_for_capacity(oof, cfg.stage1.capacity_k)
+    strategy = cfg.stage1.threshold_strategy
+    threshold = capacity_threshold if strategy == "capacity" else recall_floor_threshold
+    print(
+        f"[train] OOF AUPRC={auprc(y_train, oof):.4f} "
+        f"AUROC={auroc(y_train, oof):.4f}\n"
+        f"[train] threshold@recall>={target_recall}: {recall_floor_threshold:.4f} (secondary)\n"
+        f"[train] threshold@capacity={cfg.stage1.capacity_k:.0%}: "
+        f"{capacity_threshold:.4f} (primary if strategy=capacity)\n"
+        f"[train] Using strategy='{strategy}' -> threshold={threshold:.4f}"
+    )
+    return {
+        "threshold": threshold, "strategy": strategy,
+        "target_recall": target_recall,
+        "recall_floor_threshold": recall_floor_threshold,
+        "capacity_threshold": capacity_threshold,
+    }
 
 
 def train(cfg: AppConfig) -> None:
@@ -70,13 +104,8 @@ def train(cfg: AppConfig) -> None:
         name, x_train, y_train, g_train, cfg, seed,
         n_splits=cfg.run.active().cv_folds, params=params,
     )
-    target_recall = cfg.stage1.target_recall
-    threshold = select_threshold_for_recall(y_train, oof, target_recall)
-    print(
-        f"[train] OOF AUPRC={auprc(y_train, oof):.4f} "
-        f"AUROC={auroc(y_train, oof):.4f} "
-        f"| threshold@recall>={target_recall}: {threshold:.4f}"
-    )
+    thr_info = _select_thresholds(cfg, y_train, oof)
+    threshold = thr_info["threshold"]
 
     estimator = build_estimator(name, params, y_train, cfg, seed)
     if name == "xgboost":
@@ -95,7 +124,11 @@ def train(cfg: AppConfig) -> None:
         "estimator": estimator, "model_name": name, "threshold": float(threshold),
         "feature_cols": feat_cols, "params": params, "seed": seed, "mode": mode,
         "train_idx": train_idx, "test_idx": test_idx,
-        "target_recall": target_recall,
+        "target_recall": thr_info["target_recall"],
+        "threshold_strategy": thr_info["strategy"],
+        "recall_floor_threshold": float(thr_info["recall_floor_threshold"]),
+        "capacity_threshold": float(thr_info["capacity_threshold"]),
+        "capacity_k": cfg.stage1.capacity_k,
     }
     out_path = model_dir / f"stage1_{name}.joblib"
     joblib.dump(artifact, out_path)

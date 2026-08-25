@@ -49,14 +49,28 @@ def _print_report(report: dict, name: str) -> None:
     print(f"  Base rate      : {report['base_rate']:.1%}")
 
     op = report["operating_point"]
-    print(f"\n  Operating point (threshold={op['threshold']:.4f}):")
+    print(f"\n  Primary operating point ({report.get('threshold_strategy', 'n/a')}, "
+          f"threshold={op['threshold']:.4f}):")
     print(
         f"    recall={op['recall']:.3f}  precision={op['precision']:.3f}  "
-        f"specificity={op['specificity']:.3f}  F2={op['f2']:.3f}"
+        f"specificity={op['specificity']:.3f}  F2={op['f2']:.3f}  "
+        f"flagged={(op['tp'] + op['fp']) / max(op['tp'] + op['fp'] + op['tn'] + op['fn'], 1):.1%}"
     )
     print(f"    confusion: TP={op['tp']} FP={op['fp']} TN={op['tn']} FN={op['fn']}")
 
-    print("\n  Recall/precision trade-off:")
+    if "capacity_tradeoff" in report:
+        print("\n  Capacity-constrained trade-off (precision@K / lift@K) — primary:")
+        for row in report["capacity_tradeoff"]:
+            flagged_pct = (row["tp"] + row["fp"]) / max(
+                row["tp"] + row["fp"] + row["tn"] + row["fn"], 1
+            )
+            print(
+                f"    K={row['capacity_k']:.0%} -> flagged={flagged_pct:.1%} "
+                f"precision={row['precision']:.3f} recall={row['recall']:.3f} "
+                f"lift={row['lift']:.2f}x (thr={row['threshold']:.4f})"
+            )
+
+    print("\n  Recall-floor trade-off — secondary, for comparability with prior literature:")
     for row in report["recall_tradeoff"]:
         print(
             f"    recall>={row['recall_target']:.2f} -> recall={row['recall']:.3f} "
@@ -108,8 +122,10 @@ def evaluate(cfg: AppConfig) -> dict:
     report = full_report(
         y_test, score, artifact["threshold"],
         cfg.stage1.recall_report_points, subgroups=sub_test,
+        capacity_points=cfg.stage1.capacity_report_points,
     )
 
+    report["threshold_strategy"] = artifact.get("threshold_strategy", "recall_floor")
     report["published_auroc_benchmarks"] = _PUBLISHED_AUROC
     _print_report(report, name)
 

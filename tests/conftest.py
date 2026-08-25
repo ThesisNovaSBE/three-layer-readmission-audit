@@ -41,13 +41,4 @@ def mock_stage2_results():
         "stage2_score": rng.uniform(0.1, 0.9, n),
         "stage2_confirmed": rng.integers(0, 2, n),
         "age_band": rng.choice(["18-40", "41-55", "56-70", "70+"], n),
-        "discordance_mode": rng.choice(
-            ["CONCORDANT", "NOTE_MITIGATES", "NOTE_AMPLIFIES"], n
-        ),
-        "primary_category": rng.choice(
-            ["social_support", "discharge_planning", "structured_confirmed",
-             "frailty_markers", "care_complexity"], n
-        ),
-        "explanation": ["Test explanation."] * n,
-        "annotation_failed": [False] * n,
     })

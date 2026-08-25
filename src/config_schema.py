@@ -83,6 +83,9 @@ class Stage1Config(BaseModel):
 
     model: str = "xgboost"
     models: list[str] = ["logistic_regression", "xgboost", "histgradientboosting"]
+    threshold_strategy: str = "capacity"
+    capacity_k: float = 0.15
+    capacity_report_points: list[float] = [0.05, 0.10, 0.15, 0.20]
     target_recall: float = 0.85
     recall_report_points: list[float] = [0.80, 0.85, 0.90]
     test_size: float = 0.2
@@ -97,7 +100,7 @@ class Stage2Config(BaseModel):
     model_config = ConfigDict(frozen=False)
 
     model_name: str = "yikuan8/Clinical-Longformer"
-    max_seq_length: int = 2048
+    max_seq_length: int = 4096
     val_fraction: float = 0.20
     calibration_fraction: float = 0.20
     age_group_train_targets: dict[str, int] = {}
@@ -128,10 +131,11 @@ class Stage3Config(BaseModel):
     model_config = ConfigDict(frozen=False)
 
     ollama_model: str = "phi4-mini"
-    temperature: float = 0.3
+    temperature: float = 0.0
     attention_extraction: bool = True  # extract Longformer attention spans (needs trained model)
     top_attention_sentences: int = 5   # sentences to extract per patient
     top_shap_features: int = 5         # Stage 1 SHAP features to include per patient
+    discordance_displacement_pp: float = 20.0
 
 
 class OutputConfig(BaseModel):

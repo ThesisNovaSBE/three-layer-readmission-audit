@@ -1,6 +1,12 @@
 # Implementation & Training Plan
 _Last updated: 2026-08-16 — generated after full methodological evaluation_
 
+> **Superseded 2026-08-25.** The Stage 3 design described here (raw
+> `stage1_score - stage2_score` discordance, ε=0.15) was found arithmetically
+> fragile and replaced with percentile-rank displacement. See
+> `docs/ARCHITECTURE.md` for the current design and what's actually
+> implemented in code. Kept here for history.
+
 ---
 
 ## Research Questions (locked before testing)

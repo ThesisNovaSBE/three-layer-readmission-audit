@@ -1,15 +1,18 @@
-"""Stage 3 on-demand explanation for one patient.
+"""Stage 3 on-demand audit for one patient.
 
 This is the sole entry point for Stage 3.  It is called by the API when a
-clinician requests an explanation for a specific patient — never in batch.
+clinician requests review of a specific flagged patient — never in batch.
 
-The function synthesises three layers:
+The function assembles evidence from all three layers and lets phi4-mini
+reach its own decision:
 
-* **Stage 1** (XGBoost on structured EHR): what the numbers say and why.
-* **Stage 2** (Clinical-Longformer on the discharge note): whether the note
-  confirmed or contradicted the structured risk, and by how much.
-* **Stage 3** (phi4-mini via Ollama): *why* the note agreed or disagreed —
-  a clinical narrative that connects both signals.
+* **Stage 1** (XGBoost on structured EHR): the risk score and SHAP-ranked
+  reasons for the flag.
+* **Stage 2** (FusionLongformer on structured features + the note): an
+  independently-derived combined risk estimate — evidence for the auditor,
+  not a decision it explains.
+* **Stage 3** (phi4-mini via Ollama): reads the discharge note plus both
+  scores and returns its own uphold/override judgment with a justification.
 
 Usage::
 
@@ -18,21 +21,22 @@ Usage::
 
     cfg = load_config()
     result = explain_patient(hadm_id=<hadm_id>, cfg=cfg)
-    print(result.narrative)
+    print(result.decision, result.clinical_justification)
 """
 
 from __future__ import annotations
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import TARGET_COL
-from src.stage2._utils import band_key, get_stage2_model_path
+from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
-from src.stage3.explain import build_prompt, call_phi4mini
+from src.stage3.explain import build_prompt, call_phi4mini, compute_discordance
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
 
@@ -83,18 +87,19 @@ def _lookup_patient(hadm_id: int, results_df: pd.DataFrame) -> dict:
     }
 
 
-def _get_stage2_threshold(patient: dict) -> float:
-    """Return the Stage 2 per-age-group threshold from calibration if available."""
-    model_dir = get_model_dir()
-    cal_path = model_dir / "stage2_calibration.json"
-    if cal_path.exists():
-        import json  # pylint: disable=import-outside-toplevel
-        cal = json.loads(cal_path.read_text())
-        key = band_key(patient["age_band"])
-        thresholds: dict = cal.get("thresholds", {})
-        if key in thresholds:
-            return float(thresholds[key])
-    return float(load_config().stage2.threshold)
+def _cohort_scores(results_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Return (stage1_scores, stage2_scores) for the flagged+noted cohort.
+
+    This is the reference population percentile ranks are computed against —
+    every admission that reached Stage 2 (has a ``stage2_score``), i.e. the
+    same population :func:`src.model.evaluate_pipeline._eval_stage2` calls the
+    "notes cohort".
+    """
+    cohort = results_df.dropna(subset=["stage2_score"])
+    return (
+        cohort["stage1_score"].to_numpy(dtype=float),
+        cohort["stage2_score"].to_numpy(dtype=float),
+    )
 
 
 def _get_patient_feature_row(
@@ -204,16 +209,21 @@ def explain_patient(
     note_text = _load_note_text(hadm_id, patient["subject_id"], cfg)
     attention_sentences = _get_attention(hadm_id, note_text, cfg)
 
-    stage2_threshold = _get_stage2_threshold(patient)
+    cohort_s1, cohort_s2 = _cohort_scores(df)
+    discordance = compute_discordance(
+        patient["stage1_score"], patient["stage2_score"],
+        cohort_s1, cohort_s2,
+        displacement_pp=cfg.stage3.discordance_displacement_pp,
+    )
+
     prompt = build_prompt(
         stage1_score=patient["stage1_score"],
         stage1_threshold=patient["stage1_threshold"],
         stage2_score=patient["stage2_score"],
-        stage2_threshold=stage2_threshold,
-        stage2_confirmed=patient["stage2_confirmed"],
+        discordance=discordance,
         shap_feature_strings=shap_strings,
-        attention_sentences=attention_sentences,
         note_text=note_text,
+        attention_sentences=attention_sentences,
     )
     annotation = call_phi4mini(prompt, cfg)
 
@@ -223,12 +233,15 @@ def explain_patient(
         stage1_threshold=patient["stage1_threshold"],
         stage2_score=patient["stage2_score"],
         stage2_confirmed=patient["stage2_confirmed"],
-        score_delta=patient["stage2_score"] - patient["stage1_score"],
+        r1=discordance["r1"],
+        r2=discordance["r2"],
+        displacement=discordance["displacement"],
+        discordance_mode=str(discordance["mode"]),
         top_shap_features=shap_strings,
         attention_sentences=attention_sentences,
-        discordance_mode=annotation["discordance_mode"],
-        primary_category=annotation["primary_category"],
-        narrative=annotation["narrative"],
+        decision=annotation["decision"],
+        primary_clinical_domain=annotation["primary_clinical_domain"],
+        clinical_justification=annotation["clinical_justification"],
         annotation_failed=annotation["annotation_failed"],
     )
 

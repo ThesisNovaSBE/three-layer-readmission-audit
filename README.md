@@ -1,14 +1,14 @@
 # LLM-Augmented Hospital Readmission Prediction
 
-> **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md` and the latest file in `sessions/` before starting work.**
+> **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md`, `docs/ARCHITECTURE.md`, and the latest file in `sessions/` before starting work.**
 
-A three-stage "Triage-and-Verify" pipeline for predicting unplanned 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics).
+A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics). Full design rationale: **`docs/ARCHITECTURE.md`**.
 
-**Stage 1 — Triage (XGBoost):** A high-recall classifier trained on 521,191 MIMIC-IV structured admissions flags at-risk patients (AUROC=0.706, recall=0.848).
+**Layer 1 — XGBoost (structured screen):** Trained on 521,191 MIMIC-IV structured admissions, flags the top-K% highest-risk admissions (capacity-constrained operating point, default K=15%; recall-floor kept as a secondary comparison table).
 
-**Stage 2 — Verify (Clinical-Longformer):** A fine-tuned `yikuan8/Clinical-Longformer` reads discharge notes of flagged patients and prunes false positives (+21% precision, retains 70.9% of true positives in the notes cohort).
+**Layer 2 — FusionLongformer (independent combined estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads structured features + the discharge note of flagged patients and produces an independent risk estimate — not a gate on Stage 1's flag.
 
-**Stage 3 — Analyse + Explain (phi4-mini):** A local generative model (Ollama) annotates every Stage 1 flagged patient (confirmed and rejected) with a cross-modal discordance label — whether the discharge note agrees with, mitigates, or amplifies the structured EHR risk signal. Population-level aggregation across all patients produces a quantitative finding on what clinical domains in notes change readmission predictions beyond structured data. A clinician-facing explanation is also generated per patient.
+**Layer 3 — phi4-mini (independent auditor):** A local reasoning model (Ollama, temperature=0) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
 
@@ -16,19 +16,25 @@ A three-stage "Triage-and-Verify" pipeline for predicting unplanned 30-day hospi
 
 ## Results
 
-### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test)
+> **Note (2026-08-25):** The numbers below are from the pre-session-15
+> artifacts — Stage 1 at the old recall-floor threshold, before the
+> capacity-constrained retrain, and before Stage 2's 4096-token retrain.
+> They are kept here as the last known-good reference point, not as current
+> results. See `docs/ARCHITECTURE.md` §4 for what retraining is pending.
+
+### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test, pre-retrain)
 
 | Metric | Value |
 |--------|-------|
 | AUROC | 0.706 |
 | AUPRC | 0.406 |
-| Recall @ thr=0.354 | 0.848 |
+| Recall @ thr=0.354 (recall-floor policy) | 0.848 |
 | Precision @ thr=0.354 | 0.256 |
 | F2 | 0.580 |
 
-### Stage 1+2 — Combined (notes cohort, thr₂=0.3)
+### Stage 1+2 — Combined (notes cohort, thr₂=0.3, pre-retrain)
 
-Evaluated on the 43,776 Stage 1–flagged patients who have discharge notes (the deployable population — in real clinical use every discharged patient has a note).
+Evaluated on the 43,776 Stage 1–flagged patients who have discharge notes.
 
 | Metric | Stage 1 baseline | Stage 1+2 |
 |--------|-----------------|-----------|
@@ -74,9 +80,10 @@ python -m src.model.train
 #    Local GPU:              python setup_stage2.py --mode full
 python setup_stage2.py --mode full
 
-# 5. Stage 3: generate explanations for confirmed patients
-#    Requires Ollama running + phi4-mini pulled: ollama pull phi4-mini
-python setup_stage3.py --limit 50   # --limit for demo; remove for full run
+# 5. Stage 3: on-demand audit for one patient (no batch runner yet — see
+#    docs/ARCHITECTURE.md §4). Requires Ollama running + phi4-mini pulled:
+#    ollama pull phi4-mini
+python -m src.stage3.pipeline <hadm_id>
 ```
 
 ---
@@ -118,7 +125,7 @@ The dashboard has two views:
 |--------|---------|
 | `setup_demo.py` | Synthetic data demo — no MIMIC needed |
 | `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
-| `setup_stage3.py --limit N` | Generate Stage 3 explanations (N = sample size) |
+| `python -m src.stage3.pipeline <hadm_id>` | On-demand Stage 3 audit for one patient (no batch runner yet) |
 | `train_stage2.sh` | Slurm job script for HPC/GPU training (GWDG KISSKI A100) |
 | `diagnose_cluster.sh` | Cluster diagnostic job (checks env, GPU, paths) |
 | `analyse_age_fairness.py` | Age-group fairness analysis on Stage 1 results |
@@ -143,7 +150,7 @@ The dashboard has two views:
 ├── .pylintrc                    # Pylint config (enforces 10.00/10)
 ├── setup_demo.py                # One-command demo (synthetic data)
 ├── setup_stage2.py              # Stage 2 fine-tuning runner
-├── setup_stage3.py              # Stage 3 explanation runner
+│                                 # (Stage 3 has no setup script — on-demand only, src/stage3/pipeline.py)
 ├── train_stage2.sh              # Slurm job script — GWDG KISSKI A100 80GB
 ├── analyse_age_fairness.py      # Age-group fairness analysis
 ├── frontend/                    # React + TS + Vite dashboard
@@ -161,17 +168,24 @@ The dashboard has two views:
 │   │   └── synthetic.py         # Synthetic data generator
 │   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv
 │   ├── stage2/
-│   │   ├── _utils.py            # Shared helpers (band_key, model path)
+│   │   ├── _utils.py            # Shared helpers (band_key, model path, STRUCT_FEATURE_COLS)
 │   │   ├── dataset.py           # ClinicalNotesDataset + note loading
+│   │   ├── model.py             # FusionLongformer (structured MLP + Longformer)
 │   │   ├── splits.py            # Patient-level finetune/val/cal splits
 │   │   ├── train.py             # Fine-tune Clinical-Longformer (focal loss)
 │   │   ├── calibrate.py         # Platt scaling + per-group threshold selection
 │   │   ├── evaluate.py          # Stage 2 evaluation metrics
 │   │   └── predict.py           # Stage 2 inference on Stage 1 flags
-│   └── stage3/                  # Stage 3: explain, run
+│   └── stage3/
+│       ├── explain.py           # Prompt building, discordance calc, phi4-mini call
+│       ├── pipeline.py          # explain_patient() — the on-demand entry point
+│       ├── models.py            # ExplanationResult (Pydantic)
+│       ├── attention.py         # Optional auxiliary attention-span extraction
+│       └── shap_extract.py      # SHAP feature extraction from Stage 1
 ├── sessions/                    # Work session logs (read latest for context)
 ├── tests/                       # Unit & integration tests
 ├── docs/
+│   ├── ARCHITECTURE.md          # Current pipeline design — read this first
 │   ├── MODELING_PLAN.md         # Stage 1 modeling strategy
 │   └── HPC_DEPLOYMENT.md        # GWDG KISSKI cluster setup guide
 ├── data/                        # LOCAL ONLY — gitignored

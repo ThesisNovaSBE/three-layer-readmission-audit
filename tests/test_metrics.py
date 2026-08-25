@@ -9,8 +9,10 @@ from src.model.metrics import (
     auprc,
     auroc,
     full_report,
+    metrics_at_capacity_points,
     metrics_at_recall_points,
     operating_point,
+    select_threshold_for_capacity,
     select_threshold_for_recall,
 )
 
@@ -76,6 +78,47 @@ def test_threshold_falls_back_when_impossible(perfect_scores):  # pylint: disabl
     y, s = perfect_scores
     thr = select_threshold_for_recall(y, s, 1.0)
     assert 0.0 <= thr <= 1.0
+
+
+# ── Capacity-constrained threshold ────────────────────────────────────────────
+
+def test_capacity_threshold_flags_approximately_k(binary_scores):
+    """Selected threshold must flag approximately capacity_k of the population."""
+    _, s = binary_scores
+    k = 0.15
+    thr = select_threshold_for_capacity(s, k)
+    flagged_frac = (s >= thr).mean()
+    assert flagged_frac == pytest.approx(k, abs=0.03)
+
+
+def test_capacity_threshold_full_capacity_flags_everyone(binary_scores):
+    """capacity_k=1.0 must flag the entire population."""
+    _, s = binary_scores
+    thr = select_threshold_for_capacity(s, 1.0)
+    assert thr <= s.min()
+
+
+def test_capacity_threshold_rejects_invalid_k(binary_scores):
+    """capacity_k outside (0, 1] must raise."""
+    _, s = binary_scores
+    with pytest.raises(ValueError):
+        select_threshold_for_capacity(s, 0.0)
+    with pytest.raises(ValueError):
+        select_threshold_for_capacity(s, 1.5)
+
+
+def test_capacity_tradeoff_lift_above_one_for_informative_scores(binary_scores):
+    """A better-than-random model must show lift > 1 at a tight capacity."""
+    y, s = binary_scores
+    points = metrics_at_capacity_points(y, s, [0.10])
+    assert points[0]["lift"] > 1.0
+
+
+def test_capacity_tradeoff_smaller_k_gives_higher_or_equal_precision(binary_scores):
+    """Tightening the capacity constraint must not decrease precision."""
+    y, s = binary_scores
+    points = metrics_at_capacity_points(y, s, [0.10, 0.30])
+    assert points[0]["precision"] >= points[1]["precision"] - 1e-9
 
 
 # ── Operating point ───────────────────────────────────────────────────────────

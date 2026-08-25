@@ -58,7 +58,19 @@ stage1:
     - logistic_regression
     - xgboost
     - histgradientboosting
-  target_recall: 0.85                      # operating point: lowest threshold with recall >= this
+
+  # ── Operating point policy ──
+  # "capacity" (primary, from 2026-08-25 session): flag the top capacity_k
+  # fraction of admissions by risk score, matched to what a transitional-care
+  # team can realistically follow up on. Fixes the recall-floor policy's
+  # deployability problem — at recall_floor=0.85 the old policy flagged 66.94%
+  # of all admissions, which no hospital can act on.
+  # "recall_floor" (secondary, kept for comparability with prior literature):
+  # lowest threshold that still achieves target_recall.
+  threshold_strategy: capacity             # capacity | recall_floor
+  capacity_k: 0.15                         # primary operating point: top 15% of discharges
+  capacity_report_points: [0.05, 0.10, 0.15, 0.20]  # precision@K / lift@K reported at these K
+  target_recall: 0.85                      # secondary/comparability operating point
   recall_report_points: [0.80, 0.85, 0.90] # also report precision/specificity at these recalls
   test_size: 0.2
   use_smote: false                         # optional ablation; if true, applied INSIDE CV folds only
@@ -78,10 +90,13 @@ stage2:
   model_name: "models/clinical_longformer"
 
   # ── Sequence length ──
-  # 2048 captures ~100% of the average MIMIC discharge note (~1900 tokens).
-  # 512 only covered ~27% — missing frailty, functional status, social sections.
+  # 4096 is Clinical-Longformer's native window (Li et al. 2022). Session 14
+  # (2026-08-10) measured actual note length and found 74% of discharge notes
+  # exceed 2048 tokens (median ~2,649) — the earlier "2048 covers ~100% of the
+  # average note" estimate (session 9) was based on a since-corrected figure.
+  # 4096 lets the large majority of notes fit without head+tail truncation.
   # Requires GPU. For CPU fallback set to 512 (expect degraded 70+ performance).
-  max_seq_length: 2048
+  max_seq_length: 4096
 
   # ── Patient-level data splits (within Stage 1 training patients) ──
   val_fraction: 0.20          # validation: early stopping & checkpoint selection
@@ -156,10 +171,21 @@ stage2:
 # To enable: set enabled: true and run `ollama pull phi4-mini`
 stage3:
   ollama_model: "phi4-mini"
-  temperature: 0.3
+  # Pinned at 0 for reproducibility. Uphold/override is the primary outcome
+  # variable for RQ2 — a stochastic auditor makes NRI a sample from a
+  # distribution rather than a fixed, reportable quantity. Do not change this
+  # for evaluation runs (session 15, 2026-08-25).
+  temperature: 0.0
   attention_extraction: true     # extract Longformer attention spans (requires fine-tuned model)
   top_attention_sentences: 5     # sentences extracted per patient from attention weights
   top_shap_features: 5           # Stage 1 SHAP features included per patient in prompt
+  # Discordance mode is computed quantitatively (percentile-rank displacement
+  # of stage1_score vs stage2_score within the flagged+noted cohort), never by
+  # the LLM. See src/stage3/explain.py:compute_discordance. Raw-probability
+  # subtraction was tried and rejected (2026-08-25) because Stage 1 and Stage 2
+  # scores are not guaranteed to be comparably calibrated even after isotonic
+  # calibration — rank displacement is invariant to that risk.
+  discordance_displacement_pp: 20.0  # |displacement| >= this (percentile points) => discordant
 
 # ── Output ──
 output:
