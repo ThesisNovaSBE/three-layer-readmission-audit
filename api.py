@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
+from src.model.calibration import apply_calibration
 from src.stage2._utils import band_key
 from src.stage3.models import ExplanationResult
 from src.stage3.pipeline import explain_patient
@@ -191,7 +192,7 @@ def _demo_results(
     feat_cols = artifact["feature_cols"]
     available = [c for c in feat_cols if c in feature_matrix.columns]
     x_mat = feature_matrix[available].fillna(0).to_numpy()
-    scores = artifact["estimator"].predict_proba(x_mat)[:, 1]
+    scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_mat)[:, 1])
     thr = float(artifact.get("threshold", cfg.stage1.target_recall))
     if "age_band" in feature_matrix.columns:
         age_band_col = feature_matrix["age_band"].astype(str)

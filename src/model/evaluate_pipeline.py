@@ -39,6 +39,7 @@ from sklearn.metrics import roc_auc_score
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
+from src.model.calibration import apply_calibration
 from src.model.metrics import auprc as compute_auprc
 
 
@@ -239,7 +240,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
     x_test, y_test, sub_test, hadm_test = _load_test_partition(artifact, cfg)
-    s1_scores = artifact["estimator"].predict_proba(x_test)[:, 1]
+    s1_scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_test)[:, 1])
     s1_report = _stage1_report(y_test, s1_scores, artifact["threshold"], sub_test)
     print(f"\n[pipeline_eval] Stage 1 (test n={s1_report['n']:,}): "
           f"AUROC={s1_report['auroc']:.4f}  "

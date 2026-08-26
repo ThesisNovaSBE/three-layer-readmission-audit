@@ -10,9 +10,9 @@ calls for: an LLM that independently audits *another model's* output.
 The design here — confirmed across three planning artifacts (the 2026-08-16
 methodological evaluation, the 2026-08-17 Project Brief, and the Working
 Paper) — has phi4-mini act as a deliberating auditor. It receives Stage 1's
-score and SHAP attributions, Stage 2's independently-derived combined score,
-and the discharge note itself, and returns its own uphold/override judgment —
-not a narration of a decision already made by Stage 2.
+score and SHAP attributions, Stage 2's independently-derived note-based
+score, and the discharge note itself, and returns its own uphold/override
+judgment — not a narration of a decision already made by Stage 2.
 
 Two things are deliberately NOT delegated to the LLM:
 
@@ -22,12 +22,14 @@ Two things are deliberately NOT delegated to the LLM:
    rank is used instead of a raw-probability difference (the original design)
    because Stage 1 and Stage 2 are different model families and are not
    guaranteed to be equally well-calibrated even after isotonic calibration —
-   rank displacement is invariant to that risk. This also removed the need for
-   Stage 1 and Stage 2 to share an identical feature space "for the discordance
-   measure to be valid": they don't (Stage 1 uses ~40 features including labs
-   and vitals; Stage 2 uses 8), and no claim of clean attribution to the note
-   alone is made — the two models simply use different information, and when
-   they disagree, that is what Stage 3 investigates.
+   rank displacement is invariant to that risk. Stage 1 uses ~40 structured
+   features; Stage 2 (2026-08-26: reverted to a plain, note-only
+   Clinical-Longformer — the multimodal "FusionLongformer" variant was
+   explored and dropped as unnecessary complexity for a model that was never
+   actually trained) uses none. The two models are informationally
+   independent by construction, and no claim stronger than "they use
+   different information, and when they disagree, that is worth
+   investigating" is made.
 2. **Whether the auditor's own decision is reproducible.** Ollama temperature
    is pinned at 0 (``cfg.stage3.temperature``) for every evaluation run.
 """
@@ -108,19 +110,19 @@ _USER_TEMPLATE = textwrap.dedent("""
     Top structured risk factors (SHAP-ranked):
     {shap_block}
 
-    ── COMBINED RISK ESTIMATE (structured features + discharge note) ─────
+    ── NOTE-BASED RISK ESTIMATE (Clinical-Longformer, discharge note only) ──
     Score: {stage2_score:.3f}
-    This model saw the same structured features as above, plus the discharge
-    note. It was trained independently and does not know the score above.
+    This model reads only the discharge note — no structured features. It
+    was trained independently and does not know the score above.
 
     ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
     Within the cohort of flagged, note-covered patients, this patient ranks
     at the {r1:.0f}th percentile on the structured estimate and the
-    {r2:.0f}th percentile on the combined estimate (displacement:
+    {r2:.0f}th percentile on the note-based estimate (displacement:
     {displacement:+.0f} percentile points -> {mode}).
-      NOTE_MITIGATES -> the combined estimate ranks this patient markedly
+      NOTE_MITIGATES -> the note-based estimate ranks this patient markedly
                          lower risk than the structured estimate alone.
-      NOTE_AMPLIFIES -> the combined estimate ranks this patient markedly
+      NOTE_AMPLIFIES -> the note-based estimate ranks this patient markedly
                          higher risk than the structured estimate alone.
       CONCORDANT     -> the two estimates rank this patient similarly.
     This is context, not a conclusion — reach your own judgment from the
@@ -172,7 +174,7 @@ def compute_discordance(
     """Return percentile-rank displacement and discordance mode for one patient.
 
     Displacement is invariant to any residual, unequal miscalibration between
-    Stage 1 (XGBoost) and Stage 2 (FusionLongformer) — two different model
+    Stage 1 (XGBoost) and Stage 2 (Clinical-Longformer) — two different model
     families are not guaranteed to share the same calibration error even after
     isotonic calibration, so a raw ``stage2_score - stage1_score`` difference
     is not a reliable measure of disagreement. Rank displacement only requires
@@ -225,7 +227,7 @@ def _attention_block(attention_sentences: list[str]) -> str:
         return ""
     lines = "\n".join(f"  [{i + 1}] {s}" for i, s in enumerate(attention_sentences))
     return (
-        "\n(For reference only — regions of the note the combined model's "
+        "\n(For reference only — regions of the note the note-based model's "
         "attention concentrated on, not a faithful explanation of its score:)\n"
         f"{lines}"
     )
@@ -298,7 +300,7 @@ def build_prompt(
     Args:
         stage1_score:          XGBoost probability for this patient.
         stage1_threshold:      Stage 1 flag threshold.
-        stage2_score:          Calibrated FusionLongformer probability.
+        stage2_score:          Calibrated Clinical-Longformer probability.
         discordance:           output of :func:`compute_discordance`.
         shap_feature_strings:  top-k SHAP strings from extract_shap_for_patient().
         note_text:             raw discharge note text.

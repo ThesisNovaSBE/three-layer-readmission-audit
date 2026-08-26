@@ -8,8 +8,8 @@ reach its own decision:
 
 * **Stage 1** (XGBoost on structured EHR): the risk score and SHAP-ranked
   reasons for the flag.
-* **Stage 2** (FusionLongformer on structured features + the note): an
-  independently-derived combined risk estimate — evidence for the auditor,
+* **Stage 2** (Clinical-Longformer on the discharge note): an
+  independently-derived, note-only risk estimate — evidence for the auditor,
   not a decision it explains.
 * **Stage 3** (phi4-mini via Ollama): reads the discharge note plus both
   scores and returns its own uphold/override judgment with a justification.

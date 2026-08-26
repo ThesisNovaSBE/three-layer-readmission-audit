@@ -47,25 +47,21 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-# Pre-load all heavy libraries here so they are fully initialised before any
-# function call. Lazy imports inside functions trigger the segfault on macOS.
-import torch  # noqa: E402
-from transformers import (  # noqa: E402
-    AutoTokenizer,
-    LongformerForSequenceClassification,
-    Trainer,
-    TrainingArguments,
-    EarlyStoppingCallback,
-)
-from src.stage2.splits import build_splits       # noqa: E402
+# Pre-load torch here (import order matters: after joblib, before any
+# function call) so the segfault-avoidance ordering above actually holds —
+# the src.stage2.* modules below import transformers/torch themselves.
+# pylint: disable=wrong-import-position,wrong-import-order,ungrouped-imports
+import torch  # noqa: E402  pylint: disable=unused-import
+from src.stage2.splits import build_splits      # noqa: E402
 from src.stage2.train import train_stage2       # noqa: E402
 from src.stage2.predict import predict_stage2   # noqa: E402
 from src.stage2.calibrate import calibrate      # noqa: E402
 from src.stage2.evaluate import evaluate        # noqa: E402
-
+# pylint: enable=wrong-import-position,wrong-import-order,ungrouped-imports
 
 
 def check_prerequisites(cfg) -> None:
+    """Exit early with a clear message if Stage 1 or MIMIC-IV-Note is missing."""
     model_dir = get_model_dir()
     stage1_name = cfg.stage1.model
     artifact = model_dir / f"stage1_{stage1_name}.joblib"
@@ -86,6 +82,7 @@ def check_prerequisites(cfg) -> None:
 
 
 def main():
+    """CLI entry point: run Stage 2 end-to-end (splits, train, calibrate, predict, evaluate)."""
     parser = argparse.ArgumentParser(description="Run Stage 2 end-to-end")
     parser.add_argument("--mode", choices=["quick", "full"], default=None,
                         help="Override run.mode from config.yaml")
@@ -149,10 +146,10 @@ def main():
     if gaps:
         print(f"  Recall gap (age):     {gaps.get('recall_gap', float('nan')):.3f}")
         print(f"  Precision gap (age):  {gaps.get('precision_gap', float('nan')):.3f}")
-    print(f"  Results saved to:     models/stage2_results.csv")
-    print(f"  Evaluation saved to:  models/stage2_evaluation.json")
+    print("  Results saved to:     models/stage2_results.csv")
+    print("  Evaluation saved to:  models/stage2_evaluation.json")
     print()
-    print("  Next: python setup_stage3.py  (requires Ollama + phi4-mini)")
+    print("  Next: python -m src.stage3.pipeline <hadm_id>  (requires Ollama + phi4-mini)")
     print("=" * 64)
 
 

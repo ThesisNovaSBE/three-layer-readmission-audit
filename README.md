@@ -6,7 +6,7 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 **Layer 1 — XGBoost (structured screen):** Trained on 521,191 MIMIC-IV structured admissions, flags the top-K% highest-risk admissions (capacity-constrained operating point, default K=15%; recall-floor kept as a secondary comparison table).
 
-**Layer 2 — FusionLongformer (independent combined estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads structured features + the discharge note of flagged patients and produces an independent risk estimate — not a gate on Stage 1's flag.
+**Layer 2 — Clinical-Longformer, note-only (independent risk estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads only the discharge note of flagged patients — no structured features — and produces an independent risk estimate, not a gate on Stage 1's flag. (A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.)
 
 **Layer 3 — phi4-mini (independent auditor):** A local reasoning model (Ollama, temperature=0) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
@@ -168,9 +168,8 @@ The dashboard has two views:
 │   │   └── synthetic.py         # Synthetic data generator
 │   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv
 │   ├── stage2/
-│   │   ├── _utils.py            # Shared helpers (band_key, model path, STRUCT_FEATURE_COLS)
+│   │   ├── _utils.py            # Shared helpers (band_key, model path)
 │   │   ├── dataset.py           # ClinicalNotesDataset + note loading
-│   │   ├── model.py             # FusionLongformer (structured MLP + Longformer)
 │   │   ├── splits.py            # Patient-level finetune/val/cal splits
 │   │   ├── train.py             # Fine-tune Clinical-Longformer (focal loss)
 │   │   ├── calibrate.py         # Platt scaling + per-group threshold selection

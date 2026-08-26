@@ -28,11 +28,18 @@ from src.config import get_data_dir, has_real_data, load_config
 from src.config_schema import AppConfig
 from src.data import synthetic as synth
 from src.data.comorbidity import charlson_per_admission
-from src.schemas import ID_COLS, TARGET_COL
+from src.schemas import ID_COLS, TARGET_COL, TARGET_COL_UNPLANNED
 
 # MIMIC-IV v3 uses "EW EMER." / "DIRECT EMER." — not the legacy "EMERGENCY" string.
 # The legacy string is retained so synthetic data (which uses "EMERGENCY") still works.
 _EMERGENCY_TYPES = frozenset({"EMERGENCY", "EW EMER.", "DIRECT EMER."})
+# Admission types on the OUTCOME (next) admission that indicate it was
+# scheduled rather than an unplanned return — e.g. a chemotherapy cycle or
+# staged surgery re-admitted electively. Structured-data proxy for "planned";
+# see readmission_30d_unplanned below and P7b in the 2026-08-19 remediation
+# review (the all-cause label counts these as readmissions, which is not
+# what "unplanned hospital readmission" in the project goal means).
+_PLANNED_READMISSION_TYPES = frozenset({"ELECTIVE", "SURGICAL SAME DAY ADMISSION"})
 _OBSERVATION_TYPES = frozenset({
     "EU OBSERVATION", "OBSERVATION ADMIT",
     "DIRECT OBSERVATION", "AMBULATORY OBSERVATION",
@@ -150,16 +157,41 @@ def _load_real_measurements(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def compute_readmission_label(admissions: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
-    """Compute the 30-day readmission label from admission timing (real data)."""
+    """Compute the 30-day readmission label(s) from admission timing (real data).
+
+    Sets two columns:
+
+    ``TARGET_COL`` (``readmission_30d``, all-cause) — any subsequent
+    admission within the window, excluding only in-hospital deaths. This is
+    kept as the primary/comparability label (matches most of the readmission
+    literature) but is not what "unplanned readmission" means.
+
+    ``TARGET_COL_UNPLANNED`` (``readmission_30d_unplanned``) — the same,
+    additionally requiring the OUTCOME admission's own ``admission_type`` not
+    indicate a planned return (elective / same-day surgical). A structured-
+    data proxy, not a note-derived one: scheduled chemotherapy cycles and
+    staged surgical returns are excluded; other forms of planned return not
+    reflected in ``admission_type`` are not caught. See P7b in the
+    2026-08-19 remediation review and ``docs/ARCHITECTURE.md``.
+    """
     window = cfg.cohort.readmission_window_days
     adm = admissions.sort_values(["subject_id", "admittime"]).copy()
     adm["next_admittime"] = adm.groupby("subject_id")["admittime"].shift(-1)
+    adm["next_admission_type"] = adm.groupby("subject_id")["admission_type"].shift(-1)
     days_to_next = (adm["next_admittime"] - adm["dischtime"]).dt.total_seconds() / 86400
-    adm[TARGET_COL] = (
+
+    is_readmission = (
         (days_to_next >= 0) & (days_to_next <= window)
         & (adm["hospital_expire_flag"] == 0)
-    ).astype(int)
-    return adm.drop(columns=["next_admittime"])
+    )
+    adm[TARGET_COL] = is_readmission.astype(int)
+
+    next_is_planned = (
+        adm["next_admission_type"].str.upper().isin(_PLANNED_READMISSION_TYPES)
+    ).fillna(False)
+    adm[TARGET_COL_UNPLANNED] = (is_readmission & ~next_is_planned).astype(int)
+
+    return adm.drop(columns=["next_admittime", "next_admission_type"])
 
 
 def _apply_cohort_filters(
@@ -341,13 +373,13 @@ def build_features(tables: dict[str, pd.DataFrame], cfg: AppConfig) -> pd.DataFr
         if any(c.startswith(f"{it}_") for it in all_items)
     ]
 
-    keep = ID_COLS + feature_cols + ["gender", "age_band", TARGET_COL]
+    keep = ID_COLS + feature_cols + ["gender", "age_band", TARGET_COL, TARGET_COL_UNPLANNED]
     return adm[keep].copy()
 
 
 def feature_columns(matrix: pd.DataFrame) -> list[str]:
     """Return model-input columns: everything except identifiers, subgroups, target."""
-    exclude = set(ID_COLS + ["gender", "age_band", TARGET_COL])
+    exclude = set(ID_COLS + ["gender", "age_band", TARGET_COL, TARGET_COL_UNPLANNED])
     return [c for c in matrix.columns if c not in exclude]
 
 

@@ -1,6 +1,6 @@
 This is the single source of truth for project context. LLMs and teammates should read this file first before doing any work. Then read `docs/ARCHITECTURE.md` for the current pipeline design, then the most recent file in `sessions/` to see current state.
 
-# LLM-Augmented Hospital Readmission Prediction — A Two-Stage "Triage-and-Verify" Approach
+# LLM-Augmented Hospital Readmission Prediction — A Three-Layer Auditing Pipeline
 
 **Program:** M.Sc. Business Analytics, Nova SBE
 **Advisor:** Prof. Yufei Shen
@@ -11,7 +11,7 @@ This is the single source of truth for project context. LLMs and teammates shoul
 Predict 30-day hospital readmission using a three-layer pipeline:
 
 1. A classical ML model flags high-risk patients from **structured** MIMIC-IV data at a deployable, capacity-constrained operating point.
-2. A fine-tuned clinical language model reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent combined risk estimate.
+2. A fine-tuned clinical language model reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate.
 3. A reasoning LLM (phi4-mini) audits each flagged case — reading both scores and the note — and makes its own independent uphold/override decision with a clinical justification.
 
 See `docs/ARCHITECTURE.md` for the full design and rationale.
@@ -29,11 +29,11 @@ Full design detail (and what's implemented vs. still pending) lives in
 - Imbalance: `scale_pos_weight` / `class_weight="balanced"`
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC)
 
-### Stage 2 — FusionLongformer / plain Longformer (independent combined estimate) — IMPLEMENTED, RETRAIN PENDING
+### Stage 2 — Clinical-Longformer, note-only (independent risk estimate) — IMPLEMENTED, RETRAIN PENDING
 
 - Model: Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`, Li et al. 2022), 4096-token window (raised from 2048 on 2026-08-25 — see `docs/ARCHITECTURE.md` §2)
-- Input: Discharge notes (MIMIC-IV-Note) + 8 structured features (a different, smaller set than Stage 1's ~40 — deliberate; see ARCHITECTURE.md on why no "identical feature space" claim is made)
-- Produces an independent combined risk estimate, not a Stage-1-gating confirm/reject (the `stage2_confirmed` column still exists for the ablation's "cascade" arm but is not the pipeline's final word — Stage 3 is)
+- Input: Discharge notes (MIMIC-IV-Note) only — no structured features. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run; see `docs/ARCHITECTURE.md` §2 for why.
+- Produces an independent, note-based risk estimate, not a Stage-1-gating confirm/reject (the `stage2_confirmed` column still exists for the ablation's "cascade" arm but is not the pipeline's final word — Stage 3 is)
 - Training: Focal loss + per-age-group loss weights; patient-level splits (60/20/20 finetune/val/cal)
 - Calibration: Platt scaling per age group
 - Requires real MIMIC-IV-Note; cannot run on synthetic data

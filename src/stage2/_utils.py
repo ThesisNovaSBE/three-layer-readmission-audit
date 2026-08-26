@@ -1,40 +1,12 @@
 """Shared utilities for Stage 2 modules.
 
-Centralises the age-band key mapping, the Stage 2 model path helper, and the
-structured feature column definitions so they are not duplicated across
-calibrate.py, evaluate.py, predict.py, train.py, dataset.py, and model.py.
+Centralises the age-band key mapping and the Stage 2 model path helper so they
+are not duplicated across calibrate.py, evaluate.py, predict.py and train.py.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-
-# Structured feature columns fed to the MLP branch of FusionLongformer.
-# stage1_score is deliberately excluded: FusionLongformer must produce an
-# estimate independent of Stage 1 so that discordance between the two scores
-# reflects the note's marginal contribution, not feature-set overlap.
-# has_discharge_note is excluded because it is always 1 for Stage 2 patients
-# (selection bias — no note = no Stage 2 inference).
-STRUCT_FEATURE_COLS: list[str] = [
-    "age",
-    "los_days",
-    "charlson_index",
-    "n_prior_admissions",
-    "days_since_last_discharge",
-    "is_medicaid_medicare",
-    "admission_type_emergency",
-    "admission_type_observation",
-]
-
-# Subset of STRUCT_FEATURE_COLS that need z-score normalisation.
-# Binary features (0/1) are left as-is.
-CONTINUOUS_STRUCT_COLS: frozenset[str] = frozenset({
-    "age",
-    "los_days",
-    "charlson_index",
-    "n_prior_admissions",
-    "days_since_last_discharge",
-})
 
 
 # Maps pandas Interval string representations to config key strings.
