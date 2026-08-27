@@ -210,7 +210,13 @@ def assign_readmission_label(
     label = np.where(adm["hospital_expire_flag"].values == 1, 0, label)
 
     adm["readmission_30d"] = label
-    return adm[admissions.columns.tolist() + ["readmission_30d"]]
+    # Synthetic data has no note-derived or admission-type-based "planned
+    # return" signal beyond what's already folded into the logistic risk
+    # model above, so the unplanned variant is set equal to the all-cause
+    # label here — sufficient for the code-correctness checks synthetic data
+    # is used for, not a claim about real-data planned-return rates.
+    adm["readmission_30d_unplanned"] = label
+    return adm[admissions.columns.tolist() + ["readmission_30d", "readmission_30d_unplanned"]]
 
 
 def generate_synthetic_dataset(

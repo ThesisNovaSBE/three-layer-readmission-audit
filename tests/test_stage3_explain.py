@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from src.stage3.explain import (
     CLINICAL_DOMAINS,
@@ -16,6 +17,7 @@ from src.stage3.explain import (
     _parse_response,
     build_prompt,
     compute_discordance,
+    sweep_discordance_thresholds,
 )
 
 
@@ -92,6 +94,51 @@ def test_discordance_empty_cohort_defaults_to_50th_percentile():
     result = compute_discordance(0.5, 0.5, np.array([]), np.array([]))
     assert result["r1"] == 50.0
     assert result["r2"] == 50.0
+
+
+# ── sweep_discordance_thresholds ─────────────────────────────────────────────
+
+def test_sweep_default_thresholds():
+    """Default sweep must cover the standard 10/15/20/25/30 pp range."""
+    displacements = np.array([-40.0, -10.0, 0.0, 15.0, 45.0])
+    sweep = sweep_discordance_thresholds(displacements)
+    assert set(sweep.keys()) == {"10.0", "15.0", "20.0", "25.0", "30.0"}
+
+
+def test_sweep_fractions_sum_to_one():
+    """At every threshold, the three mode fractions must sum to 1."""
+    rng = np.random.default_rng(0)
+    displacements = rng.uniform(-100, 100, 200)
+    sweep = sweep_discordance_thresholds(displacements)
+    for dist in sweep.values():
+        total = dist["NOTE_MITIGATES"] + dist["NOTE_AMPLIFIES"] + dist["CONCORDANT"]
+        assert total == pytest.approx(1.0)
+
+
+def test_sweep_narrower_threshold_flags_more_discordance():
+    """A narrower threshold must classify at least as many patients as discordant."""
+    displacements = np.array([-25.0, -18.0, -12.0, 5.0, 18.0, 25.0, 0.0])
+    sweep = sweep_discordance_thresholds(displacements, thresholds_pp=[10.0, 30.0])
+    discordant_10 = sweep["10.0"]["NOTE_MITIGATES"] + sweep["10.0"]["NOTE_AMPLIFIES"]
+    discordant_30 = sweep["30.0"]["NOTE_MITIGATES"] + sweep["30.0"]["NOTE_AMPLIFIES"]
+    assert discordant_10 >= discordant_30
+
+
+def test_sweep_matches_compute_discordance_at_same_threshold():
+    """The sweep's classification must agree with compute_discordance for a
+    single patient at the same threshold — same rule, independently reached."""
+    cohort = np.linspace(0.0, 1.0, 101)
+    result = compute_discordance(0.20, 0.90, cohort, cohort, displacement_pp=20.0)
+    sweep = sweep_discordance_thresholds(np.array([result["displacement"]]), [20.0])
+    dist = sweep["20.0"]
+    expected_mode = result["mode"]
+    assert dist[expected_mode] == pytest.approx(1.0)
+
+
+def test_sweep_empty_displacements_does_not_crash():
+    """An empty input must return zeroed fractions, not raise (division by zero)."""
+    sweep = sweep_discordance_thresholds(np.array([]), [20.0])
+    assert sweep["20.0"] == {"NOTE_MITIGATES": 0.0, "NOTE_AMPLIFIES": 0.0, "CONCORDANT": 0.0}
 
 
 # ── build_prompt ──────────────────────────────────────────────────────────────

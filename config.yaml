@@ -171,6 +171,15 @@ stage2:
 # To enable: set enabled: true and run `ollama pull phi4-mini`
 stage3:
   ollama_model: "phi4-mini"
+  # Secondary, scale-robustness arm (2026-08-27): re-run the same prompt
+  # through a larger model to test whether the auditor's value depends on
+  # model scale, turning the field's known "small local models may lack
+  # reasoning capacity" risk into a tested result. NOT YET SET — the model
+  # choice is a decision to confirm before use, not a default to assume:
+  # a cloud API may not be permitted on MIMIC data under PhysioNet's Data
+  # Use Agreement without checking first. Prefer a larger *local* Ollama
+  # model unless that's explicitly verified. See docs/ARCHITECTURE.md.
+  robustness_model: null
   # Pinned at 0 for reproducibility. Uphold/override is the primary outcome
   # variable for RQ2 — a stochastic auditor makes NRI a sample from a
   # distribution rather than a fixed, reportable quantity. Do not change this

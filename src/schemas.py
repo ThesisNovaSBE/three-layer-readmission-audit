@@ -52,5 +52,12 @@ DIAGNOSES_COLS = {
 ID_COLS = ["subject_id", "hadm_id"]
 TARGET_COL = "readmission_30d"
 
+# All-cause label minus outcome admissions whose own admission_type indicates
+# a planned return (elective / same-day surgical). Structured-data proxy for
+# "unplanned" — see docs/ARCHITECTURE.md and compute_readmission_label() in
+# src/data/features.py. Carried through the feature matrix, never a model
+# input, same as TARGET_COL.
+TARGET_COL_UNPLANNED = "readmission_30d_unplanned"
+
 # Columns kept only for fairness/subgroup analysis (not model inputs).
 SUBGROUP_COLS = ["gender", "age_band"]

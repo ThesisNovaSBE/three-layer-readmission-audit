@@ -14,9 +14,12 @@ The script reports three evaluation layers:
 2. **Stage 2 alone** — AUROC / recall / precision on the subset of test-partition
    patients that were Stage 1-flagged *and* had a discharge note (the Stage 2
    inference population).
-3. **Full pipeline** — treating "Stage 2 confirmed" as the final binary prediction
-   for all test-partition patients (unconfirmed = negative regardless of Stage 1
-   score), reports pipeline-level precision / recall / F1 / F2.
+3. **Full pipeline** — the final binary prediction for all test-partition
+   patients. Per docs/ARCHITECTURE.md this should be Stage 3's uphold/override
+   decision (see ``src/stage3/batch.py``) wherever a batch Stage 3 run covers
+   the admission; where it doesn't yet, falls back to "Stage 2 confirmed"
+   with the C9 Stage-1 fallback for note-less admissions. Reports
+   pipeline-level precision / recall / F1 / F2.
 
 Per-age-band breakdowns are included for all three layers.
 
@@ -39,6 +42,7 @@ from sklearn.metrics import roc_auc_score
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
+from src.model.calibration import apply_calibration
 from src.model.metrics import auprc as compute_auprc
 
 
@@ -224,6 +228,62 @@ def _eval_stage2(
     return report, pipeline_pred_full, has_s2, flagged
 
 
+def _apply_stage3_decisions(
+    model_dir: object,
+    hadm_test: np.ndarray,
+    pipeline_pred_full: np.ndarray,
+    flagged: np.ndarray,
+) -> tuple[np.ndarray, dict]:
+    """Overlay Stage 3's decision onto the final prediction, where available.
+
+    Per docs/ARCHITECTURE.md, the pipeline's final prediction should be
+    Layer 3's uphold/override decision, not Stage 2's confirm/reject
+    threshold — Stage 2's score is evidence Layer 3 reasons over, not the
+    final word. Requires a batch Stage 3 run (``src/stage3/batch.py``);
+    where it doesn't cover an admission (not flagged, no note, or an
+    ``annotation_failed`` audit), the existing C9-corrected prediction
+    (``stage2_confirmed``, falling back to Stage 1's flag for note-less
+    admissions) is left unchanged — this function only ever narrows the gap
+    between "what's implemented" and "what the design calls for", never
+    silently drops coverage.
+
+    Returns:
+        (pipeline_pred_with_stage3, info) — ``info`` reports coverage; if no
+        batch Stage 3 result exists yet, ``pipeline_pred_full`` is returned
+        unchanged and ``info["available"]`` is ``False``.
+    """
+    s3_path = model_dir / "stage3_batch_results.csv"
+    if not s3_path.exists():
+        return pipeline_pred_full, {
+            "available": False,
+            "note": (
+                "stage3_batch_results.csv not found -- final prediction is "
+                "stage2_confirmed (+ C9 Stage 1 fallback), not yet Stage 3's "
+                "decision. Run `python -m src.stage3.batch` first."
+            ),
+        }
+
+    s3_all = pd.read_csv(s3_path)
+    s3_rows = s3_all.set_index("hadm_id")
+    decisions = s3_rows["decision"] if "decision" in s3_rows.columns else pd.Series(dtype=object)
+
+    decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
+    has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
+
+    pred = np.where(has_s3, (decision_arr == "uphold").astype(int), pipeline_pred_full)
+    pred = np.where(flagged, pred, 0)  # never-flagged admissions always stay negative
+
+    coverage = float(has_s3.sum() / flagged.sum()) if flagged.sum() else 0.0
+    info = {
+        "available": True,
+        "n_test_with_stage3_decision": int(has_s3.sum()),
+        "coverage_of_flagged": coverage,
+    }
+    print(f"[pipeline_eval] Stage 3 decisions applied to {has_s3.sum():,} / "
+          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage)")
+    return pred, info
+
+
 # ── main evaluation ───────────────────────────────────────────────────────────
 
 def evaluate_pipeline(cfg: AppConfig) -> dict:
@@ -239,7 +299,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
     x_test, y_test, sub_test, hadm_test = _load_test_partition(artifact, cfg)
-    s1_scores = artifact["estimator"].predict_proba(x_test)[:, 1]
+    s1_scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_test)[:, 1])
     s1_report = _stage1_report(y_test, s1_scores, artifact["threshold"], sub_test)
     print(f"\n[pipeline_eval] Stage 1 (test n={s1_report['n']:,}): "
           f"AUROC={s1_report['auroc']:.4f}  "
@@ -247,6 +307,9 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
 
     s2_report, pipeline_pred_full, has_s2, flagged = _eval_stage2(
         model_dir, hadm_test, y_test, sub_test, s1_scores, artifact["threshold"]
+    )
+    pipeline_pred_full, s3_info = _apply_stage3_decisions(
+        model_dir, hadm_test, pipeline_pred_full, flagged
     )
 
     # Full cohort (C9, primary): every test admission, note-less flagged
@@ -280,10 +343,14 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "flagged-no-note patients fall back to the Stage 1 flag per the "
             "C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes "
             "flagged-no-note admissions and must always be reported alongside "
-            "full_cohort, never alone."
+            "full_cohort, never alone. The final prediction is Stage 3's "
+            "uphold/override decision wherever a batch Stage 3 run covers the "
+            "admission (see 'stage3' below for coverage); Stage 2's threshold "
+            "is only a fallback where Stage 3 hasn't run yet."
         ),
         "stage1": s1_report,
         "stage2": s2_report,
+        "stage3": s3_info,
         "pipeline": {
             "full_cohort": full_report_,
             "notes_cohort": notes_report,

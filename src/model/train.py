@@ -25,6 +25,7 @@ from sklearn.model_selection import GroupShuffleSplit
 from src.config import load_config, get_model_dir
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
+from src.model.calibration import calibration_report, fit_isotonic_calibrator
 from src.model.cv import oof_predict
 from src.model.metrics import (
     auprc,
@@ -44,6 +45,22 @@ def _load_params(name: str, model_dir) -> dict:
         return json.loads(path.read_text())
     print("[train] No tuned params found — using defaults.")
     return default_params(name)
+
+
+def _calibrate(y_train, oof) -> dict:
+    """Fit isotonic calibration on OOF predictions and report before/after Brier.
+
+    Returns a dict with ``calibrator``, ``oof_calibrated``, and ``report``
+    (the ``calibration_report`` dict) so callers only need one local.
+    """
+    calibrator = fit_isotonic_calibrator(y_train, oof)
+    oof_calibrated = calibrator.predict(oof)
+    report = calibration_report(y_train, oof, oof_calibrated)
+    print(
+        f"[train] Calibration (OOF): Brier {report['brier_before']:.4f} -> "
+        f"{report['brier_after']:.4f}"
+    )
+    return {"calibrator": calibrator, "oof_calibrated": oof_calibrated, "report": report}
 
 
 def _select_thresholds(cfg: AppConfig, y_train, oof) -> dict:
@@ -75,6 +92,23 @@ def _select_thresholds(cfg: AppConfig, y_train, oof) -> dict:
     }
 
 
+def _fit_final_estimator(name, params, x_train, y_train, g_train, cfg, seed):
+    """Build and fit the final Stage 1 estimator on the full training split."""
+    estimator = build_estimator(name, params, y_train, cfg, seed)
+    if name == "xgboost":
+        itr, iva = next(
+            GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=seed)
+            .split(x_train, y_train, g_train)
+        )
+        fit_estimator(
+            estimator, name, x_train.iloc[itr], y_train[itr],
+            x_val=x_train.iloc[iva], y_val=y_train[iva],
+        )
+    else:
+        fit_estimator(estimator, name, x_train, y_train)
+    return estimator
+
+
 def train(cfg: AppConfig) -> None:
     """Train the Stage 1 model and save the artifact.
 
@@ -104,21 +138,19 @@ def train(cfg: AppConfig) -> None:
         name, x_train, y_train, g_train, cfg, seed,
         n_splits=cfg.run.active().cv_folds, params=params,
     )
-    thr_info = _select_thresholds(cfg, y_train, oof)
+
+    # Isotonic calibration (remediation review task 0.1, 2026-08-26). Fit on
+    # the same OOF predictions used for threshold selection — already
+    # held-out relative to the model that produced them, so this adds no new
+    # leakage surface. Monotonic, so it does not change which admissions get
+    # flagged (see src/model/calibration.py), only what the reported
+    # probability means.
+    cal_info = _calibrate(y_train, oof)
+
+    thr_info = _select_thresholds(cfg, y_train, cal_info["oof_calibrated"])
     threshold = thr_info["threshold"]
 
-    estimator = build_estimator(name, params, y_train, cfg, seed)
-    if name == "xgboost":
-        itr, iva = next(
-            GroupShuffleSplit(n_splits=1, test_size=0.15, random_state=seed)
-            .split(x_train, y_train, g_train)
-        )
-        fit_estimator(
-            estimator, name, x_train.iloc[itr], y_train[itr],
-            x_val=x_train.iloc[iva], y_val=y_train[iva],
-        )
-    else:
-        fit_estimator(estimator, name, x_train, y_train)
+    estimator = _fit_final_estimator(name, params, x_train, y_train, g_train, cfg, seed)
 
     artifact = {
         "estimator": estimator, "model_name": name, "threshold": float(threshold),
@@ -129,10 +161,21 @@ def train(cfg: AppConfig) -> None:
         "recall_floor_threshold": float(thr_info["recall_floor_threshold"]),
         "capacity_threshold": float(thr_info["capacity_threshold"]),
         "capacity_k": cfg.stage1.capacity_k,
+        "calibrator": cal_info["calibrator"],
     }
     out_path = model_dir / f"stage1_{name}.joblib"
     joblib.dump(artifact, out_path)
     print(f"[train] Saved model -> {out_path}")
+
+    cal_path = model_dir / "stage1_calibration.json"
+    cal_path.write_text(json.dumps({
+        **cal_info["report"],
+        "reliability_curve": {
+            "raw_score": cal_info["calibrator"].X_thresholds_.tolist(),
+            "calibrated_probability": cal_info["calibrator"].y_thresholds_.tolist(),
+        },
+    }, indent=2))
+    print(f"[train] Saved calibration report -> {cal_path}")
     print("[train] Done. Run `python -m src.model.evaluate` to score the held-out test set.")
 
 
