@@ -1,6 +1,6 @@
 # Architecture — Current State
 
-**Last updated:** 2026-08-26 (session 16). This is the single current source of
+**Last updated:** 2026-08-27 (session 17). This is the single current source of
 truth for the pipeline design. It supersedes `docs/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/SANITY_CHECK_2026-07-06.md` — those are
 kept for history (each now has a banner pointing here) but describe designs
@@ -116,6 +116,21 @@ this yet.
 outcome variable for RQ2; a stochastic auditor makes any reported effect a
 sample from a distribution rather than a fixed, checkable quantity.
 
+### RQ1 and RQ2 — which module answers what
+
+- **RQ1 — does text carry signal at all?** Layer 1 vs. Layer 2, scored
+  independently on the *same* population (not gated by Layer 1's flag) and
+  compared head-to-head. `src/stage2/predict.py:predict_stage2_all` produces
+  the population-wide Layer 2 scores this needs;
+  `src/model/compare_layers.py` does the comparison. Neither model feeds the
+  other here — this is not the cascade.
+- **RQ2 — does the auditor add value over Layer 1 alone?** Layer 3 audits
+  Layer 1's positive predictions using Layer 2's score as evidence.
+  `src/stage3/batch.py:run_batch_audit` runs this at scale;
+  `src/model/evaluate_pipeline.py` reports the resulting pipeline metrics
+  with Layer 3's decision (not Layer 2's threshold) as the final prediction
+  wherever a batch audit covers the admission.
+
 ---
 
 ## 3. What changed in code
@@ -185,39 +200,109 @@ All of the below required no model retraining and are already implemented.
   the current code, and it demonstrated the exact P2 bug — `NOTE_AMPLIFIES`
   count exceeding `n_confirmed`). Recoverable from git history if needed.
 
+**Session 17 (2026-08-27):** built everything from the session-16 gap audit
+that needed no GPU and no open decision.
+
+- **Population-wide Layer 2 scoring** — `src/stage2/predict.py`. New
+  `predict_stage2_all` (shares a refactored `_score_core`/`_prepare_population`
+  pipeline with the existing `predict_stage2`), scores every test-partition
+  admission with a note, not just Layer 1's positives. Output
+  `models/stage2_results_all.csv`. `--all` / `--limit` CLI flags added.
+  Required for RQ1 — see §2.5.
+  **Bug found while smoke-testing, not fully fixed:** running this module's
+  CLI standalone (`python -m src.stage2.predict`, with or without `--all`)
+  segfaults (SIGSEGV) on macOS ARM — confirmed pre-existing on the
+  pre-session-17 code too, not introduced today. Root cause: the same
+  MPS/XGBoost C-extension conflict documented elsewhere in this codebase
+  (`api.py`, `setup_stage2.py`) — `joblib.load()`-ing the XGBoost artifact
+  after torch has initialised crashes on Apple Silicon, and
+  `src.stage2.dataset` transitively imports torch, so this module's own
+  import order can't prevent it alone. Added the standard `PYTORCH_ENABLE_MPS_FALLBACK`
+  mitigation (doesn't fully fix it) and documented the real cause inline.
+  **Verified working**: calling `predict_stage2_all(cfg, artifact=<preloaded>)`
+  with the artifact loaded before torch imports (`setup_stage2.py`'s own
+  pattern) succeeds — confirmed by an ad hoc script, 15-admission smoke test.
+  A real fix (lazy-importing everything torch-touching) is a bigger change
+  than this session's scope; not attempted to avoid risking
+  `setup_stage2.py`'s already-working path. Until fixed: never invoke
+  `python -m src.stage2.predict` directly on macOS; drive it the way
+  `setup_stage2.py` does, or run on Linux/the cluster.
+- **`api.py` stopped gating on Layer 2's threshold.** `list_patients`'s
+  `confirmed_only` default flipped `True`→`False`; docstrings updated. Layer
+  2's score is evidence for Layer 3, not a display gate, per §2.
+  **Follow-up found, not fixed:** the frontend (`frontend/src/api.ts`) has
+  its own independent `confirmedOnly = true` default and UI copy built
+  around "confirmed" patients (`PatientTable.tsx`, `PipelineDiagram.tsx`) —
+  changing the backend default didn't change frontend behaviour. Needs an
+  actual frontend change plus a browser check, not a blind edit; not done
+  this session.
+- **N1 comparison runner (RQ1)** — new `src/model/compare_layers.py`.
+  Inner-joins Stage 1's test-partition scores with
+  `stage2_results_all.csv` on `hadm_id`, reports both models' AUROC/AUPRC
+  (bootstrap 95% CI, patient-level) and an operating point matched to Layer
+  1's alert volume, plus a paired bootstrap CI on the AUROC difference.
+  Output `models/comparison_rq1.json`.
+- **Batch Stage 3 runner (RQ2)** — new `src/stage3/batch.py`. Runs
+  `explain_patient` over every admission in `stage2_results.csv`
+  (preloading artifact/results/feature matrix once), writes incrementally
+  and crash-safe to `models/stage3_batch_results.csv`, supports `--limit`
+  and `--resume`. One bad admission no longer kills the run.
+- **Discordance-threshold sensitivity sweep** — `sweep_discordance_thresholds`
+  in `src/stage3/explain.py` (pure function, reclassifies existing
+  `displacement` values at multiple pp thresholds — no rank recomputation
+  needed) plus `run_sensitivity_sweep` / `--sweep` in `src/stage3/batch.py`,
+  consuming `stage3_batch_results.csv`. Output
+  `models/discordance_sensitivity.json`.
+- **Layer 3's model call generalised** — `call_phi4mini` → `call_llm(prompt,
+  cfg, model_name=None)` in `src/stage3/explain.py`; `explain_patient` gained
+  a matching `model_name` passthrough. New `stage3.robustness_model` config
+  field (default `null` — a real open decision, not a default to assume; see
+  §5). Makes the scale-robustness arm wireable without further code changes
+  once a model is chosen.
+- **`evaluate_pipeline.py`'s final prediction now prefers Layer 3's
+  decision.** New `_apply_stage3_decisions`: wherever
+  `stage3_batch_results.csv` has a decision for an admission, it replaces
+  `stage2_confirmed` (+ C9 fallback) as the final prediction; admissions
+  Layer 3 hasn't covered keep the prior C9-corrected value unchanged — this
+  only ever narrows the gap to the design, never drops coverage. Report now
+  includes a `stage3` block reporting coverage.
+- Tests: `test_compare_layers.py`, `test_stage3_batch.py`,
+  `test_evaluate_pipeline.py` (new); `test_stage3_explain.py` extended for
+  the sweep. 108 passed, 1 skipped; pylint 10.00/10.
+
 ---
 
 ## 4. What is explicitly deferred (not done yet)
 
-These require either GPU retraining or a further design decision and were
-intentionally left for the next round of "exact stage behaviour" discussion:
+Everything in this section needs either GPU/compute time or an explicit
+decision — the code to run once either is resolved already exists as of
+session 17.
 
 - **Retrain Stage 1** with the rebuilt feature matrix (400-trial Optuna,
   session-14 feature fixes, isotonic calibration) —
   `scripts/slurm_stage1_tune.sh` is ready.
 - **Retrain Stage 2** at `max_seq_length=4096` — no script changes needed,
   just a fresh KISSKI/Grete job (plain Longformer only, per §2).
-- **`api.py` / `src/stage2/predict.py` still treat `stage2_confirmed` as a
-  gate** in places (e.g. `list_patients(confirmed_only=True)`). Per §2,
-  Stage 2 no longer gates conceptually — Stage 3 is meant to see every
-  flagged+noted patient regardless of Stage 2's confirm/reject call. Whether
-  and how to change the API/frontend contract (which the current frontend
-  depends on) is exactly the "exact stage behaviour" discussion still to
-  have — not changed yet to avoid breaking the running demo without a
-  coordinated frontend update.
-- **No batch Stage 3 runner yet.** `explain_patient` is on-demand,
-  single-patient only. `evaluate_pipeline.py`'s pipeline metric still uses
-  `stage2_confirmed` as the final pipeline prediction (with the C9 fix on
-  top) rather than Stage 3's decision, because there's no batch path to
-  produce Stage 3 decisions for a whole test partition yet. Needed before
-  RQ2/RQ3 can be evaluated at scale.
+- **Run `predict_stage2_all` at full scale** once Stage 2 is retrained — the
+  code exists (session 17) but has only been smoke-tested on a small
+  `--limit` slice against the stale, pre-retrain model.
+- **Run `compare_layers.py`** once both retrains + the full-scale
+  `stage2_results_all.csv` exist, to produce the first real RQ1 numbers.
+  Blocked on the headline-denominator decision below before the result is
+  reported as "the" RQ1 answer, not on writing more code.
+- **Run `batch.py` at full scale** once Stage 1 + Stage 2 are retrained, to
+  produce real RQ2 numbers and let `evaluate_pipeline.py`'s `stage3` coverage
+  block become non-empty.
+- **Run `batch.py --sweep`** once the above exists, to actually validate
+  `discordance_displacement_pp` rather than leave it at the provisional 20.
+- **Wire and run the Layer 3 robustness arm** — blocked on the model-choice
+  decision below, not on code.
 - **N1 ablation runner** (5+ arms incl. the critical L1-at-matched-capacity
-  arm) — not yet written.
-- **ε / displacement threshold validation** — `discordance_displacement_pp`
-  is a provisional 20; needs the percentile-sweep sensitivity check before
-  being reported as a methodological choice rather than a guess.
-- **Bootstrap CIs not yet in `evaluate_pipeline.py`** — only Stage 1's
-  standalone `evaluate.py` has them so far (see §3).
+  arm) beyond the two-arm RQ1 comparison `compare_layers.py` already covers
+  — not yet written.
+- **Bootstrap CIs not yet in `evaluate_pipeline.py`** — `evaluate.py` and
+  `compare_layers.py` have them; the cascade's full/notes-cohort pipeline
+  numbers still don't.
 - **`readmission_30d_unplanned` not yet used anywhere** — the column exists
   in the feature matrix but no script trains or evaluates against it yet.
 - Feature audit (vitals missingness, lab itemid validation against
@@ -225,7 +310,29 @@ intentionally left for the next round of "exact stage behaviour" discussion:
 
 ---
 
-## 5. Open methodological notes carried forward
+## 5. Decisions still needed (blocking, not just deferred)
+
+- **Which model runs Layer 3's robustness arm, and is a cloud API even
+  permitted on this data?** MIMIC-IV/MIMIC-IV-Note are governed by a
+  PhysioNet Data Use Agreement; sending credentialed data to a third-party
+  cloud API is very likely restricted without a specific agreement.
+  Recommendation: default to a larger *local* Ollama model, not a cloud API,
+  unless the DUA is explicitly checked and permits it. `stage3.robustness_model`
+  is deliberately left `null` pending this — do not set it without checking.
+- **RQ1's headline comparison denominator.** Layer 2 only ever covers
+  admissions with a note (~63% in past runs); Layer 1 covers 100%.
+  Recommendation (per the remediation review's denominator-integrity point):
+  the headline RQ1 number is both models restricted to the notes-covered
+  subset (`stage1_notes_cohort` vs. `stage2_notes_cohort` in
+  `comparison_rq1.json`) — the only population both models can be fairly
+  compared on — with `stage1_full_population` reported as separate
+  deployment context, not blended into the headline claim. Needs explicit
+  confirmation before any number from `compare_layers.py` goes in the thesis
+  text as "the" RQ1 result.
+
+---
+
+## 6. Open methodological notes carried forward
 
 - Stage 1's decision threshold is still selected on the same OOF/validation
   data used for early-stopping — a mild contamination risk flagged once in
@@ -242,3 +349,6 @@ intentionally left for the next round of "exact stage behaviour" discussion:
 - `training-changes` is still unmerged into `main` (44+ commits ahead as of
   session 15). Nothing in this doc addresses that — it's a repo-hygiene
   decision (merge vs. formally adopt as the working branch), not a code fix.
+- Frontend (`frontend/src/`) still assumes the old "Stage 2 gates the
+  patient list" model independently of the backend (see session 17 note in
+  §3) — needs its own pass with an actual browser check, not covered here.

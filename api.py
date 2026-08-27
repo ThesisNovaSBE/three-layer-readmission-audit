@@ -6,10 +6,15 @@ Start the server::
 
 Endpoints
 ---------
-GET  /api/health                         → server status and loaded patient count
-GET  /api/patients[?confirmed_only=true] → Stage-2-flagged patients
-GET  /api/patients/{hadm_id}             → one patient's full record
-POST /api/patients/{hadm_id}/explain     → on-demand Stage 3 clinical explanation
+GET  /api/health                          → server status and loaded patient count
+GET  /api/patients[?confirmed_only=false] → Stage 1-flagged patients (default: all
+                                             of them — Stage 2's score is evidence
+                                             for Stage 3, not a display gate; pass
+                                             confirmed_only=true to filter to the
+                                             subset Stage 2's cascade threshold
+                                             would have confirmed)
+GET  /api/patients/{hadm_id}              → one patient's full record
+POST /api/patients/{hadm_id}/explain      → on-demand Stage 3 clinical audit
 
 Demo mode
 ---------
@@ -341,15 +346,24 @@ def get_health(request: Request) -> HealthOut:
 @app.get("/api/patients", response_model=PatientsPage)
 def list_patients(
     request: Request,
-    confirmed_only: bool = True,
+    confirmed_only: bool = False,
     limit: int = 50,
     offset: int = 0,
     q: str = "",
 ) -> PatientsPage:
-    """Return a paginated, optionally searched slice of Stage-2-processed patients.
+    """Return a paginated, optionally searched slice of Stage 1-flagged patients.
+
+    Stage 2's score is evidence for Stage 3's audit, not a pass/fail gate on
+    who appears here — every Stage 1-flagged patient is included by default,
+    regardless of whether Stage 2's cascade threshold would have confirmed
+    or rejected them (see docs/ARCHITECTURE.md). ``confirmed_only`` is an
+    optional filter for callers who specifically want the cascade-confirmed
+    subset, not the default view.
 
     Args:
-        confirmed_only: When ``True`` (default), only return Stage 2 confirmed patients.
+        confirmed_only: When ``True``, restrict to patients Stage 2's
+            cascade threshold would confirm. Default ``False`` — all
+            Stage 1-flagged patients.
         limit: Maximum number of patients to return.
         offset: Number of patients to skip (cursor for "load more").
         q: Optional search term matched against hadm_id, age_band, and gender.

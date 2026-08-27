@@ -131,6 +131,7 @@ class Stage3Config(BaseModel):
     model_config = ConfigDict(frozen=False)
 
     ollama_model: str = "phi4-mini"
+    robustness_model: str | None = None
     temperature: float = 0.0
     attention_extraction: bool = True  # extract Longformer attention spans (needs trained model)
     top_attention_sentences: int = 5   # sentences to extract per patient

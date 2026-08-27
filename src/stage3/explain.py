@@ -203,6 +203,43 @@ def compute_discordance(
     return {"r1": r1, "r2": r2, "displacement": displacement, "mode": mode}
 
 
+def sweep_discordance_thresholds(
+    displacements: np.ndarray, thresholds_pp: list[float] | None = None
+) -> dict[str, dict[str, float]]:
+    """Report the discordance mode distribution across a range of thresholds.
+
+    ``stage3.discordance_displacement_pp`` (20, provisional) has never been
+    validated empirically — this answers how sensitive the reported mode
+    distribution is to that choice, per docs/ARCHITECTURE.md. Only the mode
+    classification depends on the threshold; ``displacement`` values
+    (already computed per-patient by :func:`compute_discordance`) don't need
+    recomputing — pass the ``displacement`` column of a batch audit result.
+
+    Args:
+        displacements: array of ``r2 - r1`` values, one per audited patient.
+        thresholds_pp: displacement-point thresholds to sweep. Defaults to
+                       ``[10, 15, 20, 25, 30]``.
+
+    Returns:
+        Dict keyed by threshold (as a string) to a dict of
+        mode -> fraction of patients classified into that mode.
+    """
+    thresholds_pp = thresholds_pp or [10.0, 15.0, 20.0, 25.0, 30.0]
+    displacements = np.asarray(displacements, dtype=float)
+    n = len(displacements)
+    out: dict[str, dict[str, float]] = {}
+    for thr in thresholds_pp:
+        mitigates = int((displacements <= -thr).sum())
+        amplifies = int((displacements >= thr).sum())
+        concordant = n - mitigates - amplifies
+        out[str(thr)] = {
+            "NOTE_MITIGATES": mitigates / n if n else 0.0,
+            "NOTE_AMPLIFIES": amplifies / n if n else 0.0,
+            "CONCORDANT": concordant / n if n else 0.0,
+        }
+    return out
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _note_block(note_text: str) -> str:
@@ -331,21 +368,32 @@ def build_prompt(
     )
 
 
-def call_phi4mini(prompt: str, cfg: AppConfig) -> dict[str, Any]:
-    """Call phi4-mini via Ollama and return the parsed annotation dict.
+def call_llm(prompt: str, cfg: AppConfig, model_name: str | None = None) -> dict[str, Any]:
+    """Call an Ollama-hosted model and return the parsed annotation dict.
+
+    Generalised from the original ``call_phi4mini`` so the same prompt can be
+    run through a different model — e.g. ``cfg.stage3.robustness_model`` — as
+    a robustness check on whether the auditor's value depends on model
+    scale, without duplicating the prompt/parsing logic. All models here are
+    assumed Ollama-hosted (local); routing to a cloud API is a separate,
+    currently unmade decision — see docs/ARCHITECTURE.md (PhysioNet's data
+    use terms need checking before patient text is sent to any third party).
 
     Args:
-        prompt: built by :func:`build_prompt`.
-        cfg:    validated project config (reads ``stage3.ollama_model`` and
-                ``stage3.temperature`` — pinned at 0 for reproducibility).
+        prompt:     built by :func:`build_prompt`.
+        cfg:        validated project config (reads ``stage3.temperature``
+                    — pinned at 0 for reproducibility).
+        model_name: Ollama model tag to use. Defaults to
+                    ``cfg.stage3.ollama_model`` (the primary auditor model).
 
     Returns:
         Dict with keys ``decision``, ``primary_clinical_domain``,
         ``clinical_justification``, ``annotation_failed``.
     """
+    model_name = model_name or cfg.stage3.ollama_model
     try:
         response = ollama.chat(
-            model=cfg.stage3.ollama_model,
+            model=model_name,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},

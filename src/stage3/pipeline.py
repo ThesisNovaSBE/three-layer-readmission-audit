@@ -36,7 +36,7 @@ from src.data.features import load_feature_matrix
 from src.schemas import TARGET_COL
 from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
-from src.stage3.explain import build_prompt, call_phi4mini, compute_discordance
+from src.stage3.explain import build_prompt, call_llm, compute_discordance
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
 
@@ -170,6 +170,7 @@ def explain_patient(
     results_df: pd.DataFrame | None = None,
     artifact: dict | None = None,
     feature_matrix: pd.DataFrame | None = None,
+    model_name: str | None = None,
 ) -> ExplanationResult:
     """Generate a Stage 3 explanation for one patient on demand.
 
@@ -184,6 +185,10 @@ def explain_patient(
         results_df:     Pre-loaded Stage 2 results DataFrame (optional).
         artifact:       Pre-loaded Stage 1 XGBoost artifact dict (optional).
         feature_matrix: Pre-loaded full feature matrix (optional).
+        model_name:     Ollama model tag to audit with. Defaults to
+                        ``cfg.stage3.ollama_model``. Pass
+                        ``cfg.stage3.robustness_model`` to run the same
+                        patient through the scale-robustness arm instead.
 
     Returns:
         :class:`ExplanationResult` with all fields populated.
@@ -225,7 +230,7 @@ def explain_patient(
         note_text=note_text,
         attention_sentences=attention_sentences,
     )
-    annotation = call_phi4mini(prompt, cfg)
+    annotation = call_llm(prompt, cfg, model_name=model_name)
 
     return ExplanationResult(
         hadm_id=patient["hadm_id"],
