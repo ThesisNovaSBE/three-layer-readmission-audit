@@ -1,6 +1,6 @@
 # Architecture — Current State
 
-**Last updated:** 2026-08-27 (session 17). This is the single current source of
+**Last updated:** 2026-08-28 (session 18). This is the single current source of
 truth for the pipeline design. It supersedes `docs/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/SANITY_CHECK_2026-07-06.md` — those are
 kept for history (each now has a banner pointing here) but describe designs
@@ -89,7 +89,25 @@ Rewritten 2026-08-25 (`src/stage3/explain.py`, `src/stage3/pipeline.py`,
 Stage 2's score, the discharge note itself (near-full text, not a 5-sentence
 attention summary), and a pre-computed discordance mode. Output: `decision`
 (`uphold` / `override`) — phi4-mini's **own** judgment, not a narration of
-Stage 2's — plus `primary_clinical_domain` and `clinical_justification`.
+Stage 2's — plus `primary_clinical_domain`, `clinical_justification`,
+`supporting_quote`, `quote_verified`, and `planned_return` (added
+2026-08-28, colleague review item 2/3 — see session 18):
+
+- `supporting_quote`: the exact note passage the LLM says its judgment rests
+  on. `verify_quote()` checks it appears verbatim in the note text
+  (`quote_verified: bool`) — a cheap, automatic hallucination check that
+  makes human review of an override tractable (spot-check the quote, not the
+  whole note) rather than a leap of faith. All 5 fields (decision, domain,
+  quote non-empty, `quote_verified`, `planned_return`) are enforced at the
+  same level in `_parse_response` — a missing/invalid quote fails parsing
+  exactly like a missing decision does, not silently ignored.
+- `planned_return`: requires the LLM to state, as its own structured field
+  (`PLANNED_RETURN_ANSWERS = ("yes", "no", "not_stated")`), whether the note
+  documents this admission as a planned return — directly answers the
+  colleague's review question about whether the auditor distinguishes
+  planned from unplanned returns rather than conflating them. (Also see
+  `TARGET_COL_UNPLANNED` in `src/schemas.py`/`src/data/features.py`, which
+  computes the same distinction at the label level, independent of Stage 3.)
 
 **Discordance mode is computed quantitatively, never by the LLM**
 (`compute_discordance` in `src/stage3/explain.py`):
@@ -129,7 +147,14 @@ sample from a distribution rather than a fixed, checkable quantity.
   `src/stage3/batch.py:run_batch_audit` runs this at scale;
   `src/model/evaluate_pipeline.py` reports the resulting pipeline metrics
   with Layer 3's decision (not Layer 2's threshold) as the final prediction
-  wherever a batch audit covers the admission.
+  wherever a batch audit covers the admission. The load-bearing comparison
+  (colleague review item 1, 2026-08-28) is against a **control arm**:
+  Layer 1 alone, its threshold raised to match the full system's alert
+  volume exactly (`evaluate_pipeline.py:_control_arm_report`, using
+  `select_threshold_for_capacity`) — not an unconstrained Layer 1. Without
+  this, an apparent precision gain from the cascade could just be Layer 1
+  flagging fewer admissions, which raising its own threshold would do for
+  free. Reported as `report["pipeline"]["control_arm_stage1_matched"]`.
 
 ---
 
@@ -270,6 +295,40 @@ that needed no GPU and no open decision.
   `test_evaluate_pipeline.py` (new); `test_stage3_explain.py` extended for
   the sweep. 108 passed, 1 skipped; pylint 10.00/10.
 
+**Session 18 (2026-08-28):** built the BUILD-NOW items from a colleague
+review (control arm, evidence quoting, planned-return question) plus the
+narrative-doc rewrite; the colleague's other two items (retrain Stage 1,
+per-group context) and the user's own four open architecture questions were
+deliberately left as open decisions, not implemented — see §5.
+
+- **Control arm** — `evaluate_pipeline.py:_control_arm_report` (§2.5 above).
+  Stage 1 alone, threshold raised to match the full system's realized alert
+  rate, evaluated with the same `_pipeline_report` shape as the cascade.
+  This is now the load-bearing comparison for "does the cascade+audit add
+  value" — see §2.5.
+- **Evidence quoting** — `src/stage3/explain.py`/`models.py`/`pipeline.py`.
+  New `supporting_quote` + `quote_verified` fields (§2 above), enforced at
+  the same level as `decision` in `_parse_response`. `verify_quote()` is a
+  plain substring check (`supporting_quote.strip() in note_text`) — cheap by
+  design, not a semantic entailment check; it catches fabricated quotes, not
+  misleading-but-verbatim ones.
+- **Planned-return question** — new `planned_return` field on the same
+  three files, taxonomy `PLANNED_RETURN_ANSWERS = ("yes", "no",
+  "not_stated")` (§2, §6 above).
+- **Narrative docs rewritten** — `docs/THESIS_NARRATIVE.md`'s one-sentence
+  summary, abstract, storyline options, and "if the professor asks" section,
+  plus the paste-ready session-start prompt and N5 literature-positioning
+  prompt in `docs/SANITY_CHECK_2026-07-06.md`, no longer describe a
+  "high-recall screen" that a Stage 2 "second reader" "vetoes" — they now
+  describe the capacity-constrained screen / independent second opinion /
+  independent auditor design this file has described since session 15.
+  Abstract numbers replaced with a retrain-pending placeholder rather than
+  the stale recall-floor figures (AUROC 0.706, recall 0.85) they previously
+  carried.
+- Tests: `test_evaluate_pipeline.py`, `test_stage3_explain.py`,
+  `test_stage3_batch.py` extended for the new fields. 121 passed, 1 skipped;
+  pylint 10.00/10.
+
 ---
 
 ## 4. What is explicitly deferred (not done yet)
@@ -297,9 +356,11 @@ session 17.
   `discordance_displacement_pp` rather than leave it at the provisional 20.
 - **Wire and run the Layer 3 robustness arm** — blocked on the model-choice
   decision below, not on code.
-- **N1 ablation runner** (5+ arms incl. the critical L1-at-matched-capacity
-  arm) beyond the two-arm RQ1 comparison `compare_layers.py` already covers
-  — not yet written.
+- **N1 ablation runner** (5+ arms) beyond the two-arm RQ1 comparison
+  `compare_layers.py` already covers — not yet written. The single most
+  load-bearing arm, L1-at-matched-capacity, no longer needs a separate
+  runner: `evaluate_pipeline.py:_control_arm_report` (session 18,
+  2026-08-28) computes it inline as part of every pipeline evaluation.
 - **Bootstrap CIs not yet in `evaluate_pipeline.py`** — `evaluate.py` and
   `compare_layers.py` have them; the cascade's full/notes-cohort pipeline
   numbers still don't.
@@ -329,6 +390,25 @@ session 17.
   deployment context, not blended into the headline claim. Needs explicit
   confirmation before any number from `compare_layers.py` goes in the thesis
   text as "the" RQ1 result.
+- **Conditional Stage 3 triggering (raised 2026-08-28, not implemented).**
+  Currently `batch.py` audits every Stage 1-flagged, note-covered admission.
+  An open question (not yet decided by the user, explicitly deferred pending
+  their own evaluation) is whether Stage 3 should instead run only on
+  discordant cases (`discordance_mode != CONCORDANT`) — cheaper, and arguably
+  a cleaner story ("the auditor is called in when the two screens disagree"),
+  at the cost of never getting an independent audit opinion on concordant
+  flags to check whether the auditor would have agreed anyway. Do not
+  implement without the user's explicit go-ahead.
+- **Three more open architecture questions raised 2026-08-28, all
+  explicitly left for the user to evaluate, not implemented:** whether
+  Stage 1 and Stage 2 should be forced onto identical data splits for
+  cleaner comparability (currently: same test partition, but Stage 2 is
+  further restricted to the notes-covered subset within it); what exactly
+  Stage 3 should be understood to reason "over" beyond the current
+  score+SHAP+note+discordance-mode bundle (e.g. should it also see Stage 1's
+  raw feature values, not just SHAP strings); and whether per-subgroup
+  (e.g. age-band) context should be surfaced to Stage 3 explicitly rather
+  than left implicit in the note text and scores.
 
 ---
 
@@ -337,12 +417,14 @@ session 17.
 - Stage 1's decision threshold is still selected on the same OOF/validation
   data used for early-stopping — a mild contamination risk flagged once in
   an earlier review and never revisited. Still open.
-- `readmission_30d_unplanned` only catches planned returns visible in
-  `admission_type` (elective / same-day surgical) — a structured-data proxy.
-  Planned returns not reflected there (e.g. informally scheduled follow-up
-  admissions) are not caught; the remediation review's original proposal
-  (an LLM-extracted `planned_return` flag from the note) would catch more
-  but depends on evidence-extraction infrastructure that doesn't exist.
+- `readmission_30d_unplanned` (label-level, `src/data/features.py`) only
+  catches planned returns visible in `admission_type` (elective / same-day
+  surgical) — a structured-data proxy. Planned returns not reflected there
+  (e.g. informally scheduled follow-up admissions) are not caught there.
+  Stage 3's `planned_return` field (added 2026-08-28, §2 above) now gives an
+  LLM-extracted, note-based answer to the same question at audit time — but
+  the two are not yet cross-checked against each other; whether they agree,
+  and what to do when they don't, is unexamined.
 - Truncation asymmetry between Stage 2 (4096 tokens) and Stage 3 (now a
   20,000-character safety cap, effectively near-full note) is much smaller
   than before session 15 but not eliminated for pathologically long notes.

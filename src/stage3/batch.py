@@ -47,7 +47,8 @@ from src.stage3.pipeline import explain_patient
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
     "stage2_confirmed", "r1", "r2", "displacement", "discordance_mode",
-    "decision", "primary_clinical_domain", "clinical_justification",
+    "decision", "primary_clinical_domain", "supporting_quote",
+    "quote_verified", "planned_return", "clinical_justification",
     "annotation_failed",
 ]
 

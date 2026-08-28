@@ -16,6 +16,16 @@ class ExplanationResult(BaseModel):
     ``decision`` is phi4-mini's own independent uphold/override judgment (not
     a narration of Stage 2's confirm/reject output — Stage 2's score is one
     piece of evidence the auditor reasons over, not a decision it explains).
+
+    ``supporting_quote`` / ``quote_verified`` (colleague review, 2026-08-27):
+    the exact sentence the model claims to have based its decision on, and
+    whether that sentence was found verbatim in the note (computed in code,
+    not asked of the model) — this is what makes human spot-checking
+    tractable: check the (hopefully small) subset where
+    ``quote_verified is False`` rather than every case. ``planned_return``
+    is the model's own note-derived answer to whether a scheduled return is
+    documented, independent of the structured admission_type-based proxy in
+    ``src/data/features.py`` — reported separately, not merged.
     """
 
     hadm_id: int
@@ -31,5 +41,8 @@ class ExplanationResult(BaseModel):
     attention_sentences: list[str]
     decision: str | None
     primary_clinical_domain: str | None
+    supporting_quote: str
+    quote_verified: bool | None
+    planned_return: str | None
     clinical_justification: str
     annotation_failed: bool

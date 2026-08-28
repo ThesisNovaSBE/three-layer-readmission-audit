@@ -1,4 +1,4 @@
-"""Tests for the Stage 3 decision overlay in evaluate_pipeline.py.
+"""Tests for the Stage 3 decision overlay and control arm in evaluate_pipeline.py.
 
 Pure-logic tests against small synthetic DataFrames / arrays. The rest of
 evaluate_pipeline.py needs a trained Stage 1 artifact and real feature
@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.model.evaluate_pipeline import _apply_stage3_decisions
+from src.model.evaluate_pipeline import _apply_stage3_decisions, _control_arm_report
 
 
 def test_no_stage3_file_returns_unchanged_prediction(tmp_path):
@@ -99,3 +100,47 @@ def test_coverage_fraction_computed_correctly(tmp_path):
     _pred, info = _apply_stage3_decisions(tmp_path, hadm_test, pipeline_pred_full, flagged)
 
     assert info["coverage_of_flagged"] == 2 / 3
+
+
+# ── _control_arm_report ───────────────────────────────────────────────────────
+
+@pytest.fixture
+def subgroups_20():  # pylint: disable=missing-function-docstring
+    return pd.DataFrame({"age_band": ["18-40", "41-55", "56-70", "70+"] * 5})
+
+
+def test_control_arm_matches_target_alert_rate(subgroups_20):  # pylint: disable=redefined-outer-name
+    """The control arm's alert rate must match the target within quantile precision."""
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 2, 20)
+    s1_scores = rng.uniform(0.0, 1.0, 20)
+    target_rate = 0.25
+
+    report = _control_arm_report(y, s1_scores, target_rate, subgroups_20)
+
+    assert report["confirmed_rate"] == pytest.approx(target_rate, abs=0.06)
+    assert report["target_alert_rate"] == target_rate
+
+
+def test_control_arm_is_pipeline_report_shaped(subgroups_20):  # pylint: disable=redefined-outer-name
+    """Output must have the same shape as _pipeline_report, plus threshold fields."""
+    rng = np.random.default_rng(1)
+    y = rng.integers(0, 2, 20)
+    s1_scores = rng.uniform(0.0, 1.0, 20)
+
+    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20)
+
+    for key in ("n", "pos_rate", "confirmed_rate", "precision", "recall",
+                "f1", "f2", "by_age_band", "threshold", "target_alert_rate"):
+        assert key in report
+
+
+def test_control_arm_full_capacity_flags_everyone(subgroups_20):  # pylint: disable=redefined-outer-name
+    """target_alert_rate=1.0 must flag the entire population."""
+    rng = np.random.default_rng(2)
+    y = rng.integers(0, 2, 20)
+    s1_scores = rng.uniform(0.0, 1.0, 20)
+
+    report = _control_arm_report(y, s1_scores, 1.0, subgroups_20)
+
+    assert report["confirmed_rate"] == pytest.approx(1.0)

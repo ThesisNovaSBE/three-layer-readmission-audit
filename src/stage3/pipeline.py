@@ -230,7 +230,7 @@ def explain_patient(
         note_text=note_text,
         attention_sentences=attention_sentences,
     )
-    annotation = call_llm(prompt, cfg, model_name=model_name)
+    annotation = call_llm(prompt, cfg, model_name=model_name, note_text=note_text)
 
     return ExplanationResult(
         hadm_id=patient["hadm_id"],
@@ -246,6 +246,9 @@ def explain_patient(
         attention_sentences=attention_sentences,
         decision=annotation["decision"],
         primary_clinical_domain=annotation["primary_clinical_domain"],
+        supporting_quote=annotation["supporting_quote"],
+        quote_verified=annotation["quote_verified"],
+        planned_return=annotation["planned_return"],
         clinical_justification=annotation["clinical_justification"],
         annotation_failed=annotation["annotation_failed"],
     )

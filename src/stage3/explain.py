@@ -72,6 +72,15 @@ CLINICAL_DOMAINS: tuple[str, ...] = (
     "other",
 )
 
+# Colleague review, 2026-08-27, item 3: does the note itself mention a
+# planned return (chemo cycle, staged surgery, scheduled dialysis)? This is
+# independent of, not a replacement for, the structured admission_type-based
+# readmission_30d_unplanned proxy in src/data/features.py -- the two use
+# different evidence and are reported separately; their agreement rate is
+# itself a characterisation finding (how much the structured proxy
+# undercounts planned returns), not something to silently merge.
+PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
+
 # Generous safety cap, not a routine truncation. Session 14 measured median
 # MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
 # (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
@@ -137,7 +146,7 @@ _USER_TEMPLATE = textwrap.dedent("""
     upheld or overridden. Base your decision on the discharge note and both
     risk estimates together — not on the discordance label alone.
 
-    Return ONLY a JSON object with exactly these three fields:
+    Return ONLY a JSON object with exactly these five fields:
 
     "decision": one of {decisions}
       uphold   — the alert should stand; the note does not provide grounds
@@ -148,6 +157,16 @@ _USER_TEMPLATE = textwrap.dedent("""
 
     "primary_clinical_domain": the single most relevant domain, one of:
       {domains}
+
+    "supporting_quote": the exact sentence from the discharge note above that
+      most directly supports your decision. Copy it verbatim — do not
+      paraphrase or summarise. This is checked automatically against the
+      note text, so an invented or altered quote will be caught.
+
+    "planned_return": does the note mention a planned return — a scheduled
+      chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
+      regardless of whether it affected your decision? One of
+      {planned_return_options}.
 
     "clinical_justification": 2-4 sentences. Cite specific content from the
       note. State what drove your decision.
@@ -273,9 +292,27 @@ def _attention_block(attention_sentences: list[str]) -> str:
 _PARSE_FAILURE: dict[str, Any] = {
     "decision": None,
     "primary_clinical_domain": None,
+    "supporting_quote": "",
+    "quote_verified": None,
+    "planned_return": None,
     "clinical_justification": "",
     "annotation_failed": True,
 }
+
+
+def verify_quote(supporting_quote: str, note_text: str) -> bool:
+    """Return whether ``supporting_quote`` appears verbatim in ``note_text``.
+
+    Computed in code, not asked of the LLM — this is what turns "the model
+    says it quoted the note" into something automatically checkable, and is
+    the mechanism that makes human spot-checking (colleague review,
+    2026-08-27, item 2) tractable instead of impossible: a reviewer only
+    needs to check the *decisions* on the (hopefully small) subset where
+    ``quote_verified`` is False, not re-read every note from scratch.
+    """
+    if not supporting_quote.strip():
+        return False
+    return supporting_quote.strip() in note_text
 
 
 def _parse_response(raw: str) -> dict[str, Any]:
@@ -283,7 +320,9 @@ def _parse_response(raw: str) -> dict[str, Any]:
 
     Returns ``annotation_failed=True`` (with ``None`` decision/domain) on any
     parse error so callers can distinguish a real "uphold" from a silent
-    failure.
+    failure. ``quote_verified`` is NOT set here — it needs ``note_text``,
+    which this function doesn't have; see :func:`call_llm`, which calls
+    :func:`verify_quote` after parsing.
     """
     data: dict | None = None
     try:
@@ -302,10 +341,20 @@ def _parse_response(raw: str) -> dict[str, Any]:
 
     decision = data.get("decision", "")
     domain = data.get("primary_clinical_domain", "")
+    quote = data.get("supporting_quote", "")
+    planned_return = data.get("planned_return", "")
+
     valid_decision = decision if decision in DECISIONS else None
     valid_domain = domain if domain in CLINICAL_DOMAINS else None
+    valid_quote = quote if isinstance(quote, str) and quote.strip() else None
+    valid_planned_return = (
+        planned_return if planned_return in PLANNED_RETURN_ANSWERS else None
+    )
 
-    if valid_decision is None or valid_domain is None:
+    if (
+        valid_decision is None or valid_domain is None
+        or valid_quote is None or valid_planned_return is None
+    ):
         return {
             **_PARSE_FAILURE,
             "clinical_justification": data.get(
@@ -316,6 +365,9 @@ def _parse_response(raw: str) -> dict[str, Any]:
     return {
         "decision": valid_decision,
         "primary_clinical_domain": valid_domain,
+        "supporting_quote": valid_quote,
+        "quote_verified": None,  # filled in by call_llm, which has note_text
+        "planned_return": valid_planned_return,
         "clinical_justification": data.get("clinical_justification", ""),
         "annotation_failed": False,
     }
@@ -365,10 +417,16 @@ def build_prompt(
         attention_block=_attention_block(attention_sentences or []),
         decisions=str(DECISIONS),
         domains=str(CLINICAL_DOMAINS),
+        planned_return_options=str(PLANNED_RETURN_ANSWERS),
     )
 
 
-def call_llm(prompt: str, cfg: AppConfig, model_name: str | None = None) -> dict[str, Any]:
+def call_llm(
+    prompt: str,
+    cfg: AppConfig,
+    model_name: str | None = None,
+    note_text: str = "",
+) -> dict[str, Any]:
     """Call an Ollama-hosted model and return the parsed annotation dict.
 
     Generalised from the original ``call_phi4mini`` so the same prompt can be
@@ -385,9 +443,13 @@ def call_llm(prompt: str, cfg: AppConfig, model_name: str | None = None) -> dict
                     — pinned at 0 for reproducibility).
         model_name: Ollama model tag to use. Defaults to
                     ``cfg.stage3.ollama_model`` (the primary auditor model).
+        note_text:  the same raw note text passed to :func:`build_prompt` —
+                    used only to verify ``supporting_quote`` against it
+                    (see :func:`verify_quote`), not re-sent to the model.
 
     Returns:
         Dict with keys ``decision``, ``primary_clinical_domain``,
+        ``supporting_quote``, ``quote_verified``, ``planned_return``,
         ``clinical_justification``, ``annotation_failed``.
     """
     model_name = model_name or cfg.stage3.ollama_model
@@ -405,4 +467,7 @@ def call_llm(prompt: str, cfg: AppConfig, model_name: str | None = None) -> dict
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return {**_PARSE_FAILURE, "clinical_justification": f"[ollama error: {exc}]"}
 
-    return _parse_response(raw)
+    annotation = _parse_response(raw)
+    if not annotation["annotation_failed"]:
+        annotation["quote_verified"] = verify_quote(annotation["supporting_quote"], note_text)
+    return annotation

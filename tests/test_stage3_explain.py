@@ -14,10 +14,12 @@ from src.stage3.explain import (
     CLINICAL_DOMAINS,
     DECISIONS,
     DISCORDANCE_MODES,
+    PLANNED_RETURN_ANSWERS,
     _parse_response,
     build_prompt,
     compute_discordance,
     sweep_discordance_thresholds,
+    verify_quote,
 )
 
 
@@ -233,6 +235,20 @@ def test_build_prompt_domains_listed():
         assert domain in prompt
 
 
+def test_build_prompt_planned_return_options_listed():
+    """All planned_return answer options must be listed in the prompt."""
+    prompt = _make_prompt()
+    for option in PLANNED_RETURN_ANSWERS:
+        assert option in prompt
+
+
+def test_build_prompt_requests_supporting_quote():
+    """The prompt must explicitly request a supporting_quote field."""
+    prompt = _make_prompt()
+    assert "supporting_quote" in prompt
+    assert "verbatim" in prompt
+
+
 def test_build_prompt_no_stage2_confirmed_narration():
     """The prompt must not ask the model to narrate a Stage 2 confirm/reject verdict."""
     prompt = _make_prompt()
@@ -246,11 +262,15 @@ def _good_json(
     decision: str = "uphold",
     domain: str = "care_coordination",
     justification: str = "Note confirms the structured risk.",
+    quote: str = "Patient reports strong family support at home.",
+    planned_return: str = "no",
 ) -> str:
     """Return a well-formed phi4-mini JSON response string."""
     return json.dumps({
         "decision": decision,
         "primary_clinical_domain": domain,
+        "supporting_quote": quote,
+        "planned_return": planned_return,
         "clinical_justification": justification,
     })
 
@@ -283,6 +303,8 @@ def test_parse_unknown_decision_sets_annotation_failed():
     bad = json.dumps({
         "decision": "maybe",
         "primary_clinical_domain": "social_support",
+        "supporting_quote": "some quote",
+        "planned_return": "no",
         "clinical_justification": "whatever",
     })
     result = _parse_response(bad)
@@ -295,6 +317,8 @@ def test_parse_unknown_domain_sets_annotation_failed():
     bad = json.dumps({
         "decision": "uphold",
         "primary_clinical_domain": "unknown_domain",
+        "supporting_quote": "some quote",
+        "planned_return": "no",
         "clinical_justification": "whatever",
     })
     result = _parse_response(bad)
@@ -302,11 +326,61 @@ def test_parse_unknown_domain_sets_annotation_failed():
     assert result["primary_clinical_domain"] is None
 
 
+def test_parse_missing_quote_sets_annotation_failed():
+    """A missing or empty supporting_quote must set annotation_failed=True.
+
+    Colleague review, 2026-08-27, item 2: the quote is required, at the same
+    enforcement level as decision/domain, so it can't be silently omitted.
+    """
+    bad = json.dumps({
+        "decision": "uphold",
+        "primary_clinical_domain": "social_support",
+        "supporting_quote": "",
+        "planned_return": "no",
+        "clinical_justification": "whatever",
+    })
+    result = _parse_response(bad)
+    assert result["annotation_failed"] is True
+    assert result["supporting_quote"] == ""
+
+
+def test_parse_unknown_planned_return_sets_annotation_failed():
+    """planned_return outside the fixed taxonomy must set annotation_failed=True."""
+    bad = json.dumps({
+        "decision": "uphold",
+        "primary_clinical_domain": "social_support",
+        "supporting_quote": "some quote",
+        "planned_return": "maybe",
+        "clinical_justification": "whatever",
+    })
+    result = _parse_response(bad)
+    assert result["annotation_failed"] is True
+    assert result["planned_return"] is None
+
+
+def test_parse_valid_planned_return_yes():
+    """planned_return='yes' must parse through cleanly."""
+    result = _parse_response(_good_json(planned_return="yes"))
+    assert result["planned_return"] == "yes"
+    assert result["annotation_failed"] is False
+
+
+def test_parse_quote_verified_not_set_by_parse_response():
+    """_parse_response alone must not set quote_verified -- it has no note_text.
+
+    call_llm fills this in after parsing (see verify_quote tests below).
+    """
+    result = _parse_response(_good_json())
+    assert result["quote_verified"] is None
+
+
 def test_parse_json_embedded_in_text():
     """JSON embedded in prose (as phi4-mini sometimes produces) must parse correctly."""
     raw = (
         'Here is the analysis: {"decision": "override", '
         '"primary_clinical_domain": "frailty", '
+        '"supporting_quote": "Patient has a history of falls.", '
+        '"planned_return": "no", '
         '"clinical_justification": "Falls history noted."}'
     )
     result = _parse_response(raw)
@@ -327,3 +401,30 @@ def test_parse_failure_does_not_default_to_uphold():
     result = _parse_response("{}")
     assert result["annotation_failed"] is True
     assert result["decision"] is None
+
+
+# ── verify_quote ──────────────────────────────────────────────────────────────
+
+def test_verify_quote_true_for_exact_substring():
+    """An exact verbatim quote must verify as True."""
+    note = "Patient discharged home. Strong family support documented. Follow-up arranged."
+    assert verify_quote("Strong family support documented.", note) is True
+
+
+def test_verify_quote_false_for_paraphrase():
+    """A paraphrased (non-verbatim) quote must verify as False -- catches hallucination."""
+    note = "Patient discharged home. Strong family support documented."
+    assert verify_quote("The patient has good social support", note) is False
+
+
+def test_verify_quote_false_for_empty_quote():
+    """An empty quote must never verify as True."""
+    note = "Some discharge note text."
+    assert verify_quote("", note) is False
+    assert verify_quote("   ", note) is False
+
+
+def test_verify_quote_strips_whitespace():
+    """Leading/trailing whitespace on the quote must not cause a false negative."""
+    note = "Patient discharged home. Strong family support documented."
+    assert verify_quote("  Strong family support documented.  ", note) is True

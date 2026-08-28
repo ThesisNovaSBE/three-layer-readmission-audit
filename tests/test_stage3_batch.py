@@ -24,6 +24,9 @@ def _fake_result(hadm_id: int, *, fail: bool = False) -> SimpleNamespace:
         "displacement": -30.0, "discordance_mode": "NOTE_MITIGATES",
         "decision": None if fail else "override",
         "primary_clinical_domain": None if fail else "social_support",
+        "supporting_quote": "" if fail else "Patient has strong family support at home.",
+        "quote_verified": None if fail else True,
+        "planned_return": None if fail else "no",
         "clinical_justification": "" if fail else "Note documents strong support.",
         "annotation_failed": fail,
     })

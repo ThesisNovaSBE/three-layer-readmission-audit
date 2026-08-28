@@ -8,7 +8,7 @@ has ever seen:
   Because Stage 2 was fine-tuned only on Stage 1's *training* partition, any
   patient in Stage 1's test partition is also out-of-sample for Stage 2.
 
-The script reports three evaluation layers:
+The script reports four evaluation layers:
 
 1. **Stage 1 alone** — AUROC / AUPRC / recall / precision on the test partition.
 2. **Stage 2 alone** — AUROC / recall / precision on the subset of test-partition
@@ -20,8 +20,13 @@ The script reports three evaluation layers:
    the admission; where it doesn't yet, falls back to "Stage 2 confirmed"
    with the C9 Stage-1 fallback for note-less admissions. Reports
    pipeline-level precision / recall / F1 / F2.
+4. **Control arm** — Stage 1 alone, thresholded to match the full pipeline's
+   own alert volume (layer 3 above). The load-bearing comparison for RQ2:
+   without it there is no answer to whether the cascade + audit caught more
+   than simply tightening Stage 1's threshold to the same alert budget would
+   have. Always report alongside the full pipeline, never omit.
 
-Per-age-band breakdowns are included for all three layers.
+Per-age-band breakdowns are included for all four layers.
 
 Output: ``models/pipeline_evaluation.json`` (printed summary + JSON).
 
@@ -44,6 +49,7 @@ from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
 from src.model.calibration import apply_calibration
 from src.model.metrics import auprc as compute_auprc
+from src.model.metrics import select_threshold_for_capacity
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -140,6 +146,42 @@ def _pipeline_report(
     }
     report.update(_precision_recall_f(y_true, pipeline_pred))
     report["by_age_band"] = _band_breakdown(y_true, None, pipeline_pred, subgroups)
+    return report
+
+
+def _control_arm_report(
+    y_true: np.ndarray,
+    s1_scores: np.ndarray,
+    target_alert_rate: float,
+    subgroups: pd.DataFrame,
+) -> dict:
+    """Stage 1 alone, thresholded to match the full system's alert volume.
+
+    The load-bearing comparison for RQ2 (colleague review, 2026-08-27):
+    without this, there is no answer to "did the cascade + audit add
+    anything, or would tightening Stage 1's own threshold to the same alert
+    budget have caught as much?" Distinct from compare_layers.py's matched-
+    capacity operating point, which matches Stage 2 to Stage 1's *pre-audit*
+    flag rate for RQ1 -- this matches Stage 1 to the whole system's
+    *post-audit* rate (Layer 3's decision, not Layer 2's threshold) for RQ2.
+
+    Args:
+        y_true:             ground-truth labels for the test partition.
+        s1_scores:           Stage 1 scores for the same population.
+        target_alert_rate:  the full system's final alert rate to match
+                             (``pipeline.full_cohort.confirmed_rate``).
+        subgroups:           age-band subgroup dataframe, aligned to y_true.
+
+    Returns:
+        A `_pipeline_report`-shaped dict, plus ``threshold`` and
+        ``target_alert_rate``, directly comparable to
+        ``pipeline.full_cohort``.
+    """
+    threshold = select_threshold_for_capacity(s1_scores, max(target_alert_rate, 1e-6))
+    pred = (s1_scores >= threshold).astype(int)
+    report = _pipeline_report(y_true, pred, subgroups)
+    report["threshold"] = float(threshold)
+    report["target_alert_rate"] = float(target_alert_rate)
     return report
 
 
@@ -334,6 +376,20 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
           f"excludes {int((~notes_mask).sum()):,} flagged-no-note admissions): "
           f"precision={notes_report['precision']:.3f}  recall={notes_report['recall']:.3f}")
 
+    # Control arm (colleague review, 2026-08-27): Stage 1 alone, thresholded
+    # to the full system's own alert volume. Load-bearing for RQ2 -- without
+    # it there is no answer to "did the cascade + audit add anything, or
+    # would tightening Stage 1's threshold alone have caught as much at the
+    # same alert budget?"
+    control_report = _control_arm_report(
+        y_test, s1_scores, full_report_["confirmed_rate"], sub_test
+    )
+    print(f"[pipeline_eval] Control arm (Stage 1 @ matched alert rate="
+          f"{control_report['target_alert_rate']:.1%}, thr={control_report['threshold']:.4f}): "
+          f"precision={control_report['precision']:.3f}  "
+          f"recall={control_report['recall']:.3f}  "
+          f"F1={control_report['f1']:.3f}  F2={control_report['f2']:.3f}")
+
     report = {
         "note": (
             "Stage 1 test partition used for all three layers. Stage 2 scores "
@@ -346,7 +402,11 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "full_cohort, never alone. The final prediction is Stage 3's "
             "uphold/override decision wherever a batch Stage 3 run covers the "
             "admission (see 'stage3' below for coverage); Stage 2's threshold "
-            "is only a fallback where Stage 3 hasn't run yet."
+            "is only a fallback where Stage 3 hasn't run yet. "
+            "'pipeline.control_arm_stage1_matched' is Stage 1 alone at the "
+            "same alert volume as the full system — the single comparison "
+            "that determines whether the cascade earns its complexity; "
+            "report it alongside full_cohort every time, never omit it."
         ),
         "stage1": s1_report,
         "stage2": s2_report,
@@ -354,6 +414,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
         "pipeline": {
             "full_cohort": full_report_,
             "notes_cohort": notes_report,
+            "control_arm_stage1_matched": control_report,
         },
     }
     _print_band_table(s1_report, s2_report, full_report_)
