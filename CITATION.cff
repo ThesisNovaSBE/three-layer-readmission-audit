@@ -8,8 +8,11 @@ abstract: >
   risk estimate from discharge notes (Stage 2), and a local phi4-mini model
   (Stage 3) that independently audits each of Stage 1's flagged cases —
   reasoning over both scores, the percentile-rank displacement between them,
-  and the note itself — to reach its own uphold/override decision with a
-  quoted, verified justification. Trained and evaluated on MIMIC-IV.
+  and the note itself — to extract quoted, individually-verified mitigating
+  and aggravating grounds, reach its own uphold/override/insufficient-
+  evidence decision, and report a second decision recomputed deterministically
+  from those grounds as a transparency check. Trained and evaluated on
+  MIMIC-IV.
 authors:
   - family-names: Stenzel
     given-names: Lennart

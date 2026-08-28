@@ -11,13 +11,16 @@ import numpy as np
 import pytest
 
 from src.stage3.explain import (
-    CLINICAL_DOMAINS,
+    AGGRAVATING_GROUNDS,
     DECISIONS,
     DISCORDANCE_MODES,
+    MITIGATING_GROUNDS,
     PLANNED_RETURN_ANSWERS,
     _parse_response,
     build_prompt,
+    compute_decision_rule,
     compute_discordance,
+    is_note_truncated,
     sweep_discordance_thresholds,
     verify_quote,
 )
@@ -26,8 +29,8 @@ from src.stage3.explain import (
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 def test_decisions_tuple():
-    """DECISIONS must contain exactly uphold/override."""
-    assert set(DECISIONS) == {"uphold", "override"}
+    """DECISIONS must contain exactly uphold/override/insufficient_evidence."""
+    assert set(DECISIONS) == {"uphold", "override", "insufficient_evidence"}
 
 
 def test_modes_tuple_nonempty():
@@ -38,11 +41,23 @@ def test_modes_tuple_nonempty():
     assert "NOTE_AMPLIFIES" in DISCORDANCE_MODES
 
 
-def test_domains_tuple_nonempty():
-    """CLINICAL_DOMAINS must contain at least six clinical domains."""
-    assert len(CLINICAL_DOMAINS) >= 6
-    assert "social_support" in CLINICAL_DOMAINS
-    assert "other" in CLINICAL_DOMAINS
+def test_mitigating_grounds_nonempty():
+    """MITIGATING_GROUNDS must contain the four documented grounds."""
+    assert len(MITIGATING_GROUNDS) == 4
+    assert "palliative_intent" in MITIGATING_GROUNDS
+    assert "planned_return" in MITIGATING_GROUNDS
+
+
+def test_aggravating_grounds_nonempty():
+    """AGGRAVATING_GROUNDS must contain the six documented grounds."""
+    assert len(AGGRAVATING_GROUNDS) == 6
+    assert "lives_alone_no_support" in AGGRAVATING_GROUNDS
+    assert "unstable_at_discharge" in AGGRAVATING_GROUNDS
+
+
+def test_grounds_taxonomies_disjoint():
+    """No ground name may appear in both the mitigating and aggravating lists."""
+    assert set(MITIGATING_GROUNDS).isdisjoint(set(AGGRAVATING_GROUNDS))
 
 
 # ── compute_discordance ─────────────────────────────────────────────────────────
@@ -143,6 +158,18 @@ def test_sweep_empty_displacements_does_not_crash():
     assert sweep["20.0"] == {"NOTE_MITIGATES": 0.0, "NOTE_AMPLIFIES": 0.0, "CONCORDANT": 0.0}
 
 
+# ── is_note_truncated ─────────────────────────────────────────────────────────
+
+def test_is_note_truncated_false_for_short_note():
+    """A short note must not be reported as truncated."""
+    assert is_note_truncated("Short discharge note.") is False
+
+
+def test_is_note_truncated_true_for_long_note():
+    """A note exceeding the safety cap must be reported as truncated."""
+    assert is_note_truncated("x" * 25_000) is True
+
+
 # ── build_prompt ──────────────────────────────────────────────────────────────
 
 def _discordance(mode: str = "CONCORDANT", r1: float = 50.0, r2: float = 50.0) -> dict:
@@ -175,8 +202,16 @@ def test_build_prompt_contains_stage1_threshold():
 
 
 def test_build_prompt_contains_stage2_score():
-    """Stage 2 score must appear in the prompt."""
+    """Stage 2 score must appear in the prompt by default (not hidden)."""
     assert "0.800" in _make_prompt()
+
+
+def test_build_prompt_hide_stage2_withholds_score_and_discordance():
+    """hide_stage2=True must withhold Stage 2's score and the discordance section."""
+    prompt = _make_prompt(hide_stage2=True)
+    assert "0.800" not in prompt
+    assert "withheld for this run" in prompt
+    assert "QUANTITATIVE DISCORDANCE" not in prompt
 
 
 def test_build_prompt_discordance_mode_present():
@@ -222,17 +257,24 @@ def test_build_prompt_attention_is_auxiliary_not_primary():
 
 
 def test_build_prompt_decisions_listed():
-    """Both decision options must be listed in the prompt."""
+    """All three decision options must be listed in the prompt."""
     prompt = _make_prompt()
     for decision in DECISIONS:
         assert decision in prompt
 
 
-def test_build_prompt_domains_listed():
-    """All clinical domains must be listed in the prompt."""
+def test_build_prompt_mitigating_grounds_listed():
+    """All mitigating grounds must be listed in the prompt."""
     prompt = _make_prompt()
-    for domain in CLINICAL_DOMAINS:
-        assert domain in prompt
+    for ground in MITIGATING_GROUNDS:
+        assert ground in prompt
+
+
+def test_build_prompt_aggravating_grounds_listed():
+    """All aggravating grounds must be listed in the prompt."""
+    prompt = _make_prompt()
+    for ground in AGGRAVATING_GROUNDS:
+        assert ground in prompt
 
 
 def test_build_prompt_planned_return_options_listed():
@@ -242,11 +284,25 @@ def test_build_prompt_planned_return_options_listed():
         assert option in prompt
 
 
-def test_build_prompt_requests_supporting_quote():
-    """The prompt must explicitly request a supporting_quote field."""
+def test_build_prompt_requests_grounds_with_quotes():
+    """The prompt must explicitly request verbatim quotes for each ground."""
     prompt = _make_prompt()
-    assert "supporting_quote" in prompt
+    assert "mitigating_grounds" in prompt
+    assert "aggravating_grounds" in prompt
     assert "verbatim" in prompt
+
+
+def test_build_prompt_evidence_requested_before_decision():
+    """Grounds/evidence must be requested before decision in the JSON field
+    list — an autoregressive model conditions on what it has already
+    written, so asking for decision first invites post-hoc rationalisation.
+    """
+    prompt = _make_prompt()
+    idx_grounds = prompt.index('"mitigating_grounds"')
+    idx_justification = prompt.index('"clinical_justification"')
+    idx_decision = prompt.rindex('"decision"')
+    assert idx_grounds < idx_decision
+    assert idx_justification < idx_decision
 
 
 def test_build_prompt_no_stage2_confirmed_narration():
@@ -260,98 +316,116 @@ def test_build_prompt_no_stage2_confirmed_narration():
 
 def _good_json(
     decision: str = "uphold",
-    domain: str = "care_coordination",
     justification: str = "Note confirms the structured risk.",
-    quote: str = "Patient reports strong family support at home.",
+    mitigating: list | None = None,
+    aggravating: list | None = None,
     planned_return: str = "no",
 ) -> str:
-    """Return a well-formed phi4-mini JSON response string."""
+    """Return a well-formed LLM JSON response string."""
     return json.dumps({
-        "decision": decision,
-        "primary_clinical_domain": domain,
-        "supporting_quote": quote,
+        "mitigating_grounds": mitigating if mitigating is not None else [],
+        "aggravating_grounds": aggravating if aggravating is not None else [
+            {"ground": "lives_alone_no_support", "quote": "Patient lives alone."}
+        ],
         "planned_return": planned_return,
         "clinical_justification": justification,
+        "decision": decision,
     })
 
 
 def test_parse_valid_uphold():
     """Valid uphold response must parse without failures."""
-    result = _parse_response(_good_json("uphold", "care_coordination"))
-    assert result["decision"] == "uphold"
-    assert result["primary_clinical_domain"] == "care_coordination"
+    result = _parse_response(_good_json("uphold"))
+    assert result["decision_model"] == "uphold"
     assert result["annotation_failed"] is False
 
 
 def test_parse_valid_override():
     """Valid override response must parse without failures."""
-    result = _parse_response(_good_json("override", "social_support"))
-    assert result["decision"] == "override"
+    result = _parse_response(_good_json(
+        "override",
+        mitigating=[{"ground": "palliative_intent", "quote": "Comfort-focused care planned."}],
+        aggravating=[],
+    ))
+    assert result["decision_model"] == "override"
     assert result["annotation_failed"] is False
 
 
 def test_parse_bad_json_sets_annotation_failed():
-    """Unparseable output must set annotation_failed=True with None fields."""
+    """Unparseable output must set annotation_failed=True with empty/None fields."""
     result = _parse_response("not json at all")
     assert result["annotation_failed"] is True
-    assert result["decision"] is None
-    assert result["primary_clinical_domain"] is None
+    assert result["decision_model"] is None
+    assert result["mitigating_grounds"] == []
 
 
 def test_parse_unknown_decision_sets_annotation_failed():
     """Unrecognised decision must set annotation_failed=True."""
     bad = json.dumps({
+        "mitigating_grounds": [],
+        "aggravating_grounds": [],
+        "planned_return": "no",
+        "clinical_justification": "whatever",
         "decision": "maybe",
-        "primary_clinical_domain": "social_support",
-        "supporting_quote": "some quote",
-        "planned_return": "no",
-        "clinical_justification": "whatever",
     })
     result = _parse_response(bad)
     assert result["annotation_failed"] is True
-    assert result["decision"] is None
+    assert result["decision_model"] is None
 
 
-def test_parse_unknown_domain_sets_annotation_failed():
-    """Unrecognised primary_clinical_domain must set annotation_failed=True."""
+def test_parse_unknown_ground_sets_annotation_failed():
+    """A ground outside the fixed taxonomy must fail the whole response
+    (don't let the model invent categories)."""
     bad = json.dumps({
-        "decision": "uphold",
-        "primary_clinical_domain": "unknown_domain",
-        "supporting_quote": "some quote",
+        "mitigating_grounds": [{"ground": "made_up_ground", "quote": "some quote"}],
+        "aggravating_grounds": [],
         "planned_return": "no",
         "clinical_justification": "whatever",
+        "decision": "override",
     })
     result = _parse_response(bad)
     assert result["annotation_failed"] is True
-    assert result["primary_clinical_domain"] is None
+
+
+def test_parse_ground_from_wrong_side_sets_annotation_failed():
+    """A mitigating ground listed under aggravating_grounds (or vice versa)
+    is not in that list's allowed taxonomy and must fail."""
+    bad = json.dumps({
+        "mitigating_grounds": [],
+        "aggravating_grounds": [{"ground": "palliative_intent", "quote": "Hospice care planned."}],
+        "planned_return": "no",
+        "clinical_justification": "whatever",
+        "decision": "uphold",
+    })
+    result = _parse_response(bad)
+    assert result["annotation_failed"] is True
 
 
 def test_parse_missing_quote_sets_annotation_failed():
-    """A missing or empty supporting_quote must set annotation_failed=True.
+    """A ground with a missing or empty quote must set annotation_failed=True.
 
-    Colleague review, 2026-08-27, item 2: the quote is required, at the same
-    enforcement level as decision/domain, so it can't be silently omitted.
+    The quote is required, at the same enforcement level as decision, so it
+    can't be silently omitted.
     """
     bad = json.dumps({
-        "decision": "uphold",
-        "primary_clinical_domain": "social_support",
-        "supporting_quote": "",
+        "mitigating_grounds": [{"ground": "palliative_intent", "quote": ""}],
+        "aggravating_grounds": [],
         "planned_return": "no",
         "clinical_justification": "whatever",
+        "decision": "override",
     })
     result = _parse_response(bad)
     assert result["annotation_failed"] is True
-    assert result["supporting_quote"] == ""
 
 
 def test_parse_unknown_planned_return_sets_annotation_failed():
     """planned_return outside the fixed taxonomy must set annotation_failed=True."""
     bad = json.dumps({
-        "decision": "uphold",
-        "primary_clinical_domain": "social_support",
-        "supporting_quote": "some quote",
+        "mitigating_grounds": [],
+        "aggravating_grounds": [],
         "planned_return": "maybe",
         "clinical_justification": "whatever",
+        "decision": "uphold",
     })
     result = _parse_response(bad)
     assert result["annotation_failed"] is True
@@ -365,34 +439,44 @@ def test_parse_valid_planned_return_yes():
     assert result["annotation_failed"] is False
 
 
-def test_parse_quote_verified_not_set_by_parse_response():
-    """_parse_response alone must not set quote_verified -- it has no note_text.
+def test_parse_empty_grounds_lists_are_valid():
+    """A response with no grounds on either side must still parse cleanly."""
+    result = _parse_response(_good_json(mitigating=[], aggravating=[]))
+    assert result["annotation_failed"] is False
+    assert result["mitigating_grounds"] == []
+    assert result["aggravating_grounds"] == []
 
-    call_llm fills this in after parsing (see verify_quote tests below).
-    """
+
+def test_parse_decision_rule_and_quote_verified_not_set_by_parse_response():
+    """_parse_response alone must not set decision_rule/all_quotes_verified --
+    it has no note_text. call_llm fills these in after parsing."""
     result = _parse_response(_good_json())
-    assert result["quote_verified"] is None
+    assert result["decision_rule"] is None
+    assert result["all_quotes_verified"] is None
 
 
 def test_parse_json_embedded_in_text():
-    """JSON embedded in prose (as phi4-mini sometimes produces) must parse correctly."""
+    """JSON embedded in prose (as some models sometimes produce) must parse correctly."""
     raw = (
-        'Here is the analysis: {"decision": "override", '
-        '"primary_clinical_domain": "frailty", '
-        '"supporting_quote": "Patient has a history of falls.", '
+        'Here is the analysis: {"mitigating_grounds": [], '
+        '"aggravating_grounds": [{"ground": "cognitive_impairment", '
+        '"quote": "Patient has documented delirium."}], '
         '"planned_return": "no", '
-        '"clinical_justification": "Falls history noted."}'
+        '"clinical_justification": "Delirium noted.", '
+        '"decision": "uphold"}'
     )
     result = _parse_response(raw)
     assert result["annotation_failed"] is False
-    assert result["decision"] == "override"
-    assert result["primary_clinical_domain"] == "frailty"
+    assert result["decision_model"] == "uphold"
+    assert result["aggravating_grounds"][0]["ground"] == "cognitive_impairment"
 
 
 def test_parse_justification_preserved():
-    """The justification string from phi4-mini must be preserved verbatim."""
+    """The justification string from the LLM must be preserved verbatim."""
     justification = "Patient has robust social support reducing readmission risk."
-    result = _parse_response(_good_json("override", "social_support", justification))
+    result = _parse_response(_good_json("override", justification, mitigating=[
+        {"ground": "strong_discharge_support", "quote": "Family support confirmed at discharge."}
+    ], aggravating=[]))
     assert result["clinical_justification"] == justification
 
 
@@ -400,7 +484,38 @@ def test_parse_failure_does_not_default_to_uphold():
     """Empty JSON must not silently default to a decision."""
     result = _parse_response("{}")
     assert result["annotation_failed"] is True
-    assert result["decision"] is None
+    assert result["decision_model"] is None
+
+
+# ── compute_decision_rule ────────────────────────────────────────────────────
+
+_LONG_NOTE = "Patient discharged home in stable condition. " * 10
+
+
+def test_decision_rule_override_when_only_mitigating():
+    """Mitigating grounds with no aggravating grounds must yield override."""
+    mitigating = [{"ground": "palliative_intent", "quote": "Comfort care planned."}]
+    assert compute_decision_rule(mitigating, [], _LONG_NOTE) == "override"
+
+
+def test_decision_rule_uphold_when_any_aggravating_present():
+    """Any aggravating ground must force uphold, even alongside mitigating grounds."""
+    mitigating = [{"ground": "palliative_intent", "quote": "Comfort care planned."}]
+    aggravating = [{"ground": "unstable_at_discharge", "quote": "Vitals still abnormal."}]
+    assert compute_decision_rule(mitigating, aggravating, _LONG_NOTE) == "uphold"
+
+
+def test_decision_rule_uphold_when_no_grounds():
+    """No grounds on either side must default to uphold, given an informative note."""
+    assert compute_decision_rule([], [], _LONG_NOTE) == "uphold"
+
+
+def test_decision_rule_insufficient_evidence_for_short_note():
+    """A note below the informativeness threshold must yield insufficient_evidence
+    regardless of what grounds were (implausibly) extracted from it."""
+    mitigating = [{"ground": "palliative_intent", "quote": "Comfort care."}]
+    assert compute_decision_rule(mitigating, [], "Too short.") == "insufficient_evidence"
+    assert compute_decision_rule([], [], "") == "insufficient_evidence"
 
 
 # ── verify_quote ──────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { explainPatient } from "../api";
-import type { ExplanationResult, Patient } from "../types";
+import type { ExplanationResult, GroundHit, Patient } from "../types";
 
 // ── Small layout helpers ──────────────────────────────────────────────────────
 
@@ -86,15 +86,61 @@ function ModeBadge({ mode }: { mode: string | null }) {
 const DECISION_STYLES: Record<string, string> = {
   uphold: "bg-blue-100 text-blue-700",
   override: "bg-red-100 text-red-700",
+  insufficient_evidence: "bg-slate-100 text-slate-500",
 };
 
-function DecisionBadge({ decision }: { decision: string | null }) {
+function DecisionBadge({ decision, label }: { decision: string | null; label: string }) {
   if (!decision) return null;
   const style = DECISION_STYLES[decision] ?? "bg-slate-100 text-slate-500";
   return (
-    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full uppercase tracking-wide ${style}`}>
-      {decision}
+    <span
+      className={`text-xs font-semibold px-2 py-0.5 rounded-full uppercase tracking-wide ${style}`}
+      title={label}
+    >
+      {label}: {decision.replace(/_/g, " ")}
     </span>
+  );
+}
+
+// ── Grounds (mitigating / aggravating) ──────────────────────────────────────
+
+function GroundsList({
+  title,
+  grounds,
+  toneClass,
+}: {
+  title: string;
+  grounds: GroundHit[];
+  toneClass: string;
+}) {
+  if (grounds.length === 0) return null;
+  return (
+    <div>
+      <h4 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${toneClass}`}>
+        {title}
+      </h4>
+      <ul className="space-y-2">
+        {grounds.map((g, i) => (
+          <li key={i} className="text-xs text-slate-600">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-700">{g.ground.replace(/_/g, " ")}</span>
+              {g.quote_verified ? (
+                <span className="text-emerald-600 text-[10px] normal-case font-normal">
+                  ✓ verified
+                </span>
+              ) : (
+                <span className="text-amber-600 text-[10px] normal-case font-normal">
+                  ⚠ unverified
+                </span>
+              )}
+            </div>
+            <blockquote className="border-l-2 border-slate-200 pl-2 italic mt-1 text-slate-500">
+              “{g.quote}”
+            </blockquote>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -105,8 +151,8 @@ function ExplanationPanel({ result }: { result: ExplanationResult }) {
     <div className="space-y-4">
       {result.annotation_failed && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-          phi4-mini returned an unparseable response — structured fields unavailable. Raw inputs
-          shown as-is.
+          The model returned an unparseable or taxonomy-violating response — structured fields
+          unavailable. Raw inputs shown as-is.
         </div>
       )}
 
@@ -127,16 +173,19 @@ function ExplanationPanel({ result }: { result: ExplanationResult }) {
         </div>
       </div>
 
-      {/* Decision + mode + domain */}
+      {/* Decision (model's own judgment + the deterministic rule cross-check) + mode */}
       <div className="flex items-center gap-2 flex-wrap">
-        <DecisionBadge decision={result.decision} />
+        <DecisionBadge decision={result.decision_model} label="model" />
+        <DecisionBadge decision={result.decision_rule} label="rule" />
         <ModeBadge mode={result.discordance_mode} />
-        {result.primary_clinical_domain && (
-          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">
-            {result.primary_clinical_domain.replace(/_/g, " ")}
-          </span>
-        )}
       </div>
+      {result.decision_model && result.decision_rule
+        && result.decision_model !== result.decision_rule && (
+        <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          The model's decision and the rule computed from its own extracted grounds disagree —
+          worth a closer look.
+        </p>
+      )}
 
       {/* SHAP features */}
       {result.top_shap_features.length > 0 && (
@@ -172,22 +221,22 @@ function ExplanationPanel({ result }: { result: ExplanationResult }) {
         </div>
       )}
 
-      {/* Supporting quote */}
-      {result.supporting_quote && (
-        <div>
-          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-2">
-            Supporting quote
-            {result.quote_verified === true && (
-              <span className="text-emerald-600 normal-case font-normal text-xs">✓ verified in note</span>
-            )}
-            {result.quote_verified === false && (
-              <span className="text-amber-600 normal-case font-normal text-xs">⚠ not found verbatim in note</span>
-            )}
-          </h4>
-          <blockquote className="border-l-2 border-slate-200 pl-3 text-xs text-slate-600 italic">
-            “{result.supporting_quote}”
-          </blockquote>
-        </div>
+      {/* Mitigating / aggravating grounds, each with its own verified quote */}
+      <GroundsList
+        title="Mitigating grounds"
+        grounds={result.mitigating_grounds}
+        toneClass="text-green-700"
+      />
+      <GroundsList
+        title="Aggravating grounds"
+        grounds={result.aggravating_grounds}
+        toneClass="text-red-700"
+      />
+      {(result.mitigating_grounds.length > 0 || result.aggravating_grounds.length > 0)
+        && result.all_quotes_verified === false && (
+        <p className="text-xs text-amber-600">
+          ⚠ at least one quote above was not found verbatim in the note.
+        </p>
       )}
 
       {/* Planned return */}
@@ -209,7 +258,9 @@ function ExplanationPanel({ result }: { result: ExplanationResult }) {
       </div>
 
       <p className="text-xs text-slate-400">
-        Generated by a local LLM. For clinical review only — not a diagnosis or recommendation.
+        Generated by {result.model_name || "a local LLM"}
+        {result.note_truncated ? " — note truncated for length" : ""}. For clinical review
+        only — not a diagnosis or recommendation.
       </p>
     </div>
   );

@@ -28,6 +28,11 @@ The script reports four evaluation layers:
 
 Per-age-band breakdowns are included for all four layers.
 
+Also reports ``pipeline.conditional_triggering``: a post-hoc analysis (not a
+different execution mode) of what discordant-only Stage 3 triggering would
+have cost/saved versus the real blanket run — see
+``_conditional_triggering_report``.
+
 Output: ``models/pipeline_evaluation.json`` (printed summary + JSON).
 
 Usage::
@@ -279,20 +284,24 @@ def _apply_stage3_decisions(
     """Overlay Stage 3's decision onto the final prediction, where available.
 
     Per docs/ARCHITECTURE.md, the pipeline's final prediction should be
-    Layer 3's uphold/override decision, not Stage 2's confirm/reject
-    threshold — Stage 2's score is evidence Layer 3 reasons over, not the
-    final word. Requires a batch Stage 3 run (``src/stage3/batch.py``);
-    where it doesn't cover an admission (not flagged, no note, or an
-    ``annotation_failed`` audit), the existing C9-corrected prediction
-    (``stage2_confirmed``, falling back to Stage 1's flag for note-less
-    admissions) is left unchanged — this function only ever narrows the gap
-    between "what's implemented" and "what the design calls for", never
-    silently drops coverage.
+    Layer 3's own uphold/override decision (``decision_model`` — session 19
+    renamed this from ``decision``), not Stage 2's confirm/reject threshold
+    — Stage 2's score is evidence Layer 3 reasons over, not the final word.
+    Requires a batch Stage 3 run (``src/stage3/batch.py``); where it doesn't
+    cover an admission (not flagged, no note, an ``annotation_failed``
+    audit, or an explicit ``insufficient_evidence`` verdict), the existing
+    C9-corrected prediction (``stage2_confirmed``, falling back to Stage 1's
+    flag for note-less admissions) is left unchanged.
+    ``insufficient_evidence`` is treated the same as "no coverage", not
+    silently counted as either uphold or override — this function only ever
+    narrows the gap between "what's implemented" and "what the design calls
+    for", never silently drops or miscounts coverage.
 
     Returns:
-        (pipeline_pred_with_stage3, info) — ``info`` reports coverage; if no
-        batch Stage 3 result exists yet, ``pipeline_pred_full`` is returned
-        unchanged and ``info["available"]`` is ``False``.
+        (pipeline_pred_with_stage3, info) — ``info`` reports coverage and
+        separately how many admissions had an ``insufficient_evidence``
+        verdict; if no batch Stage 3 result exists yet, ``pipeline_pred_full``
+        is returned unchanged and ``info["available"]`` is ``False``.
     """
     s3_path = model_dir / "stage3_batch_results.csv"
     if not s3_path.exists():
@@ -307,10 +316,14 @@ def _apply_stage3_decisions(
 
     s3_all = pd.read_csv(s3_path)
     s3_rows = s3_all.set_index("hadm_id")
-    decisions = s3_rows["decision"] if "decision" in s3_rows.columns else pd.Series(dtype=object)
+    decisions = (
+        s3_rows["decision_model"] if "decision_model" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
 
     decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
     has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
+    is_insufficient = decision_arr == "insufficient_evidence"
 
     pred = np.where(has_s3, (decision_arr == "uphold").astype(int), pipeline_pred_full)
     pred = np.where(flagged, pred, 0)  # never-flagged admissions always stay negative
@@ -320,10 +333,80 @@ def _apply_stage3_decisions(
         "available": True,
         "n_test_with_stage3_decision": int(has_s3.sum()),
         "coverage_of_flagged": coverage,
+        "n_insufficient_evidence": int(is_insufficient.sum()),
     }
     print(f"[pipeline_eval] Stage 3 decisions applied to {has_s3.sum():,} / "
-          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage)")
+          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage; "
+          f"{int(is_insufficient.sum()):,} insufficient_evidence, not counted as coverage)")
     return pred, info
+
+
+def _conditional_triggering_report(
+    model_dir: object,
+    hadm_test: np.ndarray,
+    pipeline_pred_full: np.ndarray,
+    flagged: np.ndarray,
+    y_test: np.ndarray,
+    sub_test: pd.DataFrame,
+) -> dict | None:
+    """Report what the pipeline would look like under conditional (discordant-
+    only) Stage 3 triggering — computed post-hoc from a completed BLANKET
+    batch run. Does NOT change ``run_batch_audit``'s targeting logic
+    (docs/ARCHITECTURE.md §5): whether Stage 3 should only be called on
+    discordant cases was an open, undecided question, and committing to it
+    as the execution mode would mean never learning what auditing concordant
+    cases would have found. This answers the question empirically instead —
+    for every admission the blanket run actually covered, a CONCORDANT case
+    is treated as if Stage 3 had never been called (Stage 1's flag simply
+    stands); a discordant case keeps its real Stage 3 decision. The
+    resulting metric delta vs. the real (blanket) pipeline, alongside the
+    LLM-call count saved, is the cost/benefit trade-off conditional
+    triggering would have bought.
+
+    Returns:
+        None if no batch Stage 3 result exists yet. Otherwise a dict with
+        ``blanket_llm_calls``, ``conditional_llm_calls``, ``llm_calls_saved``,
+        and ``report`` (a ``_pipeline_report``-shaped dict under the
+        conditional policy, directly comparable to ``pipeline.full_cohort``).
+    """
+    s3_path = model_dir / "stage3_batch_results.csv"
+    if not s3_path.exists():
+        return None
+
+    s3_all = pd.read_csv(s3_path)
+    s3_rows = s3_all.set_index("hadm_id")
+    decisions = (
+        s3_rows["decision_model"] if "decision_model" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
+    modes = (
+        s3_rows["discordance_mode"] if "discordance_mode" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
+
+    decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
+    mode_arr = np.array([modes.get(h, None) for h in hadm_test], dtype=object)
+    has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
+    is_concordant = mode_arr == "CONCORDANT"
+
+    covered_discordant = has_s3 & ~is_concordant
+    covered_concordant = has_s3 & is_concordant
+
+    # Concordant + covered -> Stage 1's flag stands (as if Stage 3 skipped it).
+    # Discordant + covered -> keep the real Stage 3 decision.
+    # Not covered by the blanket run -> unchanged existing (C9-corrected) prediction.
+    conditional_pred = np.where(
+        covered_discordant, (decision_arr == "uphold").astype(int),
+        np.where(covered_concordant, 1, pipeline_pred_full),
+    )
+    conditional_pred = np.where(flagged, conditional_pred, 0)
+
+    return {
+        "blanket_llm_calls": int(has_s3.sum()),
+        "conditional_llm_calls": int(covered_discordant.sum()),
+        "llm_calls_saved": int(covered_concordant.sum()),
+        "report": _pipeline_report(y_test, conditional_pred, sub_test),
+    }
 
 
 # ── main evaluation ───────────────────────────────────────────────────────────
@@ -390,6 +473,20 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
           f"recall={control_report['recall']:.3f}  "
           f"F1={control_report['f1']:.3f}  F2={control_report['f2']:.3f}")
 
+    # Conditional-triggering post-hoc analysis (session 19): what discordant-
+    # only Stage 3 triggering would have cost/saved, computed from the real
+    # blanket run -- does not change how the blanket run itself was targeted.
+    conditional_report = _conditional_triggering_report(
+        model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test
+    )
+    if conditional_report is not None:
+        cr = conditional_report["report"]
+        print(f"[pipeline_eval] Conditional triggering (discordant-only, post-hoc): "
+              f"{conditional_report['conditional_llm_calls']:,} LLM calls "
+              f"({conditional_report['llm_calls_saved']:,} saved vs. blanket "
+              f"{conditional_report['blanket_llm_calls']:,}) -> "
+              f"precision={cr['precision']:.3f}  recall={cr['recall']:.3f}")
+
     report = {
         "note": (
             "Stage 1 test partition used for all three layers. Stage 2 scores "
@@ -406,7 +503,12 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "'pipeline.control_arm_stage1_matched' is Stage 1 alone at the "
             "same alert volume as the full system — the single comparison "
             "that determines whether the cascade earns its complexity; "
-            "report it alongside full_cohort every time, never omit it."
+            "report it alongside full_cohort every time, never omit it. "
+            "'pipeline.conditional_triggering' is a post-hoc analysis (not a "
+            "different execution mode -- the real batch run always audits "
+            "every flagged+noted admission) of what discordant-only Stage 3 "
+            "triggering would have cost/saved; null until a batch Stage 3 "
+            "run exists."
         ),
         "stage1": s1_report,
         "stage2": s2_report,
@@ -415,6 +517,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "full_cohort": full_report_,
             "notes_cohort": notes_report,
             "control_arm_stage1_matched": control_report,
+            "conditional_triggering": conditional_report,
         },
     }
     _print_band_table(s1_report, s2_report, full_report_)

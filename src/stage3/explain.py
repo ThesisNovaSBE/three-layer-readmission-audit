@@ -1,46 +1,55 @@
 """Stage 3: independent LLM auditing of Stage 1-flagged admissions.
 
-Rewritten 2026-08-25 (session 15). Prior versions asked phi4-mini either to
-narrate Stage 1's own SHAP values (session 11's "old Stage 3" — rejected as a
-well-trodden explainer pattern with no novel finding) or to freely classify a
-9-category discordance taxonomy while also acting as an explainer of Stage 2's
-decision. Neither implements what the literature review's own gap analysis
-calls for: an LLM that independently audits *another model's* output.
+Rewritten 2026-08-25 (session 15), extended 2026-08-28 (session 19). Prior
+versions asked phi4-mini either to narrate Stage 1's own SHAP values
+(session 11's "old Stage 3" — rejected as a well-trodden explainer pattern
+with no novel finding) or to freely classify a 9-category discordance
+taxonomy while also acting as an explainer of Stage 2's decision. Neither
+implements what the literature review's own gap analysis calls for: an LLM
+that independently audits *another model's* output.
 
-The design here — confirmed across three planning artifacts (the 2026-08-16
-methodological evaluation, the 2026-08-17 Project Brief, and the Working
-Paper) — has phi4-mini act as a deliberating auditor. It receives Stage 1's
-score and SHAP attributions, Stage 2's independently-derived note-based
-score, and the discharge note itself, and returns its own uphold/override
-judgment — not a narration of a decision already made by Stage 2.
+The design here has phi4-mini act as a deliberating auditor. It receives
+Stage 1's score and SHAP attributions, Stage 2's independently-derived
+note-based score, and the discharge note itself, and returns its own
+uphold/override/insufficient_evidence judgment — not a narration of a
+decision already made by Stage 2.
 
-Two things are deliberately NOT delegated to the LLM:
+Session 19 replaced the single free-text ``primary_clinical_domain`` with a
+fixed, two-sided grounds taxonomy (mitigating vs. aggravating), each ground
+requiring its own verbatim quote, and added a second, code-computed
+``decision_rule`` alongside the model's own ``decision_model`` — not a
+replacement for the model's free judgment (see docs/ARCHITECTURE.md §5 item
+3a: small additions to the schema, not a switch to pure extraction), but a
+deterministic, human-checkable cross-check computed from the same
+extraction. Their agreement rate is a reportable consistency metric; their
+disagreement is itself a finding about small local models as judges.
+
+Three things are deliberately NOT delegated to the LLM:
 
 1. **Discordance mode.** Computed quantitatively from percentile-rank
    displacement of stage1_score vs. stage2_score within the flagged+noted
    cohort (see :func:`compute_discordance`), not asked of the model. Percentile
-   rank is used instead of a raw-probability difference (the original design)
-   because Stage 1 and Stage 2 are different model families and are not
-   guaranteed to be equally well-calibrated even after isotonic calibration —
-   rank displacement is invariant to that risk. Stage 1 uses ~40 structured
-   features; Stage 2 (2026-08-26: reverted to a plain, note-only
-   Clinical-Longformer — the multimodal "FusionLongformer" variant was
-   explored and dropped as unnecessary complexity for a model that was never
-   actually trained) uses none. The two models are informationally
-   independent by construction, and no claim stronger than "they use
-   different information, and when they disagree, that is worth
-   investigating" is made.
-2. **Whether the auditor's own decision is reproducible.** Ollama temperature
+   rank is used instead of a raw-probability difference because Stage 1 and
+   Stage 2 are different model families and are not guaranteed to be equally
+   well-calibrated even after isotonic calibration — rank displacement is
+   invariant to that risk. Stage 1 uses ~40 structured features; Stage 2 (a
+   plain, note-only Clinical-Longformer) uses none. The two models are
+   informationally independent by construction.
+2. **``decision_rule``.** Deterministically recomputed in code from the
+   grounds the model itself extracted (see :func:`compute_decision_rule`) —
+   not a second opinion asked of the model, a check on whether the model's
+   own stated decision actually follows its own stated rubric.
+3. **Whether the auditor's own decision is reproducible.** Ollama temperature
    is pinned at 0 (``cfg.stage3.temperature``) for every evaluation run.
 """
 
 from __future__ import annotations
 
-import json
 import textwrap
 from typing import Any
 
 import numpy as np
+from pydantic import BaseModel, ValidationError
 
 try:
     import ollama
@@ -55,7 +64,7 @@ from src.config_schema import AppConfig
 
 # ── Taxonomy ───────────────────────────────────────────────────────────────────
 
-DECISIONS: tuple[str, ...] = ("uphold", "override")
+DECISIONS: tuple[str, ...] = ("uphold", "override", "insufficient_evidence")
 
 DISCORDANCE_MODES: tuple[str, ...] = (
     "CONCORDANT",      # Stage 1 and Stage 2 rank this patient similarly
@@ -63,32 +72,100 @@ DISCORDANCE_MODES: tuple[str, ...] = (
     "NOTE_AMPLIFIES",  # Stage 2 ranks the patient markedly higher risk than Stage 1
 )
 
-CLINICAL_DOMAINS: tuple[str, ...] = (
-    "social_support",     # family support, home care, social isolation, living alone
-    "frailty",             # explicit frailty language, debility, falls history
-    "palliative_intent",   # hospice, comfort-focused care, goals-of-care discussion
-    "care_coordination",   # follow-up arranged, discharge planning quality, polypharmacy
-    "clinical_trajectory", # trend in labs/vitals/course not captured by static features
-    "other",
+# Two-sided grounds taxonomy (session 19), replacing the single free-choice
+# primary_clinical_domain. Each ground the model cites must carry its own
+# verbatim quote (validated in _parse_response, verified against the note in
+# call_llm) -- fixed list only; anything outside it is a parse failure, not a
+# new category (don't let the model invent grounds).
+# See _MITIGATING_DESCRIPTIONS / _AGGRAVATING_DESCRIPTIONS below for what each means.
+MITIGATING_GROUNDS: tuple[str, ...] = (
+    "palliative_intent",
+    "planned_return",
+    "strong_discharge_support",
+    "structured_driver_contradicted",
 )
+
+AGGRAVATING_GROUNDS: tuple[str, ...] = (
+    "lives_alone_no_support",
+    "no_followup_arranged",
+    "functional_dependence",
+    "cognitive_impairment",
+    "nonadherence_risk",
+    "unstable_at_discharge",
+)
+
+_MITIGATING_DESCRIPTIONS: dict[str, str] = {
+    "palliative_intent": "hospice, palliative, or comfort-focused care documented — "
+                          "readmission isn't the relevant outcome",
+    "planned_return": "a scheduled return is documented (chemo cycle, staged "
+                       "procedure, planned dialysis admission)",
+    "strong_discharge_support": "follow-up appointment arranged and "
+                                 "caregiver/support present and clinically "
+                                 "stable at discharge",
+    "structured_driver_contradicted": "the note explicitly contradicts what "
+                                       "drove the structured model's alert",
+}
+
+_AGGRAVATING_DESCRIPTIONS: dict[str, str] = {
+    "lives_alone_no_support": "lives alone or no caregiver documented",
+    "no_followup_arranged": "no follow-up appointment documented",
+    "functional_dependence": "needs help with daily activities, or a new mobility aid",
+    "cognitive_impairment": "delirium, dementia, or confusion documented",
+    "nonadherence_risk": "active substance use, missed appointments, or "
+                          "medication-management concerns",
+    "unstable_at_discharge": "unresolved clinical issues at the point of discharge",
+}
 
 # Colleague review, 2026-08-27, item 3: does the note itself mention a
 # planned return (chemo cycle, staged surgery, scheduled dialysis)? This is
 # independent of, not a replacement for, the structured admission_type-based
 # readmission_30d_unplanned proxy in src/data/features.py -- the two use
-# different evidence and are reported separately; their agreement rate is
-# itself a characterisation finding (how much the structured proxy
-# undercounts planned returns), not something to silently merge.
+# different evidence and are reported separately. It is ALSO independent of
+# "planned_return" appearing in MITIGATING_GROUNDS above: the standalone
+# field always gets an answer (for the label-audit comparison); the ground
+# is cited only when it actually drove the decision. Do not collapse these
+# two into one field.
 PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
 
 # Generous safety cap, not a routine truncation. Session 14 measured median
 # MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
 # (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
-# The old cap (1,500 chars, ~250 words) truncated to ~6% of what Stage 2 sees
-# and was flagged in the Working Paper as an unresolved confound for
-# discordance interpretation — this raises it so both stages read materially
-# the same document for all but pathologically long notes.
 _NOTE_MAX_CHARS = 20_000
+
+# Below this length a note cannot ground either a mitigating or an
+# aggravating finding, regardless of what the model claims to have
+# extracted -- decision_rule reports insufficient_evidence rather than
+# trusting an extraction from an uninformative note. A code-side judgment
+# call, not tuned to any labelled outcome: chosen well below the shortest
+# real discharge-summary body seen in exploratory review (session 14).
+_MIN_INFORMATIVE_NOTE_CHARS = 200
+
+
+# ── LLM output shape (also the schema-constrained generation target) ───────────
+
+class _GroundHit(BaseModel):
+    """One extracted ground with its supporting quote, as returned by the LLM."""
+
+    ground: str
+    quote: str
+
+
+class _LLMOutput(BaseModel):
+    """Raw shape of the LLM's JSON response, before taxonomy/decision validation.
+
+    Passed to Ollama as a JSON schema (``format=``) for schema-constrained
+    generation, and used to parse the response -- this is what nearly
+    eliminates malformed-JSON parse failures. Membership in the fixed
+    grounds/decision/planned_return taxonomies is still validated separately
+    in :func:`_parse_response`, since a JSON schema can constrain shape but
+    this project keeps enum validation explicit and testable in Python.
+    """
+
+    mitigating_grounds: list[_GroundHit] = []
+    aggravating_grounds: list[_GroundHit] = []
+    planned_return: str
+    clinical_justification: str
+    decision: str
 
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
@@ -103,9 +180,11 @@ _SYSTEM_PROMPT = textwrap.dedent("""
 
     Your job is to reach your OWN judgment about whether this alert should be
     upheld or overridden — you are not explaining or narrating a decision
-    someone else already made. Read the note as a clinician would. Be
-    specific and cite actual clinical content. Do not invent information not
-    present in the inputs.
+    someone else already made. Extract evidence from the note FIRST, then
+    decide — do not decide first and invent supporting evidence afterward.
+    Read the note as a clinician would. Be specific and cite actual clinical
+    content. Do not invent information not present in the inputs, and do not
+    cite a ground that is not actually documented in the note.
 
     Return ONLY valid JSON. No text outside the JSON object.
 """).strip()
@@ -119,57 +198,50 @@ _USER_TEMPLATE = textwrap.dedent("""
     Top structured risk factors (SHAP-ranked):
     {shap_block}
 
-    ── NOTE-BASED RISK ESTIMATE (Clinical-Longformer, discharge note only) ──
-    Score: {stage2_score:.3f}
-    This model reads only the discharge note — no structured features. It
-    was trained independently and does not know the score above.
-
-    ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
-    Within the cohort of flagged, note-covered patients, this patient ranks
-    at the {r1:.0f}th percentile on the structured estimate and the
-    {r2:.0f}th percentile on the note-based estimate (displacement:
-    {displacement:+.0f} percentile points -> {mode}).
-      NOTE_MITIGATES -> the note-based estimate ranks this patient markedly
-                         lower risk than the structured estimate alone.
-      NOTE_AMPLIFIES -> the note-based estimate ranks this patient markedly
-                         higher risk than the structured estimate alone.
-      CONCORDANT     -> the two estimates rank this patient similarly.
-    This is context, not a conclusion — reach your own judgment from the
-    evidence below.
+    {stage2_evidence_block}
 
     ── DISCHARGE NOTE ───────────────────────────────────────────────────────
     {note_block}
     {attention_block}
 
     ── YOUR TASK ────────────────────────────────────────────────────────────
-    Decide, independently, whether this readmission-risk alert should be
-    upheld or overridden. Base your decision on the discharge note and both
-    risk estimates together — not on the discordance label alone.
+    Read the discharge note and both risk estimates. Identify which of the
+    following grounds, if any, are documented in the note. Only cite a
+    ground if the note actually documents it — do not invent one to justify
+    a decision you have already reached. Extract first, decide after.
+
+    Mitigating grounds (support overriding/cancelling the alert):
+    {mitigating_block}
+
+    Aggravating grounds (support upholding the alert):
+    {aggravating_block}
 
     Return ONLY a JSON object with exactly these five fields:
 
-    "decision": one of {decisions}
-      uphold   — the alert should stand; the note does not provide grounds
-                 to suppress it
-      override — the note provides specific, documented grounds to suppress
-                 this alert (e.g. a planned return, a robust support system,
-                 or explicitly reassuring clinical trajectory)
+    "mitigating_grounds": list of objects {{"ground": <one of the mitigating
+      grounds above>, "quote": <exact verbatim sentence from the note>}}.
+      Empty list if none apply.
 
-    "primary_clinical_domain": the single most relevant domain, one of:
-      {domains}
-
-    "supporting_quote": the exact sentence from the discharge note above that
-      most directly supports your decision. Copy it verbatim — do not
-      paraphrase or summarise. This is checked automatically against the
-      note text, so an invented or altered quote will be caught.
+    "aggravating_grounds": same shape, drawn from the aggravating grounds
+      above. Empty list if none apply.
 
     "planned_return": does the note mention a planned return — a scheduled
       chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
       regardless of whether it affected your decision? One of
       {planned_return_options}.
 
-    "clinical_justification": 2-4 sentences. Cite specific content from the
-      note. State what drove your decision.
+    "clinical_justification": 2-4 sentences, written AFTER you have
+      identified the grounds above. Synthesise what you found — do not
+      introduce claims not reflected in the grounds you extracted.
+
+    "decision": one of {decisions}
+      uphold                 — the alert should stand; the grounds you found
+                                (if any) do not justify suppressing it
+      override                — the mitigating grounds you found justify
+                                suppressing this alert, and no aggravating
+                                ground contradicts them
+      insufficient_evidence  — the note is too short or uninformative to
+                                assess either way
 """).strip()
 
 
@@ -261,6 +333,16 @@ def sweep_discordance_thresholds(
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def is_note_truncated(note_text: str) -> bool:
+    """Whether ``note_text`` exceeds the safety cap applied in the prompt.
+
+    Exposed separately from :func:`_note_block` so callers (pipeline.py,
+    batch.py) can log truncation as structured data, not just prose inside
+    the prompt string.
+    """
+    return len(note_text.strip()) > _NOTE_MAX_CHARS
+
+
 def _note_block(note_text: str) -> str:
     """Return the discharge note, capped at a generous safety limit."""
     text = note_text.strip()
@@ -289,86 +371,160 @@ def _attention_block(attention_sentences: list[str]) -> str:
     )
 
 
+def _grounds_block(grounds: tuple[str, ...], descriptions: dict[str, str]) -> str:
+    """Render a grounds taxonomy as a labelled list for the prompt."""
+    return "\n".join(f"  - {g}: {descriptions[g]}" for g in grounds)
+
+
+def _stage2_evidence_block(
+    stage2_score: float, discordance: dict[str, float | str], hide: bool
+) -> str:
+    """Render Stage 2's score + the quantitative discordance section.
+
+    ``hide=True`` (the no-Stage-2 validation control, session 19 Phase D2)
+    withholds this evidence entirely rather than passing a zeroed or
+    placeholder score — the point of the control is to test whether Stage 2
+    earns its place in the prompt, not to feed the model a misleading value.
+    """
+    if hide:
+        return (
+            "── NOTE-BASED RISK ESTIMATE ──────────────────────────────────────────\n"
+            "    (withheld for this run — reason from the structured estimate and\n"
+            "    the discharge note alone.)"
+        )
+    return textwrap.dedent(f"""\
+        ── NOTE-BASED RISK ESTIMATE (Clinical-Longformer, discharge note only) ──
+        Score: {stage2_score:.3f}
+        This model reads only the discharge note — no structured features. It
+        was trained independently and does not know the score above.
+
+        ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
+        Within the cohort of flagged, note-covered patients, this patient ranks
+        at the {discordance["r1"]:.0f}th percentile on the structured estimate and the
+        {discordance["r2"]:.0f}th percentile on the note-based estimate (displacement:
+        {discordance["displacement"]:+.0f} percentile points -> {discordance["mode"]}).
+          NOTE_MITIGATES -> the note-based estimate ranks this patient markedly
+                             lower risk than the structured estimate alone.
+          NOTE_AMPLIFIES -> the note-based estimate ranks this patient markedly
+                             higher risk than the structured estimate alone.
+          CONCORDANT     -> the two estimates rank this patient similarly.
+        This is context, not a conclusion — reach your own judgment from the
+        evidence below.""")
+
+
+def verify_quote(quote: str, note_text: str) -> bool:
+    """Return whether ``quote`` appears verbatim in ``note_text``.
+
+    Computed in code, not asked of the LLM — this is what turns "the model
+    says it quoted the note" into something automatically checkable, and is
+    the mechanism that makes human spot-checking tractable instead of
+    impossible: a reviewer only needs to check the (hopefully small) subset
+    where a quote is unverified, not re-read every note from scratch.
+    """
+    if not quote.strip():
+        return False
+    return quote.strip() in note_text
+
+
+def compute_decision_rule(
+    mitigating_grounds: list[dict[str, str]],
+    aggravating_grounds: list[dict[str, str]],
+    note_text: str,
+) -> str:
+    """Deterministically recompute the decision from extracted grounds.
+
+    Independent of ``decision_model`` (the LLM's own stated decision) —
+    reported alongside it as a consistency metric and a fully transparent
+    fallback (docs/ARCHITECTURE.md §2, §5 item 3a: a small addition to the
+    schema, not a replacement for the model's free judgment). Not asked of
+    the model.
+
+    ``insufficient_evidence`` here is a code-side judgment about the note's
+    length, not a claim the LLM makes about itself — a note this short
+    cannot ground either a mitigating or an aggravating finding regardless
+    of what was extracted from it.
+    """
+    if len(note_text.strip()) < _MIN_INFORMATIVE_NOTE_CHARS:
+        return "insufficient_evidence"
+    if mitigating_grounds and not aggravating_grounds:
+        return "override"
+    return "uphold"
+
+
 _PARSE_FAILURE: dict[str, Any] = {
-    "decision": None,
-    "primary_clinical_domain": None,
-    "supporting_quote": "",
-    "quote_verified": None,
+    "mitigating_grounds": [],
+    "aggravating_grounds": [],
     "planned_return": None,
     "clinical_justification": "",
+    "decision_model": None,
+    "decision_rule": None,
+    "all_quotes_verified": None,
     "annotation_failed": True,
 }
 
 
-def verify_quote(supporting_quote: str, note_text: str) -> bool:
-    """Return whether ``supporting_quote`` appears verbatim in ``note_text``.
+def _validate_grounds(
+    raw_grounds: list[_GroundHit], allowed: tuple[str, ...]
+) -> list[dict[str, str]] | None:
+    """Return validated {ground, quote} dicts, or None if any entry is invalid.
 
-    Computed in code, not asked of the LLM — this is what turns "the model
-    says it quoted the note" into something automatically checkable, and is
-    the mechanism that makes human spot-checking (colleague review,
-    2026-08-27, item 2) tractable instead of impossible: a reviewer only
-    needs to check the *decisions* on the (hopefully small) subset where
-    ``quote_verified`` is False, not re-read every note from scratch.
+    Fixed list only — a ground outside ``allowed``, or one with an empty
+    quote, fails the whole response (don't let the model invent categories
+    or cite a ground without evidence).
     """
-    if not supporting_quote.strip():
-        return False
-    return supporting_quote.strip() in note_text
+    out: list[dict[str, str]] = []
+    for hit in raw_grounds:
+        if hit.ground not in allowed or not hit.quote.strip():
+            return None
+        out.append({"ground": hit.ground, "quote": hit.quote})
+    return out
 
 
 def _parse_response(raw: str) -> dict[str, Any]:
-    """Parse phi4-mini JSON response into a flat annotation dict.
+    """Parse the LLM's JSON response into a flat annotation dict.
 
-    Returns ``annotation_failed=True`` (with ``None`` decision/domain) on any
-    parse error so callers can distinguish a real "uphold" from a silent
-    failure. ``quote_verified`` is NOT set here — it needs ``note_text``,
-    which this function doesn't have; see :func:`call_llm`, which calls
-    :func:`verify_quote` after parsing.
+    Returns ``annotation_failed=True`` (with ``None``/empty fields) on any
+    parse or validation error so callers can distinguish a real decision
+    from a silent failure. ``quote_verified`` per ground and
+    ``decision_rule`` are NOT set here — both need ``note_text``, which this
+    function doesn't have; see :func:`call_llm`.
     """
-    data: dict | None = None
+    parsed: _LLMOutput | None = None
     try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        parsed = _LLMOutput.model_validate_json(raw)
+    except ValidationError:
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start != -1 and end > start:
             try:
-                data = json.loads(raw[start:end])
-            except (json.JSONDecodeError, ValueError):
+                parsed = _LLMOutput.model_validate_json(raw[start:end])
+            except ValidationError:
                 pass
 
-    if data is None:
+    if parsed is None:
         return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:300]}
 
-    decision = data.get("decision", "")
-    domain = data.get("primary_clinical_domain", "")
-    quote = data.get("supporting_quote", "")
-    planned_return = data.get("planned_return", "")
-
-    valid_decision = decision if decision in DECISIONS else None
-    valid_domain = domain if domain in CLINICAL_DOMAINS else None
-    valid_quote = quote if isinstance(quote, str) and quote.strip() else None
+    mitigating = _validate_grounds(parsed.mitigating_grounds, MITIGATING_GROUNDS)
+    aggravating = _validate_grounds(parsed.aggravating_grounds, AGGRAVATING_GROUNDS)
+    valid_decision = parsed.decision if parsed.decision in DECISIONS else None
     valid_planned_return = (
-        planned_return if planned_return in PLANNED_RETURN_ANSWERS else None
+        parsed.planned_return if parsed.planned_return in PLANNED_RETURN_ANSWERS else None
     )
 
     if (
-        valid_decision is None or valid_domain is None
-        or valid_quote is None or valid_planned_return is None
+        mitigating is None or aggravating is None
+        or valid_decision is None or valid_planned_return is None
     ):
-        return {
-            **_PARSE_FAILURE,
-            "clinical_justification": data.get(
-                "clinical_justification", raw.strip()[:300]
-            ),
-        }
+        return {**_PARSE_FAILURE, "clinical_justification": parsed.clinical_justification}
 
     return {
-        "decision": valid_decision,
-        "primary_clinical_domain": valid_domain,
-        "supporting_quote": valid_quote,
-        "quote_verified": None,  # filled in by call_llm, which has note_text
+        "mitigating_grounds": mitigating,
+        "aggravating_grounds": aggravating,
         "planned_return": valid_planned_return,
-        "clinical_justification": data.get("clinical_justification", ""),
+        "clinical_justification": parsed.clinical_justification,
+        "decision_model": valid_decision,
+        "decision_rule": None,       # filled in by call_llm, which has note_text
+        "all_quotes_verified": None,  # filled in by call_llm, which has note_text
         "annotation_failed": False,
     }
 
@@ -383,6 +539,8 @@ def build_prompt(
     shap_feature_strings: list[str],
     note_text: str,
     attention_sentences: list[str] | None = None,
+    *,
+    hide_stage2: bool = False,
 ) -> str:
     """Build the Stage 3 user prompt for one patient.
 
@@ -394,9 +552,14 @@ def build_prompt(
         shap_feature_strings:  top-k SHAP strings from extract_shap_for_patient().
         note_text:             raw discharge note text.
         attention_sentences:   optional Stage 2 attention spans (auxiliary only).
+        hide_stage2:           if True, withhold Stage 2's score and the
+                                discordance section entirely (the no-Stage-2
+                                validation control, session 19 Phase D2) —
+                                tests whether Stage 2 earns its place in the
+                                prompt, not fed a misleading placeholder.
 
     Returns:
-        Formatted prompt string ready for phi4-mini.
+        Formatted prompt string ready for the LLM.
     """
     shap_block = (
         "\n".join(f"  - {f}" for f in shap_feature_strings)
@@ -407,16 +570,13 @@ def build_prompt(
     return _USER_TEMPLATE.format(
         stage1_score=stage1_score,
         stage1_threshold=stage1_threshold,
-        stage2_score=stage2_score,
-        r1=discordance["r1"],
-        r2=discordance["r2"],
-        displacement=discordance["displacement"],
-        mode=discordance["mode"],
         shap_block=shap_block,
+        stage2_evidence_block=_stage2_evidence_block(stage2_score, discordance, hide_stage2),
         note_block=_note_block(note_text),
         attention_block=_attention_block(attention_sentences or []),
+        mitigating_block=_grounds_block(MITIGATING_GROUNDS, _MITIGATING_DESCRIPTIONS),
+        aggravating_block=_grounds_block(AGGRAVATING_GROUNDS, _AGGRAVATING_DESCRIPTIONS),
         decisions=str(DECISIONS),
-        domains=str(CLINICAL_DOMAINS),
         planned_return_options=str(PLANNED_RETURN_ANSWERS),
     )
 
@@ -429,13 +589,16 @@ def call_llm(
 ) -> dict[str, Any]:
     """Call an Ollama-hosted model and return the parsed annotation dict.
 
-    Generalised from the original ``call_phi4mini`` so the same prompt can be
-    run through a different model — e.g. ``cfg.stage3.robustness_model`` — as
-    a robustness check on whether the auditor's value depends on model
-    scale, without duplicating the prompt/parsing logic. All models here are
-    assumed Ollama-hosted (local); routing to a cloud API is a separate,
-    currently unmade decision — see docs/ARCHITECTURE.md (PhysioNet's data
-    use terms need checking before patient text is sent to any third party).
+    Uses schema-constrained generation (``format=<JSON schema>``, not the
+    generic ``format="json"``) — this is what nearly eliminates malformed-
+    JSON parse failures, per the colleague review that motivated this design.
+
+    Generalised so the same prompt can be run through a different model —
+    e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
+    the auditor's value depends on model scale, without duplicating the
+    prompt/parsing logic. All models here are assumed Ollama-hosted (local);
+    routing to a cloud API is a separate, currently unmade decision — see
+    docs/ARCHITECTURE.md.
 
     Args:
         prompt:     built by :func:`build_prompt`.
@@ -444,13 +607,13 @@ def call_llm(
         model_name: Ollama model tag to use. Defaults to
                     ``cfg.stage3.ollama_model`` (the primary auditor model).
         note_text:  the same raw note text passed to :func:`build_prompt` —
-                    used only to verify ``supporting_quote`` against it
-                    (see :func:`verify_quote`), not re-sent to the model.
+                    used to verify each ground's quote against it and to
+                    compute ``decision_rule``, not re-sent to the model.
 
     Returns:
-        Dict with keys ``decision``, ``primary_clinical_domain``,
-        ``supporting_quote``, ``quote_verified``, ``planned_return``,
-        ``clinical_justification``, ``annotation_failed``.
+        Dict with keys ``mitigating_grounds``, ``aggravating_grounds``,
+        ``planned_return``, ``clinical_justification``, ``decision_model``,
+        ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
     """
     model_name = model_name or cfg.stage3.ollama_model
     try:
@@ -461,13 +624,30 @@ def call_llm(
                 {"role": "user", "content": prompt},
             ],
             options={"temperature": cfg.stage3.temperature},
-            format="json",
+            format=_LLMOutput.model_json_schema(),
         )
         raw = response.message.content
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return {**_PARSE_FAILURE, "clinical_justification": f"[ollama error: {exc}]"}
 
     annotation = _parse_response(raw)
-    if not annotation["annotation_failed"]:
-        annotation["quote_verified"] = verify_quote(annotation["supporting_quote"], note_text)
+    if annotation["annotation_failed"]:
+        return annotation
+
+    mitigating = [
+        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        for g in annotation["mitigating_grounds"]
+    ]
+    aggravating = [
+        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        for g in annotation["aggravating_grounds"]
+    ]
+    annotation["mitigating_grounds"] = mitigating
+    annotation["aggravating_grounds"] = aggravating
+    annotation["all_quotes_verified"] = all(
+        g["quote_verified"] for g in mitigating + aggravating
+    )
+    annotation["decision_rule"] = compute_decision_rule(
+        annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
+    )
     return annotation

@@ -1,14 +1,19 @@
 # Stage 3 Manual Validation Plan
 
-> **Partly superseded 2026-08-25.** As of the current `src/stage3/explain.py`,
-> phi4-mini no longer chooses the discordance mode — that is computed
-> quantitatively (percentile-rank displacement; see `docs/ARCHITECTURE.md`).
-> phi4-mini now outputs `decision` (uphold/override) and
-> `primary_clinical_domain` (6-item taxonomy, not 9). The validation
+> **Partly superseded 2026-08-25, re-targeted 2026-08-28 (session 19).** As
+> of the current `src/stage3/explain.py`, the LLM no longer chooses the
+> discordance mode — that is computed quantitatively (percentile-rank
+> displacement; see `docs/ARCHITECTURE.md`), so there is nothing there to
+> validate against human judgment. The LLM now outputs `decision_model`
+> (uphold / override / insufficient_evidence) plus `mitigating_grounds` /
+> `aggravating_grounds` — a fixed two-sided taxonomy with a verbatim quote
+> per ground, replacing the single free-choice `primary_clinical_domain`
+> from the 2026-08-25 design. A second, code-computed `decision_rule` is
+> also reported (not LLM-generated — nothing to validate here either, but
+> its *agreement rate with* `decision_model` is itself a useful thing to
+> discuss alongside the human-agreement numbers below). The validation
 > *protocol* below (sampling design, kappa methodology) is still sound —
-> re-target it at agreement on `decision` and `primary_clinical_domain`
-> rather than on `discordance_mode`, which is no longer LLM-generated and so
-> has nothing to validate against human judgment.
+> re-targeted at agreement on `decision_model` and the extracted grounds.
 
 ## Motivation
 
@@ -42,15 +47,18 @@ Stage 1 top features:
 Top attention sentences from discharge note:
   [extracted spans]
 
-phi4-mini annotation:
-  discordance_mode:   [CONCORDANT / NOTE_MITIGATES / NOTE_AMPLIFIES]
-  primary_category:   [...]
-  explanation:        [...]
+Model annotation:
+  decision_model:      [uphold / override / insufficient_evidence]
+  decision_rule:        [uphold / override / insufficient_evidence]
+  mitigating_grounds:  [ground: quote, ...]
+  aggravating_grounds: [ground: quote, ...]
+  clinical_justification: [...]
 
 Your annotation:
-  discordance_mode:   _______________
-  primary_category:   _______________
-  Do you agree with the explanation? [YES / PARTIAL / NO]
+  decision:            _______________
+  mitigating_grounds:  _______________
+  aggravating_grounds: _______________
+  Do you agree with the justification? [YES / PARTIAL / NO]
   Notes: _______________
 ```
 
@@ -58,9 +66,20 @@ Annotators are blinded to each other's labels until both are complete.
 
 ## Metrics
 
-- **Cohen's kappa (κ)** on `discordance_mode` (primary)
-- **Percent agreement** on `primary_category` (secondary — 9 classes, too many for reliable kappa on 50 cases)
-- **Annotation failure rate** cross-check: compare manual failure judgements to `annotation_failed=True` flag in output
+- **Cohen's kappa (κ)** on `decision_model` (primary) — the three-way
+  uphold/override/insufficient_evidence agreement between the annotator and
+  the LLM.
+- **Set-overlap agreement (Jaccard index)** on the extracted grounds
+  (secondary) — grounds are multi-label (a case can have zero, one, or
+  several on each side), not a single categorical choice, so simple percent
+  agreement doesn't apply cleanly; report the overlap between the
+  annotator's and the model's mitigating-grounds sets and aggravating-
+  grounds sets separately.
+- **`decision_model` vs. `decision_rule` agreement** (descriptive, not a
+  human-agreement metric) — report alongside the above as context on how
+  often the model's free judgment follows its own extracted grounds.
+- **Annotation failure rate** cross-check: compare manual failure judgements
+  to `annotation_failed=True` flag in output.
 
 ### Interpretation thresholds (Landis & Koch 1977)
 
