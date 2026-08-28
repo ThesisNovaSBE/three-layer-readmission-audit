@@ -105,6 +105,13 @@ def _fit_final_estimator(name, params, x_train, y_train, g_train, cfg, seed):
             estimator, name, x_train.iloc[itr], y_train[itr],
             x_val=x_train.iloc[iva], y_val=y_train[iva],
         )
+        if cfg.stage1.device != "cpu":
+            # Train fast on GPU, but the SAVED artifact must predict anywhere
+            # -- api.py, evaluate_pipeline.py, and stage3/pipeline.py all
+            # joblib.load() this on the (CUDA-less) Mac. XGBoost 2.x boosters
+            # are device-portable; this only changes where the NEXT
+            # predict() runs, no refit needed.
+            estimator.set_params(device="cpu")
     else:
         fit_estimator(estimator, name, x_train, y_train)
     return estimator
@@ -124,8 +131,8 @@ def train(cfg: AppConfig) -> None:
 
     matrix = load_feature_matrix(cfg, mode)
     features, y, groups, _subgroups, feat_cols = split_xy(matrix)
-    print(f"[train] mode={mode} model={name} rows={len(y):,} "
-          f"features={len(feat_cols)} pos_rate={y.mean():.1%}")
+    print(f"[train] mode={mode} model={name} device={cfg.stage1.device} "
+          f"rows={len(y):,} features={len(feat_cols)} pos_rate={y.mean():.1%}")
 
     train_idx, test_idx = grouped_train_test_split(
         y, groups, test_size=cfg.stage1.test_size, seed=seed)
@@ -189,6 +196,11 @@ def main() -> None:
         choices=["logistic_regression", "xgboost", "histgradientboosting"],
         default=None,
     )
+    parser.add_argument(
+        "--device", choices=["cpu", "cuda"], default=None,
+        help="XGBoost only; no effect on LR/HGB. cuda requires an NVIDIA GPU "
+             "(KISSKI/Grete A100) -- never on Mac.",
+    )
     args = parser.parse_args()
 
     _cfg = load_config()
@@ -196,6 +208,8 @@ def main() -> None:
         _cfg.run.mode = args.mode
     if args.model:
         _cfg.stage1.model = args.model
+    if args.device:
+        _cfg.stage1.device = args.device
     train(_cfg)
 
 

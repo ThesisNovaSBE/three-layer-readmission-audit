@@ -4,8 +4,11 @@
 # Usage (from repo root on the login node):
 #   sbatch scripts/slurm_stage1_tune.sh
 #
-# Estimated wall time: ~4 h for 400 trials with XGBoost on an A100-80G.
-# Adjust --time if you switch to histgradientboosting (faster).
+# Estimated wall time: previously ~4 h using 16 CPU cores only -- the script
+# requested this A100 node but XGBoost never actually used it (tree_method
+# was CPU-only). Now passes --device cuda so the GPU is genuinely engaged;
+# no measured wall-time for that yet, so --time is left with headroom until
+# a real run establishes one. Adjust --time down once you have that number.
 
 #SBATCH --job-name=thesis_stage1_tune
 #SBATCH --partition=a100
@@ -41,13 +44,14 @@ echo "[slurm] Building feature matrix …"
 python -m src.data.features --mode full
 
 # ── Step 2: Optuna hyperparameter search (400 trials) ────────────────────────
-# Stored in models/optuna_stage1_xgboost.db — resumable if job is preempted.
-echo "[slurm] Running Optuna tune (400 trials) …"
-python -m src.model.tune --mode full
+# Stored in models/optuna_stage1_xgboost.db — resumable if job is preempted
+# (resubmit unchanged; run_study() picks up recorded trials automatically).
+echo "[slurm] Running Optuna tune (400 trials, GPU) …"
+python -m src.model.tune --mode full --device cuda
 
 # ── Step 3: Full retrain with best params ────────────────────────────────────
-echo "[slurm] Training with best params …"
-python -m src.model.train --mode full
+echo "[slurm] Training with best params (GPU) …"
+python -m src.model.train --mode full --device cuda
 
 # ── Step 4: Standard Stage 1 evaluation (val set) ────────────────────────────
 echo "[slurm] Running Stage 1 evaluation …"

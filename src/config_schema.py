@@ -83,6 +83,8 @@ class Stage1Config(BaseModel):
 
     model: str = "xgboost"
     models: list[str] = ["logistic_regression", "xgboost", "histgradientboosting"]
+    device: str = "cpu"  # cpu | cuda -- XGBoost only; no effect on LR/HGB. cuda
+    # requires an NVIDIA GPU (KISSKI/Grete A100), never on Mac (no CUDA there).
     threshold_strategy: str = "capacity"
     capacity_k: float = 0.15
     capacity_report_points: list[float] = [0.05, 0.10, 0.15, 0.20]
