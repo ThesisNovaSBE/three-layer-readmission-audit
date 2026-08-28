@@ -1,8 +1,9 @@
 """Metrics for imbalanced readmission prediction.
 
 Primary: AUPRC (average precision). Secondary: AUROC.
-Operating point reporting for the high-recall mandate, plus calibration (Brier)
-and per-subgroup AUROC for a fairness check.
+Operating point reporting for the capacity-constrained primary policy (with
+recall-floor as a secondary comparison table), plus calibration (Brier) and
+per-subgroup AUROC for a fairness check.
 """
 
 from __future__ import annotations

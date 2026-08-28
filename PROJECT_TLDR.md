@@ -41,7 +41,6 @@ Full design detail (and what's implemented vs. still pending) lives in
 - **Training scale:** 249k stratified notes (~99% of available MIMIC-IV-Note training data); 70+ group oversampled
 - **HPC training:** GWDG KISSKI cluster (A100 80GB, bf16, batch_size=8) — retrain pending at the new 4096-token window
 - **Job script:** `train_stage2.sh` — Slurm job with pre-flight checks; auto-resumes from checkpoint on resubmission
-- **Full setup:** `docs/HPC_DEPLOYMENT.md`
 
 ### Stage 3 — Independent LLM Auditor — REWRITTEN 2026-08-25
 

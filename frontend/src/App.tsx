@@ -137,20 +137,20 @@ export default function App() {
                   {
                     n: "1",
                     color: "bg-blue-100 text-blue-600",
-                    title: "Stage 1 — Triage.",
-                    body: "An XGBoost model trained on 521,191 MIMIC-IV admissions scores every patient at discharge using structured EHR features (labs, vitals, comorbidities, LOS). Patients above the flag threshold (0.354) are forwarded to Stage 2. The model is tuned for high recall (84.8%) — it is better to over-flag and let Stage 2 prune than to miss a true readmission.",
+                    title: "Stage 1 — Screen.",
+                    body: "An XGBoost model trained on 521,191 MIMIC-IV admissions scores every patient at discharge using structured EHR features (labs, vitals, comorbidities, LOS). The top 15% by risk score are forwarded to Stage 2 — a fixed follow-up capacity a hospital can actually act on, not a recall floor that flags most of the cohort.",
                   },
                   {
                     n: "2",
                     color: "bg-violet-100 text-violet-600",
-                    title: "Stage 2 — Verify.",
-                    body: "A fine-tuned Clinical-Longformer (2048-token context) reads the discharge note of each flagged patient. Notes contain richer context than structured data: symptom progression, clinician judgment, discharge plan — signals that predict readmission but are absent from labs and vitals. Training uses focal loss and per-age-group loss weights. After training, Platt scaling calibrates probabilities per age group. Stage 2 achieves AUROC 0.676, recall 90.8%, confirming 35,187 of 43,776 flagged patients.",
+                    title: "Stage 2 — Independent Read.",
+                    body: "A fine-tuned Clinical-Longformer (4096-token context, note-only — no structured features) reads the discharge note of each flagged patient and forms its own risk estimate. Notes contain richer context than structured data: symptom progression, clinician judgment, discharge plan — signals that predict readmission but are absent from labs and vitals. Training uses focal loss and per-age-group loss weights; Platt scaling calibrates probabilities per age group. Stage 2's score is evidence for Stage 3's audit, not a gate on who reaches it.",
                   },
                   {
                     n: "3",
                     color: "bg-emerald-100 text-emerald-600",
-                    title: "Stage 3 — Explain.",
-                    body: "For any Stage 2-confirmed patient, a clinician can request an on-demand explanation. A local phi4-mini model (via Ollama) synthesises the top SHAP features from Stage 1, the Longformer attention spans from Stage 2, and the score delta to produce a 2–3 sentence clinical narrative explaining why the note agreed or disagreed with the structured risk signal.",
+                    title: "Stage 3 — Audit.",
+                    body: "For any Stage 1-flagged patient, a clinician can request an on-demand audit. A local phi4-mini model (via Ollama) reasons over Stage 1's SHAP features, Stage 2's independent score, the percentile-rank displacement between them, and the discharge note itself, then reaches its own uphold/override decision — quoting the note passage it relied on, and verifying that quote appears verbatim in the source text.",
                   },
                 ].map(({ n, color, title, body }) => (
                   <div key={n} className="flex gap-3">
@@ -170,7 +170,7 @@ export default function App() {
             <div className="grid grid-cols-4 gap-3">
               {[
                 { label: "Stage 1 AUROC", value: "0.706", sub: "XGBoost" },
-                { label: "Stage 1 Recall", value: "84.8%", sub: "@ thr = 0.354" },
+                { label: "Stage 1 Recall", value: "84.8%", sub: "recall-floor policy (secondary)" },
                 { label: "Stage 2 AUROC", value: "0.676", sub: "Clinical-Longformer" },
                 { label: "Stage 2 Recall", value: "90.8%", sub: "notes cohort" },
               ].map((m) => (
@@ -184,6 +184,10 @@ export default function App() {
                 </div>
               ))}
             </div>
+            <p className="text-xs text-slate-400 mt-2">
+              Pre-retrain figures (recall-floor Stage 1, v1 Stage 2) — see MODEL_CARD.md.
+              Capacity-constrained Stage 1 and fairness-rebuilt Stage 2 numbers pending retrain.
+            </p>
           </>
         )}
 

@@ -27,12 +27,18 @@ export interface ExplanationResult {
   stage1_threshold: number;
   stage2_score: number;
   stage2_confirmed: boolean;
-  score_delta: number;
+  r1: number;
+  r2: number;
+  displacement: number;
+  discordance_mode: string | null;
   top_shap_features: string[];
   attention_sentences: string[];
-  discordance_mode: string | null;
-  primary_category: string | null;
-  narrative: string;
+  decision: string | null;
+  primary_clinical_domain: string | null;
+  supporting_quote: string;
+  quote_verified: boolean | null;
+  planned_return: string | null;
+  clinical_justification: string;
   annotation_failed: boolean;
 }
 

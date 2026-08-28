@@ -3,8 +3,9 @@
 - Patient-level held-out test split (touched only by evaluate.py).
 - Uses tuned hyperparameters from models/<model>_best_params.json if present,
   otherwise sensible defaults.
-- Selects the decision threshold for the high-recall mandate using out-of-fold
-  predictions on the TRAINING set (no leakage from the test set).
+- Selects the decision threshold (capacity-constrained, primary; recall-floor,
+  secondary) using out-of-fold predictions on the TRAINING set (no leakage
+  from the test set).
 - Saves model + threshold + split + metadata to models/ (gitignored).
 
 Usage::

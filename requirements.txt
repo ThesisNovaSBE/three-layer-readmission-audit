@@ -13,7 +13,7 @@ transformers>=4.36
 torch>=2.1
 accelerate>=0.27       # required by HuggingFace Trainer
 
-# Stage 3 — local LLM explanations + cross-modal analysis
+# Stage 3 — local LLM independent audit of Stage 1's flagged cases
 ollama>=0.3
 shap>=0.44   # SHAP values for Stage 1 feature attribution (falls back to gain importances)
 

@@ -60,7 +60,7 @@ This matches the schema already drafted in `src/schemas.py` (`FEATURE_MATRIX_COL
 ### 2.4 Class imbalance strategy
 
 1. **Cost-weighting first** (cheap, no data distortion): `scale_pos_weight` (XGB) / `class_weight="balanced"` (LR, HGB).
-2. **Decision-threshold tuning** to hit the recall target — this is the lever for Stage 1's "high recall" mandate (see 2.6).
+2. **Decision-threshold tuning** — selects the operating point (see 2.6; capacity-constrained is primary, recall-floor a secondary comparison table).
 3. **Resampling only if needed** as an ablation: SMOTE / random undersampling **fit inside CV folds on training data only** (never before the split — that leaks). Treat as secondary.
 
 ### 2.5 Train / val / test split (no leakage)
@@ -70,12 +70,21 @@ This matches the schema already drafted in `src/schemas.py` (`FEATURE_MATRIX_COL
 - **Tuning on the remaining 80%** via **5-fold `StratifiedGroupKFold`** (stratify on label, group on `subject_id`).
 - Fit scalers/imputers **inside** each fold (pipeline), never on the full data.
 
-### 2.6 Metrics (Stage 1 is tuned for HIGH RECALL)
+### 2.6 Metrics (updated 2026-08-28 — see `docs/ARCHITECTURE.md` §2 for the
+current, authoritative operating-point policy)
 
 - **Primary:** **AUPRC (average precision)** — the honest headline metric under heavy imbalance.
 - **Secondary:** AUROC (comparability with literature).
 - **Operating-point report:** at the chosen threshold — **recall (sensitivity), precision, specificity, F2-score** (F2 weights recall over precision), and the confusion matrix.
-- **Threshold selection rule:** pick the lowest threshold that achieves **recall ≥ target (start 0.85, see `config.yaml stage1.target_recall`)** on validation, then report the precision you pay for it. Stage 2 exists to recover that precision.
+- **Threshold selection rule (primary, since 2026-08-25):** capacity-constrained
+  — flag the top `stage1.capacity_k` fraction of admissions by risk score
+  (default 15%), a follow-up capacity a hospital can actually act on. The
+  original recall-floor rule (pick the lowest threshold achieving
+  **recall ≥ target**, start 0.85, `config.yaml stage1.target_recall`) is
+  kept and reported as a **secondary** comparison table for literature
+  comparability — it alone flags ~67% of admissions, not a deployable
+  triage. Stage 2 is an independent second opinion, not a filter that
+  "recovers" Stage 1's precision — see `docs/ARCHITECTURE.md`.
 - Report calibration (reliability curve / Brier) as a nice-to-have.
 
 ---

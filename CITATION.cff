@@ -1,13 +1,15 @@
 cff-version: 1.2.0
 message: "If you use this code in academic work, please cite it as below."
 type: software
-title: "Cross-Modal Discordance Analysis for 30-Day Hospital Readmission Prediction"
+title: "An LLM Auditor for Hospital Readmission Alerts: Independent Verification Beyond Prediction"
 abstract: >
-  A three-stage readmission prediction pipeline combining XGBoost on structured
-  EHR features (Stage 1), Clinical-Longformer on discharge notes (Stage 2), and
-  cross-modal discordance analysis via phi4-mini (Stage 3) to characterise
-  agreement and disagreement between structured and unstructured clinical data.
-  Trained and evaluated on MIMIC-IV.
+  A three-layer readmission prediction pipeline: a capacity-constrained XGBoost
+  screen on structured EHR features (Stage 1), an independent Clinical-Longformer
+  risk estimate from discharge notes (Stage 2), and a local phi4-mini model
+  (Stage 3) that independently audits each of Stage 1's flagged cases —
+  reasoning over both scores, the percentile-rank displacement between them,
+  and the note itself — to reach its own uphold/override decision with a
+  quoted, verified justification. Trained and evaluated on MIMIC-IV.
 authors:
   - family-names: Stenzel
     given-names: Lennart
@@ -24,12 +26,12 @@ keywords:
   - MIMIC-IV
   - XGBoost
   - Clinical-Longformer
-  - cross-modal discordance analysis
+  - LLM auditor
   - explainability
   - SHAP
 preferred-citation:
   type: thesis
-  title: "Cross-Modal Discordance Analysis for 30-Day Hospital Readmission Prediction: Combining Structured EHR Features with Clinical Discharge Notes"
+  title: "An LLM Auditor for Hospital Readmission Alerts: Independent Verification Beyond Prediction"
   authors:
     - family-names: Stenzel
       given-names: Lennart
