@@ -22,14 +22,14 @@ def main():
     print("=" * 60, "\n")
 
     tables = generate_synthetic_dataset(
-        n_patients=cfg["data"]["synthetic_n_patients"],
-        seed=cfg["data"]["synthetic_seed"],
+        n_patients=cfg.data.synthetic_n_patients,
+        seed=cfg.data.synthetic_seed,
         output_dir=get_data_dir() / "synthetic",
     )
 
     print("\nBuilding feature matrix...")
     matrix = build_features(tables, cfg)
-    out_dir = get_data_dir().parent / cfg["output"]["processed_dir"]
+    out_dir = get_data_dir().parent / cfg.output.processed_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     matrix.to_csv(out_dir / "features.csv", index=False)
 

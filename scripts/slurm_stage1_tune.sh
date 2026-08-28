@@ -6,9 +6,13 @@
 #
 # Estimated wall time: previously ~4 h using 16 CPU cores only -- the script
 # requested this A100 node but XGBoost never actually used it (tree_method
-# was CPU-only). Now passes --device cuda so the GPU is genuinely engaged;
-# no measured wall-time for that yet, so --time is left with headroom until
-# a real run establishes one. Adjust --time down once you have that number.
+# was CPU-only). Now passes --device cuda so the GPU is genuinely engaged,
+# and --tune-n-jobs 8 runs 8 trials concurrently against it (a single fit on
+# this dataset is small relative to an A100 -- one trial at a time leaves
+# most of the GPU idle). 8 is a starting point sized to the 16 CPUs below,
+# not a tuned value; watch `nvidia-smi` during a run and adjust. No measured
+# wall-time for either change yet, so --time is left with headroom until a
+# real run establishes one. Adjust --time down once you have that number.
 
 #SBATCH --job-name=thesis_stage1_tune
 #SBATCH --partition=a100
@@ -44,10 +48,12 @@ echo "[slurm] Building feature matrix …"
 python -m src.data.features --mode full
 
 # ── Step 2: Optuna hyperparameter search (400 trials) ────────────────────────
-# Stored in models/optuna_stage1_xgboost.db — resumable if job is preempted
-# (resubmit unchanged; run_study() picks up recorded trials automatically).
-echo "[slurm] Running Optuna tune (400 trials, GPU) …"
-python -m src.model.tune --mode full --device cuda
+# Stored in models/optuna_stage1_xgboost_journal.log — resumable if job is
+# preempted (resubmit unchanged; run_study() picks up recorded trials
+# automatically). File-backed, not sqlite -- sqlite's locking is unreliable
+# on this filesystem, especially with concurrent trials (see tune.py).
+echo "[slurm] Running Optuna tune (400 trials, GPU, 8 concurrent) …"
+python -m src.model.tune --mode full --device cuda --tune-n-jobs 8
 
 # ── Step 3: Full retrain with best params ────────────────────────────────────
 echo "[slurm] Training with best params (GPU) …"
