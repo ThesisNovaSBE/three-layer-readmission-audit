@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from dataclasses import dataclass
 
@@ -213,15 +214,25 @@ def _detect_device() -> str:
     return "cpu"
 
 
+def _checkpoint_step(path) -> int:
+    """Return the global step number encoded in a ``checkpoint-<step>`` dir name."""
+    return int(path.name.rsplit("-", 1)[-1])
+
+
 def _find_resume_checkpoint(checkpoint_dir) -> str | None:
     """Return the path of the latest checkpoint, or None if none exist.
 
     Called before ``trainer.train()`` to enable automatic crash recovery —
     if training is interrupted, restarting the script resumes from the last
     saved checkpoint rather than starting from scratch.
+
+    Sorts by the numeric step (``_checkpoint_step``), not lexicographically —
+    HuggingFace names checkpoints ``checkpoint-<step>`` with no zero-padding,
+    so a plain string sort orders "checkpoint-1500" before "checkpoint-500"
+    and would silently resume from an older checkpoint than the true latest.
     """
     if checkpoint_dir.exists():
-        existing = sorted(checkpoint_dir.glob("checkpoint-*"))
+        existing = sorted(checkpoint_dir.glob("checkpoint-*"), key=_checkpoint_step)
         if existing:
             print(f"[stage2/train] Resuming from checkpoint: {existing[-1].name}")
             return str(existing[-1])
@@ -237,6 +248,22 @@ def _compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
         f"[stage2/train] Class weights: neg=1.0  pos={neg / pos:.2f}"
     )
     return torch.tensor([1.0, neg / pos], dtype=torch.float32)
+
+
+def _eval_strategy_kwarg() -> str:
+    """Return whichever eval-strategy kwarg name this installed Transformers
+    version actually accepts.
+
+    The name changed from ``evaluation_strategy`` (<4.41) to
+    ``eval_strategy`` (>=4.41), and ``evaluation_strategy`` was REMOVED
+    entirely in Transformers 5.x -- hardcoding either name breaks on some
+    installed version, and requirements.txt's unpinned upper bound
+    (``transformers>=4.36``) means a fresh install can land on either side
+    of that line. Detected at runtime instead of guessed, so this can't
+    silently break again regardless of which version ends up installed.
+    """
+    params = inspect.signature(TrainingArguments.__init__).parameters
+    return "eval_strategy" if "eval_strategy" in params else "evaluation_strategy"
 
 
 def _build_training_args(
@@ -266,10 +293,8 @@ def _build_training_args(
         learning_rate=hp.learning_rate,
         warmup_ratio=hp.warmup_ratio,
         weight_decay=hp.weight_decay,
-        # Step-level eval + save so a crash never loses more than save_steps steps
-        # evaluation_strategy is the name in Transformers <4.41; eval_strategy in >=4.41.
-        # Using the old name works on both (new versions alias it with a deprecation warning).
-        evaluation_strategy="steps",
+        # Step-level eval + save so a crash never loses more than save_steps steps.
+        **{_eval_strategy_kwarg(): "steps"},
         eval_steps=hp.save_steps,
         save_strategy="steps",
         save_steps=hp.save_steps,

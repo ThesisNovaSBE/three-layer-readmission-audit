@@ -59,6 +59,12 @@ stage1:
     - xgboost
     - histgradientboosting
 
+  # XGBoost only (no effect on LR/HGB). "cpu" locally (Mac has no CUDA) --
+  # override with --device cuda on KISSKI/Grete (scripts/slurm_stage1_tune.sh
+  # does this). Only changes which processor runs the search, not the search
+  # itself or the result quality -- see src/model/models.py:build_estimator.
+  device: cpu                              # cpu | cuda
+
   # ── Operating point policy ──
   # "capacity" (primary, from 2026-08-25 session): flag the top capacity_k
   # fraction of admissions by risk score, matched to what a transitional-care

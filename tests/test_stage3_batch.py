@@ -13,20 +13,40 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from src.stage3.batch import _OUTPUT_FIELDS, run_batch_audit, run_sensitivity_sweep
+from src.stage3.batch import (
+    _OUTPUT_FIELDS,
+    check_self_agreement,
+    run_batch_audit,
+    run_blind_note_control,
+    run_no_stage2_control,
+    run_sensitivity_sweep,
+)
 
 
-def _fake_result(hadm_id: int, *, fail: bool = False) -> SimpleNamespace:
-    """Build a stand-in for ExplanationResult.model_dump()'s output."""
-    return SimpleNamespace(model_dump=lambda: {
+def _fake_result(hadm_id: int, *, fail: bool = False, decision: str = "override") -> SimpleNamespace:
+    """Build a stand-in for ExplanationResult -- exposes both attribute access
+    (as check_self_agreement uses) and .model_dump() (as run_batch_audit uses)."""
+    data = {
         "hadm_id": hadm_id, "stage1_score": 0.6, "stage1_threshold": 0.35,
         "stage2_score": 0.4, "stage2_confirmed": True, "r1": 70.0, "r2": 40.0,
         "displacement": -30.0, "discordance_mode": "NOTE_MITIGATES",
-        "decision": None if fail else "override",
-        "primary_clinical_domain": None if fail else "social_support",
-        "clinical_justification": "" if fail else "Note documents strong support.",
+        "mitigating_grounds": [] if fail else [
+            {"ground": "palliative_intent", "quote": "Comfort care planned.",
+             "quote_verified": True}
+        ],
+        "aggravating_grounds": [],
+        "all_quotes_verified": None if fail else True,
+        "planned_return": None if fail else "no",
+        "clinical_justification": "" if fail else "Note documents comfort-focused care.",
+        "decision_model": None if fail else decision,
+        "decision_rule": None if fail else decision,
+        "note_truncated": False,
+        "model_name": "phi4-mini",
         "annotation_failed": fail,
-    })
+    }
+    result = SimpleNamespace(**data)
+    result.model_dump = lambda: dict(data)
+    return result
 
 
 @pytest.fixture
@@ -67,6 +87,22 @@ def test_writes_one_row_per_admission(tmp_path, results_df):  # pylint: disable=
     assert len(written) == 4
     assert set(written["hadm_id"]) == {10, 11, 12, 13}
     assert list(written.columns) == _OUTPUT_FIELDS
+
+
+def test_grounds_columns_are_json_serialised(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """mitigating_grounds/aggravating_grounds must round-trip through the CSV as JSON."""
+    out = tmp_path / "out.csv"
+
+    def side_effect(hadm_id, *_a, **_kw):
+        return _fake_result(hadm_id)
+
+    p1, p2, p3, p4 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4:
+        run_batch_audit(cfg=SimpleNamespace(), out_path=out, limit=1)
+
+    written = pd.read_csv(out)
+    grounds = json.loads(written.iloc[0]["mitigating_grounds"])
+    assert grounds[0]["ground"] == "palliative_intent"
 
 
 def test_one_failure_does_not_stop_the_batch(tmp_path, results_df):  # pylint: disable=redefined-outer-name
@@ -167,3 +203,76 @@ def test_sensitivity_sweep_writes_expected_json(tmp_path):
     saved = json.loads(out_path.read_text())
     assert saved["n_patients"] == 4
     assert saved["sweep"] == sweep
+
+
+# ── run_blind_note_control / run_no_stage2_control ──────────────────────────
+
+def test_blind_note_control_calls_explain_patient_with_suppress_note(results_df):  # pylint: disable=redefined-outer-name
+    """run_blind_note_control must call explain_patient with suppress_note=True."""
+    calls = []
+
+    def side_effect(hadm_id, _cfg, **kwargs):
+        calls.append(kwargs)
+        return _fake_result(hadm_id)
+
+    p1, p2, p3, p4 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4:
+        out = run_blind_note_control(SimpleNamespace(), [10, 11])
+
+    assert len(out) == 2
+    assert all(kw.get("suppress_note") is True for kw in calls)
+    assert all(kw.get("suppress_stage2") is False for kw in calls)
+
+
+def test_no_stage2_control_calls_explain_patient_with_suppress_stage2(results_df):  # pylint: disable=redefined-outer-name
+    """run_no_stage2_control must call explain_patient with suppress_stage2=True."""
+    calls = []
+
+    def side_effect(hadm_id, _cfg, **kwargs):
+        calls.append(kwargs)
+        return _fake_result(hadm_id)
+
+    p1, p2, p3, p4 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4:
+        out = run_no_stage2_control(SimpleNamespace(), [10])
+
+    assert len(out) == 1
+    assert calls[0]["suppress_stage2"] is True
+    assert calls[0]["suppress_note"] is False
+
+
+# ── check_self_agreement ──────────────────────────────────────────────────────
+
+def test_self_agreement_reports_full_agreement_for_identical_output(results_df):  # pylint: disable=redefined-outer-name
+    """Two identical runs (deterministic mock) must report 100% agreement."""
+    def side_effect(hadm_id, *_a, **_kw):
+        return _fake_result(hadm_id, decision="uphold")
+
+    p1, p2, p3, p4 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4:
+        report = check_self_agreement(SimpleNamespace(), [10, 11])
+
+    assert report["n"] == 2
+    assert report["decision_model_agreement"] == 1.0
+    assert report["decision_rule_agreement"] == 1.0
+    assert report["grounds_agreement"] == 1.0
+    assert report["disagreements"] == []
+
+
+def test_self_agreement_detects_a_mismatch(results_df):  # pylint: disable=redefined-outer-name
+    """A patient whose two runs disagree must be reported, not averaged away."""
+    call_count = {"n": 0}
+
+    def side_effect(hadm_id, *_a, **_kw):
+        call_count["n"] += 1
+        # Every other call for hadm_id 11 returns a different decision.
+        decision = "uphold" if call_count["n"] % 2 == 1 else "override"
+        return _fake_result(hadm_id, decision=decision if hadm_id == 11 else "uphold")
+
+    p1, p2, p3, p4 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4:
+        report = check_self_agreement(SimpleNamespace(), [10, 11])
+
+    assert 11 in report["disagreements"]
+    assert 10 not in report["disagreements"]
+    assert report["decision_model_agreement"] == 0.5

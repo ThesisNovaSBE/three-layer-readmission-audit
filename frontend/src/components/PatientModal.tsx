@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { explainPatient } from "../api";
-import type { ExplanationResult, Patient } from "../types";
+import type { ExplanationResult, GroundHit, Patient } from "../types";
 
 // ── Small layout helpers ──────────────────────────────────────────────────────
 
@@ -28,24 +28,24 @@ function ScoreGauge({ label, score, color }: { label: string; score: number; col
   );
 }
 
-// ── Score delta visualisation ─────────────────────────────────────────────────
+// ── Percentile-rank displacement visualisation ──────────────────────────────
+// displacement = r2 (Stage 2's percentile rank) − r1 (Stage 1's), range
+// [-100, +100]. Not a raw score subtraction — see docs/ARCHITECTURE.md §2.
 
-const DELTA_BANDS = [
-  { max: -0.3, label: "Note strongly mitigates risk", color: "text-green-700", barColor: "bg-green-400" },
-  { max: -0.1, label: "Note somewhat mitigates risk", color: "text-green-600", barColor: "bg-green-300" },
-  { max:  0.1, label: "Both modalities agree",        color: "text-slate-500", barColor: "bg-slate-300" },
-  { max:  0.3, label: "Note somewhat amplifies risk",  color: "text-orange-600", barColor: "bg-orange-300" },
-  { max: Infinity, label: "Note strongly amplifies risk", color: "text-red-600", barColor: "bg-red-400" },
+const DISPLACEMENT_BANDS = [
+  { max: -20, label: "Note mitigates risk (Stage 2 ranks it lower)", color: "text-green-700", barColor: "bg-green-400" },
+  { max: 20, label: "Concordant", color: "text-slate-500", barColor: "bg-slate-300" },
+  { max: Infinity, label: "Note amplifies risk (Stage 2 ranks it higher)", color: "text-red-600", barColor: "bg-red-400" },
 ] as const;
 
-function deltaInfo(delta: number) {
-  return DELTA_BANDS.find((b) => delta < b.max) ?? DELTA_BANDS[DELTA_BANDS.length - 1];
+function displacementInfo(displacement: number) {
+  return DISPLACEMENT_BANDS.find((b) => displacement < b.max) ?? DISPLACEMENT_BANDS[DISPLACEMENT_BANDS.length - 1];
 }
 
-function DeltaBar({ delta }: { delta: number }) {
-  const info = deltaInfo(delta);
-  const clamped = Math.max(-1, Math.min(1, delta));
-  const pct = Math.abs(clamped) * 50;
+function DisplacementBar({ displacement }: { displacement: number }) {
+  const info = displacementInfo(displacement);
+  const clamped = Math.max(-100, Math.min(100, displacement));
+  const pct = Math.abs(clamped) / 2;
   const isNeg = clamped < 0;
   return (
     <div className="space-y-1.5">
@@ -66,7 +66,7 @@ function DeltaBar({ delta }: { delta: number }) {
   );
 }
 
-// ── Discordance mode badge ─────────────────────────────────────────────────────
+// ── Discordance mode + decision badges ──────────────────────────────────────
 
 const MODE_STYLES: Record<string, string> = {
   CONCORDANT:     "bg-slate-100 text-slate-600",
@@ -83,41 +83,109 @@ function ModeBadge({ mode }: { mode: string | null }) {
   );
 }
 
+const DECISION_STYLES: Record<string, string> = {
+  uphold: "bg-blue-100 text-blue-700",
+  override: "bg-red-100 text-red-700",
+  insufficient_evidence: "bg-slate-100 text-slate-500",
+};
+
+function DecisionBadge({ decision, label }: { decision: string | null; label: string }) {
+  if (!decision) return null;
+  const style = DECISION_STYLES[decision] ?? "bg-slate-100 text-slate-500";
+  return (
+    <span
+      className={`text-xs font-semibold px-2 py-0.5 rounded-full uppercase tracking-wide ${style}`}
+      title={label}
+    >
+      {label}: {decision.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// ── Grounds (mitigating / aggravating) ──────────────────────────────────────
+
+function GroundsList({
+  title,
+  grounds,
+  toneClass,
+}: {
+  title: string;
+  grounds: GroundHit[];
+  toneClass: string;
+}) {
+  if (grounds.length === 0) return null;
+  return (
+    <div>
+      <h4 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${toneClass}`}>
+        {title}
+      </h4>
+      <ul className="space-y-2">
+        {grounds.map((g, i) => (
+          <li key={i} className="text-xs text-slate-600">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-700">{g.ground.replace(/_/g, " ")}</span>
+              {g.quote_verified ? (
+                <span className="text-emerald-600 text-[10px] normal-case font-normal">
+                  ✓ verified
+                </span>
+              ) : (
+                <span className="text-amber-600 text-[10px] normal-case font-normal">
+                  ⚠ unverified
+                </span>
+              )}
+            </div>
+            <blockquote className="border-l-2 border-slate-200 pl-2 italic mt-1 text-slate-500">
+              “{g.quote}”
+            </blockquote>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // ── Explanation panel ─────────────────────────────────────────────────────────
 
 function ExplanationPanel({ result }: { result: ExplanationResult }) {
-  const delta = result.score_delta;
   return (
     <div className="space-y-4">
       {result.annotation_failed && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-          phi4-mini returned an unparseable response — structured fields unavailable. Narrative
-          shown as-is.
+          The model returned an unparseable or taxonomy-violating response — structured fields
+          unavailable. Raw inputs shown as-is.
         </div>
       )}
 
-      {/* Score delta */}
+      {/* Percentile-rank displacement */}
       <div className="bg-slate-50 rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-            Score delta (Stage 2 − Stage 1)
+            Displacement (Stage 2 rank − Stage 1 rank)
           </span>
-          <span className={`text-sm font-bold ${deltaInfo(delta).color}`}>
-            {delta >= 0 ? "+" : ""}{delta.toFixed(3)}
+          <span className={`text-sm font-bold ${displacementInfo(result.displacement).color}`}>
+            {result.displacement >= 0 ? "+" : ""}{result.displacement.toFixed(1)}pp
           </span>
         </div>
-        <DeltaBar delta={delta} />
+        <DisplacementBar displacement={result.displacement} />
+        <div className="flex justify-between text-xs text-slate-400">
+          <span>Stage 1 percentile: {result.r1.toFixed(0)}</span>
+          <span>Stage 2 percentile: {result.r2.toFixed(0)}</span>
+        </div>
       </div>
 
-      {/* Mode + category */}
+      {/* Decision (model's own judgment + the deterministic rule cross-check) + mode */}
       <div className="flex items-center gap-2 flex-wrap">
+        <DecisionBadge decision={result.decision_model} label="model" />
+        <DecisionBadge decision={result.decision_rule} label="rule" />
         <ModeBadge mode={result.discordance_mode} />
-        {result.primary_category && (
-          <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">
-            {result.primary_category.replace(/_/g, " ")}
-          </span>
-        )}
       </div>
+      {result.decision_model && result.decision_rule
+        && result.decision_model !== result.decision_rule && (
+        <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          The model's decision and the rule computed from its own extracted grounds disagree —
+          worth a closer look.
+        </p>
+      )}
 
       {/* SHAP features */}
       {result.top_shap_features.length > 0 && (
@@ -153,18 +221,46 @@ function ExplanationPanel({ result }: { result: ExplanationResult }) {
         </div>
       )}
 
-      {/* Narrative */}
+      {/* Mitigating / aggravating grounds, each with its own verified quote */}
+      <GroundsList
+        title="Mitigating grounds"
+        grounds={result.mitigating_grounds}
+        toneClass="text-green-700"
+      />
+      <GroundsList
+        title="Aggravating grounds"
+        grounds={result.aggravating_grounds}
+        toneClass="text-red-700"
+      />
+      {(result.mitigating_grounds.length > 0 || result.aggravating_grounds.length > 0)
+        && result.all_quotes_verified === false && (
+        <p className="text-xs text-amber-600">
+          ⚠ at least one quote above was not found verbatim in the note.
+        </p>
+      )}
+
+      {/* Planned return */}
+      {result.planned_return && (
+        <InfoRow
+          label="Planned return (per note)"
+          value={result.planned_return.replace(/_/g, " ")}
+        />
+      )}
+
+      {/* Clinical justification */}
       <div>
         <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-          Clinical Narrative
+          Clinical Justification
         </h4>
         <div className="bg-emerald-50 border border-emerald-100 rounded-xl px-4 py-3 text-sm text-slate-700 leading-relaxed">
-          {result.narrative || "(no narrative generated)"}
+          {result.clinical_justification || "(no justification generated)"}
         </div>
       </div>
 
       <p className="text-xs text-slate-400">
-        Generated by a local LLM. For clinical review only — not a diagnosis or recommendation.
+        Generated by {result.model_name || "a local LLM"}
+        {result.note_truncated ? " — note truncated for length" : ""}. For clinical review
+        only — not a diagnosis or recommendation.
       </p>
     </div>
   );
@@ -216,9 +312,9 @@ function Stage3Section({
         </p>
       )}
       <p className="text-sm text-slate-600">
-        Request an on-demand explanation from phi4-mini. The model synthesises Stage 1 SHAP
-        features, Longformer attention spans, and the score delta to explain why this patient was
-        flagged.
+        Request an on-demand audit from phi4-mini. The model reasons over Stage 1's SHAP
+        features, Stage 2's independent note-based score, and the discharge note itself, then
+        returns its own uphold/override decision with a quoted, verified justification.
       </p>
       {error && (
         <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
@@ -326,7 +422,7 @@ export default function PatientModal({
           <div>
             <div className="flex items-center gap-2 mb-3">
               <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Stage 3 — Clinical Explanation
+                Stage 3 — Clinical Audit
               </h3>
               <span className="text-xs text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-full">
                 phi4-mini

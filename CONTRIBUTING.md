@@ -12,10 +12,12 @@ Obtain access independently at <https://physionet.org/content/mimiciv/>.
 ## Environment
 
 ```bash
-conda env create -f environment.yml
-conda activate thesis-env
-pip install -e .
+python -m venv .venv && source .venv/bin/activate   # or your preferred env manager
+pip install -r requirements.txt
 ```
+
+For GPU training on a SLURM cluster, see `train_stage2.sh` for the reference
+job script (conda-based; adjust the environment/module lines for your site).
 
 ## Code quality
 
@@ -24,10 +26,11 @@ This project targets **Pylint 10.00/10** (enforced by `.pylintrc`).
 ```bash
 pylint src/
 pytest                        # unit tests (no data required)
-pytest -m integration         # slow integration tests (~60 s each)
 ```
 
-Before committing, ensure both pass with no errors.
+Before committing, ensure both pass with no errors. `pytest.ini` declares an
+`integration` marker for future slow tests that build synthetic data or train
+models; no test currently uses it.
 
 ## Style
 
@@ -44,8 +47,8 @@ src/
   data/                          # cohort extraction, synthetic data
   model/                         # Stage 1 XGBoost + metrics
   stage2/                        # Clinical-Longformer fine-tuning
-  stage3/                        # Cross-modal discordance analysis
+  stage3/                        # Independent LLM audit of Stage 1's flags
 tests/                           # pytest suite (no MIMIC data)
 sessions/                        # per-session development notes
-docs/                            # HPC deployment, methodology notes
+docs/                            # Architecture, methodology, and narrative notes
 ```

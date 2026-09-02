@@ -3,8 +3,8 @@
 For each patient, runs one forward pass with output_attentions=True and
 identifies the sentences that received the highest average attention weight
 from the [CLS] (classification) token.  These spans represent what Stage 2
-"looked at" when making its confirm / reject decision, and form the core of
-the cross-modal discordance analysis in Stage 3.
+"looked at" when producing its independent risk estimate, and are passed to
+Stage 3 as evidence for its audit.
 
 Caveat (Jain & Wallace 2019 / Wiegreffe & Pinter 2019): raw attention weights
 are not guaranteed to be faithful explanations of model decisions.  They

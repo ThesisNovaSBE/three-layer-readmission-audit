@@ -1,4 +1,6 @@
-// Real metrics from training runs — Stage 1 from full MIMIC-IV, Stage 2 from KISSKI A100 job.
+// Pre-retrain metrics (recall-floor Stage 1, v1 Stage 2) — kept as the last known
+// numbers pending the capacity-constrained Stage 1 / fairness-rebuilt Stage 2 retrain.
+// See docs/ARCHITECTURE.md §4 and MODEL_CARD.md for current status.
 const STAGE1 = {
   nPatients: 521_191,
   auroc: 0.706,
@@ -65,7 +67,7 @@ function Arrow() {
 export default function PipelineDiagram() {
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-6">
-      <h2 className="text-lg font-bold text-slate-800 mb-1">Triage-and-Verify Pipeline</h2>
+      <h2 className="text-lg font-bold text-slate-800 mb-1">Screen → Independent Read → Audit Pipeline</h2>
       <p className="text-sm text-slate-500 mb-5">
         Three-stage pipeline for predicting unplanned 30-day hospital readmissions from MIMIC-IV.
       </p>
@@ -73,8 +75,8 @@ export default function PipelineDiagram() {
       <div className="flex gap-2 items-stretch">
         <StageBox
           number="1"
-          title="Triage"
-          subtitle="Structured EHR data → high-recall flag"
+          title="Screen"
+          subtitle="Structured EHR data → capacity-constrained flag"
           model="XGBoost"
           color="border-blue-200"
           metrics={[
@@ -88,8 +90,8 @@ export default function PipelineDiagram() {
         <Arrow />
         <StageBox
           number="2"
-          title="Verify"
-          subtitle="Discharge notes → prune false positives"
+          title="Independent Read"
+          subtitle="Discharge notes → independent risk estimate"
           model="Clinical-Longformer"
           color="border-violet-200"
           metrics={[
@@ -98,20 +100,20 @@ export default function PipelineDiagram() {
             { label: "Recall",       value: STAGE2.recall.toFixed(3) },
             { label: "Precision",    value: STAGE2.precision.toFixed(3) },
             { label: "F2",           value: STAGE2.f2.toFixed(3) },
-            { label: "Confirmed",    value: `${STAGE2.confirmed.toLocaleString()} (${((STAGE2.confirmed / STAGE1.notesCohort) * 100).toFixed(0)}%)` },
+            { label: "Cascade-confirmed", value: `${STAGE2.confirmed.toLocaleString()} (${((STAGE2.confirmed / STAGE1.notesCohort) * 100).toFixed(0)}%)` },
           ]}
         />
         <Arrow />
         <StageBox
           number="3"
-          title="Explain"
-          subtitle="On-demand clinical narrative for one patient"
+          title="Audit"
+          subtitle="Both scores + note → uphold/override decision"
           model="phi4-mini (Ollama)"
           color="border-emerald-200"
           metrics={[
             { label: "Trigger",     value: "Clinician request" },
-            { label: "Input",       value: "SHAP + attention + delta" },
-            { label: "Output",      value: "2–3 sentence narrative" },
+            { label: "Input",       value: "SHAP + attention + both scores + note" },
+            { label: "Output",      value: "Decision + quoted justification" },
             { label: "Deployment",  value: "Local (on-device)" },
             { label: "Training",    value: "None — inference only" },
           ]}
@@ -127,7 +129,7 @@ export default function PipelineDiagram() {
           <div className="text-xl font-bold text-violet-700">
             {STAGE2.confirmed.toLocaleString()}
           </div>
-          <div className="text-xs text-violet-500">Stage 2 confirmed</div>
+          <div className="text-xs text-violet-500">Cascade-confirmed (secondary)</div>
         </div>
         <div className="bg-emerald-50 rounded-lg p-3 text-center">
           <div className="text-xl font-bold text-emerald-700">{STAGE2.auroc.toFixed(3)}</div>

@@ -16,10 +16,14 @@ turned into the Stage 1 feature matrix:
 Usage::
 
     python -m src.data.features                # writes data/processed/features.csv
+    python -m src.data.features --mode full     # accepted for CLI consistency;
+                                                 # always builds from the full
+                                                 # available dataset either way
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pandas as pd
@@ -428,8 +432,23 @@ def split_xy(matrix: pd.DataFrame):
 
 
 def main() -> None:
-    """Build and persist the feature matrix."""
+    """Build and persist the feature matrix.
+
+    Always builds from the full available dataset (real MIMIC-IV if
+    configured, else the full synthetic set) regardless of ``--mode`` --
+    quick/full only affects row-subsampling at *load* time
+    (``load_feature_matrix``), not here. ``--mode`` is still accepted (and
+    was already being silently ignored as an unparsed argument before this
+    fix, since this script had no argparse at all) purely for CLI
+    consistency with train.py/tune.py/evaluate.py.
+    """
+    parser = argparse.ArgumentParser(description="Build the Stage 1 feature matrix")
+    parser.add_argument("--mode", choices=["quick", "full"], default=None)
+    args = parser.parse_args()
+
     cfg = load_config()
+    if args.mode:
+        cfg.run.mode = args.mode
     tables = load_raw_tables(cfg)
     matrix = build_features(tables, cfg)
 

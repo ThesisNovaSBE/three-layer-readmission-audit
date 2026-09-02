@@ -139,15 +139,19 @@ self-critical **fairness rebuild**. Every gap below is an ingredient of that sto
 
 ## Prompt Library
 
-> **Include in EVERY session** (paste alongside the task prompt):
-> *Repo `20260401_Thesis`. Before working, read `PROJECT_TLDR.md`, `docs/THESIS_NARRATIVE.md`,
-> and the latest file in `sessions/`. Constraints: patient-level (`subject_id`) grouping and
-> zero data leakage; fixed seeds; validated Pydantic `AppConfig`; pylint 10/10; design
-> principles = simplicity, small/local models, build-it-ourselves. Real MIMIC-IV data and
-> note text must NEVER be committed (data/, models/ are gitignored). Framing: the pipeline is
-> a high-recall screen + an LLM "second reader" that prunes false alarms; report metrics for
-> BOTH the full flagged cohort and the notes cohort; include alerts-per-true-catch where
-> precision appears. At the end, write a NEW session log `sessions/YYYY-MM-DD_session-NN.md`
+> **Include in EVERY session** (paste alongside the task prompt) — updated 2026-08-28, see
+> `docs/ARCHITECTURE.md` and `docs/THESIS_NARRATIVE.md` for current framing:
+> *Repo `20260401_Thesis`. Before working, read `PROJECT_TLDR.md`, `docs/ARCHITECTURE.md`,
+> `docs/THESIS_NARRATIVE.md`, and the latest file in `sessions/`. Constraints: patient-level
+> (`subject_id`) grouping and zero data leakage; fixed seeds; validated Pydantic `AppConfig`;
+> pylint 10/10; design principles = simplicity, small/local models, build-it-ourselves. Real
+> MIMIC-IV data and note text must NEVER be committed (data/, models/ are gitignored).
+> Framing: Stage 1 is a capacity-constrained screen (top-K% by risk, not a recall floor);
+> Stage 2 is an independent note-based second opinion (not a gatekeeper); Stage 3 is an
+> independent auditor of Stage 1's flags, using Stage 2's score as evidence, that upholds or
+> overrides with a quoted, verified justification. Report metrics for BOTH the full flagged
+> cohort and the notes cohort, and against the control arm (Stage 1 alone at the same alert
+> budget). At the end, write a NEW session log `sessions/YYYY-MM-DD_session-NN.md`
 > (never edit older ones).*
 
 ### C1 — Reproducible end-to-end run + results manifest
@@ -402,17 +406,21 @@ economic argument for §5.2.
 
 ### N5 — Novelty positioning (§2.4 draft)
 ```
-Context: THESIS_NARRATIVE.md fixed the framing: the contribution is the VERIFICATION layer
-(LLM as second reader on a high-recall screen) + disagreement analysis + fairness-audited
-local deployment — not raw AUROC. §2.4 ("Research Gap and Contribution", Thomas's chapter, but
-draft it for him).
+Context: THESIS_NARRATIVE.md fixed the framing (updated 2026-08-28): the contribution is the
+AUDIT layer (LLM independently audits another model's flagged output, on stated evidence,
+with a quote-verified justification for every override) + disagreement analysis +
+fairness-audited local deployment — not raw AUROC. §2.4 ("Research Gap and Contribution",
+Thomas's chapter, but draft it for him).
 Task: Draft 500-700 words for §2.4 positioning against three literature families: (a)
 structured-only readmission models (plateau ~0.70 AUROC, alert-fatigue problem documented);
-(b) notes-only clinical LMs (Huang et al. 2019 ClinicalBERT readmission — replaces rather than
-complements); (c) multimodal fusion (opaque, compute-heavy, all-or-nothing on missing
-modalities). State the gap: no prior work uses the LLM as a selective false-positive verifier
-in a high-recall cascade with fairness calibration. Cite li2023comparative for the Longformer
-choice. BibTeX entries for any new citations into references.bib.
+(b) notes-only clinical LMs (Huang et al. 2019 ClinicalBERT readmission — predicts
+independently rather than auditing); (c) multimodal fusion (opaque, compute-heavy,
+all-or-nothing on missing modalities). State the gap, grounded in the systematic literature
+review: across the reviewed studies, LLM roles are predictor, feature-extractor, or explainer
+of a model's own output — never auditor of another model's decision, reasoning over
+independent evidence and required to justify overrides against the source text. Cite
+li2023comparative for the Longformer choice. BibTeX entries for any new citations into
+references.bib.
 Acceptance: a paste-ready §2.4 draft consistent with the ablation (N1) and abstract.
 ```
 

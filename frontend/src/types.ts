@@ -21,18 +21,33 @@ export interface Patient {
   white_blood_cells_last: number | null;
 }
 
+export interface GroundHit {
+  ground: string;
+  quote: string;
+  quote_verified: boolean;
+}
+
 export interface ExplanationResult {
   hadm_id: number;
   stage1_score: number;
   stage1_threshold: number;
   stage2_score: number;
   stage2_confirmed: boolean;
-  score_delta: number;
+  r1: number;
+  r2: number;
+  displacement: number;
+  discordance_mode: string | null;
   top_shap_features: string[];
   attention_sentences: string[];
-  discordance_mode: string | null;
-  primary_category: string | null;
-  narrative: string;
+  mitigating_grounds: GroundHit[];
+  aggravating_grounds: GroundHit[];
+  all_quotes_verified: boolean | null;
+  planned_return: string | null;
+  clinical_justification: string;
+  decision_model: string | null;
+  decision_rule: string | null;
+  note_truncated: boolean;
+  model_name: string;
   annotation_failed: boolean;
 }
 

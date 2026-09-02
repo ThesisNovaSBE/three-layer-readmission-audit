@@ -83,6 +83,12 @@ class Stage1Config(BaseModel):
 
     model: str = "xgboost"
     models: list[str] = ["logistic_regression", "xgboost", "histgradientboosting"]
+    device: str = "cpu"  # cpu | cuda -- XGBoost only; no effect on LR/HGB. cuda
+    # requires an NVIDIA GPU (KISSKI/Grete A100), never on Mac (no CUDA there).
+    tune_n_jobs: int = 1  # concurrent Optuna trials. A single XGBoost fit on
+    # this dataset is small relative to an A100's capacity -- >1 runs several
+    # trials at once against the same GPU instead of one at a time. Keep at 1
+    # for local/CPU runs; the cluster job overrides this explicitly.
     threshold_strategy: str = "capacity"
     capacity_k: float = 0.15
     capacity_report_points: list[float] = [0.05, 0.10, 0.15, 0.20]

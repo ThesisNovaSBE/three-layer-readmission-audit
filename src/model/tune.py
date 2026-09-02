@@ -3,6 +3,20 @@
 - Search spaces come from src/model/models.py (ranges per docs/MODELING_PLAN.md).
 - Grouped, stratified CV on the TRAINING portion only (test set never touched).
 - MedianPruner stops unpromising trials early.
+- Study is persisted to models/optuna_stage1_<model>_journal.log (Optuna's
+  JournalFileBackend, not sqlite) -- resubmitting after a preemption/crash
+  resumes toward the same trial target instead of restarting the whole
+  search. JournalFileBackend, not sqlite, deliberately: sqlite's
+  file-locking is unreliable on the NFS-style shared filesystems typical of
+  HPC project directories (KISSKI/Grete), especially with >1 concurrent
+  trial (below) -- this is the kind of thing that shows up as intermittent,
+  hard-to-reproduce "database is locked" failures on the cluster and not
+  locally. JournalFileBackend uses atomic symlink-based locking instead,
+  which Optuna recommends specifically for this environment.
+- ``stage1.tune_n_jobs`` (default 1) runs that many trials concurrently
+  against the same GPU -- a single fit on this dataset is small relative to
+  an A100's capacity, so running several at once is what actually uses it,
+  rather than one trial saturating a tiny fraction of the GPU at a time.
 - Writes best params to models/<model>_best_params.json for train.py to pick up.
 
 Usage::
@@ -10,6 +24,7 @@ Usage::
     python -m src.model.tune                  # uses config.yaml run.mode
     python -m src.model.tune --mode full
     python -m src.model.tune --model histgradientboosting
+    python -m src.model.tune --mode full --device cuda --tune-n-jobs 8   # KISSKI/Grete
 """
 
 from __future__ import annotations
@@ -36,6 +51,29 @@ from src.model.models import suggest_params
 from src.model.splits import grouped_train_test_split, make_cv
 
 
+def _load_or_create_study(model_dir, name: str, seed: int) -> optuna.Study:
+    """Create (or resume) the Optuna study for one Stage 1 model.
+
+    Persisted to disk (not in-memory) so a preempted/crashed cluster job can
+    resume instead of losing the whole search -- load_if_exists picks up any
+    trials already recorded under this study name. JournalFileBackend (not
+    sqlite) for NFS-safe locking on shared HPC filesystems -- see module
+    docstring.
+    """
+    sampler = optuna.samplers.TPESampler(seed=seed)
+    pruner = optuna.pruners.MedianPruner(n_warmup_steps=1)
+    journal_path = model_dir / f"optuna_stage1_{name}_journal.log"
+    storage = optuna.storages.JournalStorage(
+        optuna.storages.journal.JournalFileBackend(str(journal_path))
+    )
+    return optuna.create_study(
+        study_name=f"stage1_{name}",
+        storage=storage,
+        direction="maximize", sampler=sampler, pruner=pruner,
+        load_if_exists=True,
+    )
+
+
 def run_study(cfg: AppConfig) -> dict:
     """Run an Optuna hyperparameter study and save the best parameters.
 
@@ -60,7 +98,8 @@ def run_study(cfg: AppConfig) -> dict:
     y_train, g_train = y[train_idx], groups[train_idx]
 
     print(
-        f"[tune] mode={mode} model={name} trials={n_trials} "
+        f"[tune] mode={mode} model={name} device={cfg.stage1.device} "
+        f"tune_n_jobs={cfg.stage1.tune_n_jobs} trials={n_trials} "
         f"cv_folds={n_splits} train_rows={len(y_train):,}"
     )
 
@@ -80,16 +119,24 @@ def run_study(cfg: AppConfig) -> dict:
                 raise optuna.TrialPruned()
         return float(np.mean(fold_scores))
 
-    sampler = optuna.samplers.TPESampler(seed=seed)
-    pruner = optuna.pruners.MedianPruner(n_warmup_steps=1)
-    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    model_dir = get_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    study = _load_or_create_study(model_dir, name, seed)
+
+    n_done = len(study.trials)
+    n_remaining = max(n_trials - n_done, 0)
+    if n_done:
+        print(f"[tune] Resuming study: {n_done} trial(s) already recorded, "
+              f"{n_remaining} remaining toward target={n_trials}.")
+    if n_remaining:
+        study.optimize(
+            objective, n_trials=n_remaining, show_progress_bar=True,
+            n_jobs=cfg.stage1.tune_n_jobs,
+        )
 
     print(f"[tune] Best CV AUPRC: {study.best_value:.4f}")
     print(f"[tune] Best params: {study.best_params}")
 
-    model_dir = get_model_dir()
-    model_dir.mkdir(parents=True, exist_ok=True)
     out_path = model_dir / f"{name}_best_params.json"
     out_path.write_text(json.dumps(study.best_params, indent=2))
     print(f"[tune] Saved best params -> {out_path}")
@@ -105,6 +152,16 @@ def main() -> None:
         choices=["logistic_regression", "xgboost", "histgradientboosting"],
         default=None,
     )
+    parser.add_argument(
+        "--device", choices=["cpu", "cuda"], default=None,
+        help="XGBoost only; no effect on LR/HGB. cuda requires an NVIDIA GPU "
+             "(KISSKI/Grete A100) -- never on Mac.",
+    )
+    parser.add_argument(
+        "--tune-n-jobs", type=int, default=None,
+        help="Concurrent Optuna trials against the same GPU/CPU. Keep at 1 "
+             "locally; the cluster job passes a higher value explicitly.",
+    )
     args = parser.parse_args()
 
     _cfg = load_config()
@@ -112,6 +169,10 @@ def main() -> None:
         _cfg.run.mode = args.mode
     if args.model:
         _cfg.stage1.model = args.model
+    if args.device:
+        _cfg.stage1.device = args.device
+    if args.tune_n_jobs:
+        _cfg.stage1.tune_n_jobs = args.tune_n_jobs
     run_study(_cfg)
 
 

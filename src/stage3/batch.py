@@ -20,6 +20,16 @@ produce on its own:
 Also runs the discordance-threshold sensitivity sweep (``--sweep``) over an
 existing batch result — see :func:`src.stage3.explain.sweep_discordance_thresholds`.
 
+Session 19 added three diagnostic functions, none wired into the default
+``run_batch_audit`` path (call them directly, on a deliberate sample —
+they are not CLI-default modes):
+
+- :func:`run_blind_note_control` / :func:`run_no_stage2_control` — validation
+  controls (Phase D1/D2) that rerun a sample with part of the evidence
+  withheld from the LLM, to check whether the auditor is actually using it.
+- :func:`check_self_agreement` — Phase D3, verifies temperature=0 actually
+  yields identical output across two calls, before committing to a full run.
+
 Usage::
 
     python -m src.stage3.batch                  # full flagged+noted cohort
@@ -47,8 +57,9 @@ from src.stage3.pipeline import explain_patient
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
     "stage2_confirmed", "r1", "r2", "displacement", "discordance_mode",
-    "decision", "primary_clinical_domain", "clinical_justification",
-    "annotation_failed",
+    "mitigating_grounds", "aggravating_grounds", "all_quotes_verified",
+    "planned_return", "clinical_justification", "decision_model",
+    "decision_rule", "note_truncated", "model_name", "annotation_failed",
 ]
 
 
@@ -148,6 +159,8 @@ def run_batch_audit(
                 continue
 
             row = result.model_dump()
+            row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
+            row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
             writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
             fh.flush()
             n_ok += 1
@@ -193,6 +206,170 @@ def run_sensitivity_sweep(
               f"AMPLIFIES={dist['NOTE_AMPLIFIES']:.1%}  "
               f"CONCORDANT={dist['CONCORDANT']:.1%}")
     return sweep
+
+
+# ── Validation controls (session 19, Phase D1/D2) ───────────────────────────
+
+def _run_control(
+    cfg: AppConfig,
+    hadm_ids: list[int],
+    *,
+    artifact: dict | None,
+    results_df: pd.DataFrame | None,
+    feature_matrix: pd.DataFrame | None,
+    model_name: str | None,
+    suppress_note: bool = False,
+    suppress_stage2: bool = False,
+) -> pd.DataFrame:
+    """Shared runner for the blind-note / no-Stage-2 validation controls."""
+    loaded_artifact = artifact if artifact is not None else _load_artifact(cfg)
+    model_dir = get_model_dir()
+    loaded_results = results_df if results_df is not None else _load_results(model_dir)
+    loaded_matrix = (
+        feature_matrix if feature_matrix is not None else load_feature_matrix(cfg, "full")
+    )
+
+    rows = [
+        explain_patient(
+            hadm_id, cfg,
+            results_df=loaded_results, artifact=loaded_artifact,
+            feature_matrix=loaded_matrix, model_name=model_name,
+            suppress_note=suppress_note, suppress_stage2=suppress_stage2,
+        ).model_dump()
+        for hadm_id in hadm_ids
+    ]
+    return pd.DataFrame(rows)
+
+
+def run_blind_note_control(
+    cfg: AppConfig,
+    hadm_ids: list[int],
+    *,
+    artifact: dict | None = None,
+    results_df: pd.DataFrame | None = None,
+    feature_matrix: pd.DataFrame | None = None,
+    model_name: str | None = None,
+) -> pd.DataFrame:
+    """Blind-note validation control (session 19 Phase D1).
+
+    Reruns :func:`explain_patient` for each ``hadm_id`` with the discharge
+    note withheld from the LLM. If ``decision_model`` barely changes versus
+    the real batch run, the auditor isn't reading the note and the thesis's
+    central claim collapses — per the review that proposed this, "the most
+    important single check we run." This function only produces the
+    blinded run's output; join the result on ``hadm_id`` against an
+    existing ``stage3_batch_results.csv`` to compare decision distributions.
+
+    Args:
+        cfg:            validated project config.
+        hadm_ids:       admissions to rerun blind. Keep this a deliberate
+                         sample (tens to low hundreds) — this is a
+                         diagnostic, not a second full audit.
+        artifact / results_df / feature_matrix: pre-loaded objects, as in
+                         :func:`run_batch_audit` — avoids reloading per call.
+        model_name:     Ollama model tag. Defaults to ``cfg.stage3.ollama_model``.
+
+    Returns:
+        DataFrame, one row per ``hadm_id``, same fields as a batch audit row.
+    """
+    return _run_control(
+        cfg, hadm_ids, artifact=artifact, results_df=results_df,
+        feature_matrix=feature_matrix, model_name=model_name, suppress_note=True,
+    )
+
+
+def run_no_stage2_control(
+    cfg: AppConfig,
+    hadm_ids: list[int],
+    *,
+    artifact: dict | None = None,
+    results_df: pd.DataFrame | None = None,
+    feature_matrix: pd.DataFrame | None = None,
+    model_name: str | None = None,
+) -> pd.DataFrame:
+    """No-Stage-2 validation control (session 19 Phase D2).
+
+    Same mechanism as :func:`run_blind_note_control`, withholding Stage 2's
+    score and the discordance section instead of the note — tests whether
+    Stage 2 earns its place in the prompt, independent of the RQ1 question
+    of whether Stage 2 beats Stage 1 on discrimination metrics alone
+    (docs/ARCHITECTURE.md §5 item 2).
+    """
+    return _run_control(
+        cfg, hadm_ids, artifact=artifact, results_df=results_df,
+        feature_matrix=feature_matrix, model_name=model_name, suppress_stage2=True,
+    )
+
+
+# ── Self-agreement check (session 19, Phase D3) ─────────────────────────────
+
+def check_self_agreement(
+    cfg: AppConfig,
+    hadm_ids: list[int],
+    *,
+    artifact: dict | None = None,
+    results_df: pd.DataFrame | None = None,
+    feature_matrix: pd.DataFrame | None = None,
+    model_name: str | None = None,
+) -> dict:
+    """Self-agreement check (session 19 Phase D3).
+
+    Calls :func:`explain_patient` TWICE per admission. Temperature is
+    already pinned at 0 (``cfg.stage3.temperature``) for reproducibility,
+    but that assumption has never been verified against a real Ollama
+    model. Run this once before a full Phase C5 batch run, not as part of
+    it — a diagnostic, not a production path.
+
+    Args:
+        cfg:            validated project config.
+        hadm_ids:       admissions to run twice.
+        artifact / results_df / feature_matrix: pre-loaded objects, as in
+                         :func:`run_batch_audit`.
+        model_name:     Ollama model tag. Defaults to ``cfg.stage3.ollama_model``.
+
+    Returns:
+        Dict with per-field agreement fractions (``decision_model_agreement``,
+        ``decision_rule_agreement``, ``grounds_agreement``) and
+        ``disagreements`` — the ``hadm_id`` list where any of those three
+        differed between the two runs.
+    """
+    loaded_artifact = artifact if artifact is not None else _load_artifact(cfg)
+    model_dir = get_model_dir()
+    loaded_results = results_df if results_df is not None else _load_results(model_dir)
+    loaded_matrix = (
+        feature_matrix if feature_matrix is not None else load_feature_matrix(cfg, "full")
+    )
+
+    n_decision_model = n_decision_rule = n_grounds = 0
+    disagreements: list[int] = []
+    for hadm_id in hadm_ids:
+        kwargs = {
+            "results_df": loaded_results, "artifact": loaded_artifact,
+            "feature_matrix": loaded_matrix, "model_name": model_name,
+        }
+        first = explain_patient(hadm_id, cfg, **kwargs)
+        second = explain_patient(hadm_id, cfg, **kwargs)
+
+        decision_model_match = first.decision_model == second.decision_model
+        decision_rule_match = first.decision_rule == second.decision_rule
+        grounds_match = (
+            first.mitigating_grounds == second.mitigating_grounds
+            and first.aggravating_grounds == second.aggravating_grounds
+        )
+        n_decision_model += int(decision_model_match)
+        n_decision_rule += int(decision_rule_match)
+        n_grounds += int(grounds_match)
+        if not (decision_model_match and decision_rule_match and grounds_match):
+            disagreements.append(hadm_id)
+
+    n = len(hadm_ids)
+    return {
+        "n": n,
+        "decision_model_agreement": n_decision_model / n if n else 0.0,
+        "decision_rule_agreement": n_decision_rule / n if n else 0.0,
+        "grounds_agreement": n_grounds / n if n else 0.0,
+        "disagreements": disagreements,
+    }
 
 
 def main() -> None:

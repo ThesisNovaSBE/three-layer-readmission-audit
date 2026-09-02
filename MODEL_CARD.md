@@ -99,8 +99,10 @@ All Stage 1+2 recall figures are relative to the 11,186 positives *within the no
 
 ## Stage 3 — Independent LLM Audit (phi4-mini)
 
-Rewritten 2026-08-25. Stage 3 is on-demand (one patient per call, via the
-API), not yet run in batch. For each patient, phi4-mini receives:
+Rewritten 2026-08-25, extended 2026-08-28. Available both on-demand (one
+patient per call, via the API) and in batch (`src/stage3/batch.py`, every
+Stage 1-flagged, note-covered admission). For each patient, phi4-mini
+receives:
 - Stage 1's score + top-k SHAP-ranked structured risk factors
 - Stage 2's independently-derived, note-based score
 - A quantitatively pre-computed discordance mode (never chosen by the LLM)
@@ -114,14 +116,22 @@ narrate or classify a decision Stage 2 already made.
 
 | Field | Description |
 |-------|-------------|
-| `decision` | `uphold` / `override` — phi4-mini's own judgment |
-| `primary_clinical_domain` | Dominant clinical domain behind the decision |
+| `mitigating_grounds`, `aggravating_grounds` | Two-sided grounds the model extracted from the note, each with its own verified quote |
+| `decision_model` | `uphold` / `override` / `insufficient_evidence` — the model's own judgment |
+| `decision_rule` | The same three-way decision, recomputed deterministically in code from the extracted grounds — a consistency check, not a second model opinion |
+| `all_quotes_verified` | True only if every extracted ground's quote was found verbatim in the note |
+| `planned_return` | Independent yes/no/not_stated field on whether the note documents a scheduled return |
 | `clinical_justification` | 2-4 sentence justification citing note content |
 | `r1`, `r2`, `displacement`, `discordance_mode` | Quantitative context (percentile ranks + mode), computed before the LLM call |
+| `note_truncated`, `model_name` | Logged per row for truncation/scale-comparison analysis |
 
-**Clinical domain taxonomy:**
-`social_support` · `frailty` · `palliative_intent` · `care_coordination` ·
-`clinical_trajectory` · `other`
+**Grounds taxonomy** (fixed list; a ground outside it, or with an empty
+quote, is a parse failure, not a new category):
+- *Mitigating:* `palliative_intent` · `planned_return` ·
+  `strong_discharge_support` · `structured_driver_contradicted`
+- *Aggravating:* `lives_alone_no_support` · `no_followup_arranged` ·
+  `functional_dependence` · `cognitive_impairment` · `nonadherence_risk` ·
+  `unstable_at_discharge`
 
 **Discordance mode** is computed from percentile-rank displacement of
 stage1_score vs. stage2_score within the flagged+noted cohort — not raw
@@ -131,10 +141,11 @@ calibration between the two model families (see `docs/ARCHITECTURE.md`).
 **Research contribution:** No prior work in the literature review's
 49-study systematic search uses an LLM as an independent auditor of another
 model's output (as opposed to predictor, feature extractor, or explainer of
-its own prediction). A batch runner producing Stage 3 decisions across the
-full test partition — needed to evaluate RQ2 (net reclassification vs.
-structured triage) and RQ3 (disagreement characterisation) at scale — does
-not exist yet; see `docs/ARCHITECTURE.md` §4.
+its own prediction). `src/stage3/batch.py:run_batch_audit` produces Stage 3
+decisions across every Stage 1-flagged, note-covered admission — needed to
+evaluate RQ2 (net reclassification vs. structured triage) and characterise
+disagreement at scale — but has not yet been *run* at full scale, pending
+the Stage 1/Stage 2 retrain; see `docs/ARCHITECTURE.md` §4.
 
 ## Limitations
 

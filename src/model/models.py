@@ -4,8 +4,10 @@ Algorithms (selected via config ``stage1.model``):
 
 - ``logistic_regression``: L2 + class_weight="balanced", interpretable baseline
   (imputation + scaling done inside a Pipeline → per-fold, no leakage)
-- ``xgboost``: hist tree method (CPU), eval_metric="aucpr",
-  scale_pos_weight = neg/pos, n_estimators via early stopping
+- ``xgboost``: hist tree method, eval_metric="aucpr", scale_pos_weight =
+  neg/pos, n_estimators via early stopping. Device (CPU by default, CUDA on
+  request via ``stage1.device``) controls which processor runs it, not the
+  algorithm or search quality -- see ``build_estimator``.
 - ``histgradientboosting``: fast sklearn GBT, native NaN handling,
   class_weight="balanced"
 """
@@ -122,6 +124,7 @@ def build_estimator(
         return XGBClassifier(
             n_estimators=cfg.stage1.n_estimators_cap,
             tree_method="hist",
+            device=cfg.stage1.device,
             eval_metric="aucpr",
             early_stopping_rounds=cfg.stage1.early_stopping_rounds,
             scale_pos_weight=scale_pos_weight(y_train),

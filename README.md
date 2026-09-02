@@ -76,7 +76,7 @@ pip install -r requirements.txt
 python -m src.model.train
 
 # 4. Stage 2: fine-tune Clinical-Longformer on discharge notes
-#    GPU/HPC (recommended): sbatch train_stage2.sh          — see docs/HPC_DEPLOYMENT.md
+#    GPU/HPC (recommended): sbatch train_stage2.sh          — see below
 #    Local GPU:              python setup_stage2.py --mode full
 python setup_stage2.py --mode full
 
@@ -101,7 +101,10 @@ squeue -u $USER
 tail -f /projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_<jobid>.log
 ```
 
-Full setup guide (SSH config, data transfer, conda env, crash recovery): **`docs/HPC_DEPLOYMENT.md`**
+`train_stage2.sh` includes pre-flight checks (Stage 1 artifact, local model
+cache, MIMIC-IV-Note path, CUDA) that fail fast with a clear message before
+the expensive part of the job starts — read its header before adapting it
+to a different cluster.
 
 ---
 
@@ -185,8 +188,7 @@ The dashboard has two views:
 ├── tests/                       # Unit & integration tests
 ├── docs/
 │   ├── ARCHITECTURE.md          # Current pipeline design — read this first
-│   ├── MODELING_PLAN.md         # Stage 1 modeling strategy
-│   └── HPC_DEPLOYMENT.md        # GWDG KISSKI cluster setup guide
+│   └── MODELING_PLAN.md         # Stage 1 modeling strategy
 ├── data/                        # LOCAL ONLY — gitignored
 └── models/                      # Trained artifacts — gitignored
 ```

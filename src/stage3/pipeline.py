@@ -12,7 +12,10 @@ reach its own decision:
   independently-derived, note-only risk estimate — evidence for the auditor,
   not a decision it explains.
 * **Stage 3** (phi4-mini via Ollama): reads the discharge note plus both
-  scores and returns its own uphold/override judgment with a justification.
+  scores, extracts mitigating/aggravating grounds with quotes, and returns
+  its own uphold/override/insufficient_evidence judgment with a
+  justification — alongside ``decision_rule``, the same decision
+  recomputed deterministically in code from the extracted grounds.
 
 Usage::
 
@@ -21,7 +24,7 @@ Usage::
 
     cfg = load_config()
     result = explain_patient(hadm_id=<hadm_id>, cfg=cfg)
-    print(result.decision, result.clinical_justification)
+    print(result.decision_model, result.clinical_justification)
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from src.data.features import load_feature_matrix
 from src.schemas import TARGET_COL
 from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
-from src.stage3.explain import build_prompt, call_llm, compute_discordance
+from src.stage3.explain import build_prompt, call_llm, compute_discordance, is_note_truncated
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
 
@@ -171,6 +174,8 @@ def explain_patient(
     artifact: dict | None = None,
     feature_matrix: pd.DataFrame | None = None,
     model_name: str | None = None,
+    suppress_note: bool = False,
+    suppress_stage2: bool = False,
 ) -> ExplanationResult:
     """Generate a Stage 3 explanation for one patient on demand.
 
@@ -189,6 +194,15 @@ def explain_patient(
                         ``cfg.stage3.ollama_model``. Pass
                         ``cfg.stage3.robustness_model`` to run the same
                         patient through the scale-robustness arm instead.
+        suppress_note:  blind-note validation control (session 19 Phase D1)
+                        — withhold the discharge note (and attention spans)
+                        from the prompt. The returned result still reports
+                        the real stage1_score/stage2_score/etc. for
+                        comparison against the real audit of the same
+                        patient; only what the LLM was shown differs.
+        suppress_stage2: no-Stage-2 validation control (Phase D2) — withhold
+                        Stage 2's score and the discordance section from the
+                        prompt. Same real-values-reported caveat as above.
 
     Returns:
         :class:`ExplanationResult` with all fields populated.
@@ -221,16 +235,29 @@ def explain_patient(
         displacement_pp=cfg.stage3.discordance_displacement_pp,
     )
 
+    # Validation controls (session 19): what the LLM is SHOWN differs; what
+    # gets reported (stage1/stage2 scores, discordance) stays the real
+    # values, so the control's output is comparable to the real audit of the
+    # same patient. suppress_note also blanks note_text end to end (prompt
+    # AND quote-verification/decision_rule input) -- simulates "this
+    # admission had no note", not "the model saw a note but pretend it didn't".
+    prompt_note_text = "" if suppress_note else note_text
+    prompt_attention = [] if suppress_note else attention_sentences
+
     prompt = build_prompt(
         stage1_score=patient["stage1_score"],
         stage1_threshold=patient["stage1_threshold"],
         stage2_score=patient["stage2_score"],
         discordance=discordance,
         shap_feature_strings=shap_strings,
-        note_text=note_text,
-        attention_sentences=attention_sentences,
+        note_text=prompt_note_text,
+        attention_sentences=prompt_attention,
+        hide_stage2=suppress_stage2,
     )
-    annotation = call_llm(prompt, cfg, model_name=model_name)
+    resolved_model_name = model_name or cfg.stage3.ollama_model
+    annotation = call_llm(
+        prompt, cfg, model_name=resolved_model_name, note_text=prompt_note_text
+    )
 
     return ExplanationResult(
         hadm_id=patient["hadm_id"],
@@ -244,9 +271,15 @@ def explain_patient(
         discordance_mode=str(discordance["mode"]),
         top_shap_features=shap_strings,
         attention_sentences=attention_sentences,
-        decision=annotation["decision"],
-        primary_clinical_domain=annotation["primary_clinical_domain"],
+        mitigating_grounds=annotation["mitigating_grounds"],
+        aggravating_grounds=annotation["aggravating_grounds"],
+        all_quotes_verified=annotation["all_quotes_verified"],
+        planned_return=annotation["planned_return"],
         clinical_justification=annotation["clinical_justification"],
+        decision_model=annotation["decision_model"],
+        decision_rule=annotation["decision_rule"],
+        note_truncated=is_note_truncated(note_text),
+        model_name=resolved_model_name,
         annotation_failed=annotation["annotation_failed"],
     )
 
