@@ -37,7 +37,12 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=<email-removed>
 
-set -euo pipefail
+set -eo pipefail
+# Deliberately no -u (nounset): thesis-env's MKL conda activation hook
+# (libblas_mkl_activate.sh) references $MKL_INTERFACE_LAYER without a
+# default, which -u treats as a fatal error and kills the job before it
+# even reaches this script's own commands (confirmed 2026-09-02 -- a real
+# job died in 25s with exactly this error, no script output at all).
 
 # ── Environment ──────────────────────────────────────────────────────────────
 module load miniforge3/24.3.0-0

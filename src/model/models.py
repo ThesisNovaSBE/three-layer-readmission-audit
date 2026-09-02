@@ -14,6 +14,8 @@ Algorithms (selected via config ``stage1.model``):
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
@@ -121,6 +123,14 @@ def build_estimator(
         ])
 
     if name == "xgboost":
+        # Split the allocated CPUs across concurrent trials instead of
+        # letting every trial's XGBClassifier request all of them (n_jobs=-1)
+        # -- with tune.py's tune_n_jobs > 1 running several trials at once,
+        # each grabbing every core oversubscribes badly (e.g. 8 concurrent
+        # trials x -1 on a 16-cpu allocation = up to 128 threads contending
+        # for 16 cores). tune_n_jobs defaults to 1 for train.py/evaluate.py's
+        # single-fit calls, so this is equivalent to -1 (all cores) there.
+        xgb_n_jobs = max(1, (os.cpu_count() or 1) // max(cfg.stage1.tune_n_jobs, 1))
         return XGBClassifier(
             n_estimators=cfg.stage1.n_estimators_cap,
             tree_method="hist",
@@ -129,7 +139,7 @@ def build_estimator(
             early_stopping_rounds=cfg.stage1.early_stopping_rounds,
             scale_pos_weight=scale_pos_weight(y_train),
             random_state=seed,
-            n_jobs=-1,
+            n_jobs=xgb_n_jobs,
             **params,
         )
 
