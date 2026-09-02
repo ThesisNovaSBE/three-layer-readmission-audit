@@ -13,15 +13,15 @@
 # in session 21 pending confirmation -- confirmed now via the other two
 # scripts, so fixed here rather than risking a wasted submission.
 #
-# Estimated wall time: previously ~4 h using 16 CPU cores only -- the script
-# requested a GPU node but XGBoost never actually used it (tree_method
-# was CPU-only). Now passes --device cuda so the GPU is genuinely engaged,
-# and --tune-n-jobs 8 runs 8 trials concurrently against it (a single fit on
-# this dataset is small relative to an A100 -- one trial at a time leaves
-# most of the GPU idle). 8 is a starting point sized to the 16 CPUs below,
-# not a tuned value; watch `nvidia-smi` during a run and adjust. No measured
-# wall-time for either change yet, so --time is left with headroom until a
-# real run establishes one. Adjust --time down once you have that number.
+# Measured wall time (job 15700645, 2026-09-02): 140/400 trials in ~7.5h with
+# --tune-n-jobs 8 (39% GPU util, confirmed via nvidia-smi -- device=cuda is
+# genuinely engaged) -> ~19 trials/hour -> the full 400 needs ~21h total, not
+# 8h. That job hit the time limit and was killed; --time bumped to 24h below
+# to cover the remaining ~260 trials plus retrain/eval with margin. This is
+# resumable regardless (JournalFileBackend + load_if_exists in tune.py) --
+# resubmitting unchanged picks up from whatever trial count is already
+# recorded in models/optuna_stage1_xgboost_journal.log rather than
+# restarting, so a too-short --time only costs the wait, never the progress.
 
 #SBATCH --job-name=thesis_stage1_tune
 #SBATCH --partition=kisski
@@ -31,7 +31,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.err
 #SBATCH --mail-type=END,FAIL
