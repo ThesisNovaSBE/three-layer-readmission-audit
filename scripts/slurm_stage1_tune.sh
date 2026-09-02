@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
-# GWDG Grete SLURM submission — Stage 1 Optuna tune → train → evaluate
+# GWDG KISSKI SLURM submission — Stage 1 Optuna tune → train → evaluate
 #
-# Usage (from repo root on the login node):
+# Usage (from ~/thesis on the login node):
 #   sbatch scripts/slurm_stage1_tune.sh
 #
+# Partition/module/env match the confirmed-working train_stage2.sh and
+# diagnose_cluster.sh (2026-08-29 fix) -- this script previously guessed at
+# a separate "Grete"/a100 partition and anaconda3/thesis env that don't
+# match this project's actual cluster setup (there is only the kisski
+# partition; session 11's cluster log confirms module load miniforge3 +
+# conda activate thesis-env). That mismatch was flagged but left unfixed
+# in session 21 pending confirmation -- confirmed now via the other two
+# scripts, so fixed here rather than risking a wasted submission.
+#
 # Estimated wall time: previously ~4 h using 16 CPU cores only -- the script
-# requested this A100 node but XGBoost never actually used it (tree_method
+# requested a GPU node but XGBoost never actually used it (tree_method
 # was CPU-only). Now passes --device cuda so the GPU is genuinely engaged,
 # and --tune-n-jobs 8 runs 8 trials concurrently against it (a single fit on
 # this dataset is small relative to an A100 -- one trial at a time leaves
@@ -15,32 +24,31 @@
 # real run establishes one. Adjust --time down once you have that number.
 
 #SBATCH --job-name=thesis_stage1_tune
-#SBATCH --partition=a100
+#SBATCH --partition=kisski
+#SBATCH --gres=gpu:A100:1
+#SBATCH -C 80gb_vram
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:a100:1
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
-#SBATCH --output=logs/slurm_%j_stage1_tune.out
-#SBATCH --error=logs/slurm_%j_stage1_tune.err
+#SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.log
+#SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.err
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=<email-removed>
 
 set -euo pipefail
 
 # ── Environment ──────────────────────────────────────────────────────────────
-module purge
-module load anaconda3
-conda activate thesis 2>/dev/null || source activate thesis
+module load miniforge3
+eval "$(conda shell.bash hook)"
+conda activate thesis-env
 
-export PYTHONPATH="${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
-cd "${SLURM_SUBMIT_DIR}"
-
-mkdir -p logs
+cd ~/thesis
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 echo "[slurm] Job ${SLURM_JOB_ID} started on $(hostname) at $(date)"
-echo "[slurm] Repo: ${SLURM_SUBMIT_DIR}"
+echo "[slurm] Repo: $(pwd)"
 echo "[slurm] Git: $(git rev-parse --short HEAD)"
 
 # ── Step 1: rebuild feature matrix (idempotent; skips if up-to-date) ─────────
