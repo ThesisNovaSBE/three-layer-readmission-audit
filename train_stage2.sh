@@ -15,7 +15,7 @@ set -e          # exit immediately if any command fails
 set -o pipefail # catch errors inside pipes
 
 # ── Environment ──────────────────────────────────────────────
-module load miniforge3
+module load miniforge3/24.3.0-0
 eval "$(conda shell.bash hook)"   # initialise conda shell functions without needing `conda init`
 conda activate thesis-env
 cd ~/thesis

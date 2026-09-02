@@ -24,11 +24,11 @@ echo "======================================================"
 echo ""
 
 # ── 1. Module load ─────────────────────────────────────────
-echo "--- 1. module load miniforge3 ---"
-if module load miniforge3 2>&1; then
-    echo "$PASS module load miniforge3"
+echo "--- 1. module load miniforge3/24.3.0-0 ---"
+if module load miniforge3/24.3.0-0 2>&1; then
+    echo "$PASS module load miniforge3/24.3.0-0"
 else
-    echo "$FAIL module load miniforge3"
+    echo "$FAIL module load miniforge3/24.3.0-0"
     echo "  Available modules matching conda/python/mini:"
     module avail 2>&1 | grep -i -E "conda|mini|python|anaconda" || echo "  (none found)"
 fi

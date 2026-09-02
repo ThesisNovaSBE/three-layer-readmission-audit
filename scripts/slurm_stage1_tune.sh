@@ -40,7 +40,7 @@
 set -euo pipefail
 
 # ── Environment ──────────────────────────────────────────────────────────────
-module load miniforge3
+module load miniforge3/24.3.0-0
 eval "$(conda shell.bash hook)"
 conda activate thesis-env
 
