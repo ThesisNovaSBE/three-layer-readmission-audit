@@ -20,8 +20,15 @@
 # to cover the remaining ~260 trials plus retrain/eval with margin. This is
 # resumable regardless (JournalFileBackend + load_if_exists in tune.py) --
 # resubmitting unchanged picks up from whatever trial count is already
-# recorded in models/optuna_stage1_xgboost_journal.log rather than
+# recorded in models/optuna_stage1_xgboost_<target>_journal.log rather than
 # restarting, so a too-short --time only costs the wait, never the progress.
+#
+# 2026-09-04: killed that run anyway and started over -- the model's target
+# was switched from all-cause to unplanned readmission (src/schemas.py's
+# MODEL_TARGET_COL), which the ~290-trial journal above was NOT searched
+# against. tune.py now tags the journal filename/study name with the target
+# so this can't happen silently again; this run starts a genuinely fresh
+# study under a new filename rather than resuming the old (wrong-target) one.
 
 #SBATCH --job-name=thesis_stage1_tune
 #SBATCH --partition=kisski

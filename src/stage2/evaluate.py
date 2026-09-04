@@ -32,7 +32,9 @@ from sklearn.metrics import (
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import TARGET_COL
+# Aliased: Stage 2 must evaluate against the same target Stage 1 uses
+# (MODEL_TARGET_COL, unplanned readmission per src/schemas.py).
+from src.schemas import MODEL_TARGET_COL as TARGET_COL
 from src.stage2._utils import band_key
 
 

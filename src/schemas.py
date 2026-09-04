@@ -59,5 +59,18 @@ TARGET_COL = "readmission_30d"
 # input, same as TARGET_COL.
 TARGET_COL_UNPLANNED = "readmission_30d_unplanned"
 
+# The column actually used as the model's y everywhere -- Stage 1's
+# split_xy() and every Stage 2 module that reads "TARGET_COL" as the
+# fine-tuning/calibration/evaluation label. TARGET_COL/TARGET_COL_UNPLANNED
+# above are the two literal columns compute_readmission_label() computes and
+# writes into the feature matrix; this picks which one is "the" target.
+# Set to TARGET_COL_UNPLANNED (2026-09-04): MODELING_PLAN.md/
+# THESIS_NARRATIVE.md/MODEL_CARD.md have always stated the study targets
+# unplanned readmission, but every training run before this one silently
+# used the all-cause column instead -- caught during a pre-flight audit
+# before an expensive retrain, not before. Change only this line to switch
+# the whole pipeline's target back.
+MODEL_TARGET_COL = TARGET_COL_UNPLANNED
+
 # Columns kept only for fairness/subgroup analysis (not model inputs).
 SUBGROUP_COLS = ["gender", "age_band"]
