@@ -157,9 +157,15 @@ def _build_age_stratified_sample(
             continue
         n_take = min(n_target, len(cell))
         if n_take < n_target:
+            shortfall_pct = 100 * (1 - n_take / n_target)
+            severity = "WARNING" if shortfall_pct > 5 else "note"
             print(
-                f"  [stage2/train] Cell {key}: {len(cell):,} available "
-                f"(target {n_target:,}) — using all"
+                f"  [stage2/train] {severity}: cell {key} short by "
+                f"{shortfall_pct:.0f}% -- {len(cell):,} available vs "
+                f"{n_target:,} targeted (using all available). If this is "
+                f"large and unexpected, age_group_train_targets in "
+                f"config.yaml may need re-deriving against the current "
+                f"data/label (see the comment above that config block)."
             )
         parts.append(cell.sample(n=n_take, random_state=seed))
 

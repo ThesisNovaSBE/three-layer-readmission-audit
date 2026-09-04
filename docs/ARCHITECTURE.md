@@ -443,8 +443,6 @@ session 17.
 - **Bootstrap CIs not yet in `evaluate_pipeline.py`** — `evaluate.py` and
   `compare_layers.py` have them; the cascade's full/notes-cohort pipeline
   numbers still don't.
-- **`readmission_30d_unplanned` not yet used anywhere** — the column exists
-  in the feature matrix but no script trains or evaluates against it yet.
 - Feature audit (vitals missingness, lab itemid validation against
   `d_labitems`) — not touched.
 - **Included-vs-excluded (notes-covered vs. not) selection-bias table** —
@@ -509,14 +507,43 @@ session 17.
 - Stage 1's decision threshold is still selected on the same OOF/validation
   data used for early-stopping — a mild contamination risk flagged once in
   an earlier review and never revisited. Still open.
-- `readmission_30d_unplanned` (label-level, `src/data/features.py`) only
-  catches planned returns visible in `admission_type` (elective / same-day
-  surgical) — a structured-data proxy. Planned returns not reflected there
-  (e.g. informally scheduled follow-up admissions) are not caught there.
-  Stage 3's `planned_return` field (added 2026-08-28, §2 above) now gives an
-  LLM-extracted, note-based answer to the same question at audit time — but
-  the two are not yet cross-checked against each other; whether they agree,
-  and what to do when they don't, is unexamined.
+- `readmission_30d_unplanned` (label-level, `src/data/features.py`, now the
+  model's actual target via `MODEL_TARGET_COL` — see below) only catches
+  planned returns visible in `admission_type` (elective / same-day
+  surgical) — a structured-data proxy, not CMS's full ICD-procedure/
+  diagnosis-code-based Planned Readmission Algorithm. Planned returns not
+  reflected in `admission_type` (e.g. informally scheduled follow-up
+  admissions) are not caught. This is not an ad hoc simplification, though
+  — it matches the operationalization used by at least one peer-reviewed
+  MIMIC-IV benchmark pipeline (Extensive Data Processing Pipeline for
+  MIMIC-IV, arXiv:2204.13841) and informal MIMIC community convention
+  (MIT-LCP/mimic-code discussion #1215), and Rajkomar et al. 2018 (the most
+  rigorous "unplanned" precedent in this project's own citation list, see
+  MODELING_PLAN.md) explicitly states there is no single standard
+  definition in the field. Separately, and NOT addressed by this proxy
+  either way: this project's cohort does not exclude OBSERVATION-type
+  stays from the readmission count at all, whereas CMS's measure excludes
+  them from the denominator entirely (they aren't billed inpatient
+  admissions) — a scope question distinct from the planned/unplanned
+  distinction, disclosed here rather than fixed, since resolving it would
+  mean re-deriving the cohort definition, not just the label (confirmed
+  2026-09-04, alongside the switch of the model's actual target from
+  all-cause to this column). Stage 3's `planned_return` field (added
+  2026-08-28, §2 above) now gives an LLM-extracted, note-based answer to
+  the same question at audit time — but the two are not yet cross-checked
+  against each other; whether they agree, and what to do when they don't,
+  is unexamined.
+- `MODEL_TARGET_COL` (`src/schemas.py`) is the single switch controlling
+  which label column (`TARGET_COL`/all-cause vs `TARGET_COL_UNPLANNED`)
+  every training/eval script actually uses — set to unplanned as of
+  2026-09-04. Before that, every Stage 1 model this project ever produced
+  (including the original artifact and several retraining attempts)
+  silently trained on all-cause despite every scope-level doc
+  (`MODELING_PLAN.md`, `THESIS_NARRATIVE.md`, `MODEL_CARD.md`) stating the
+  study targets unplanned readmission — caught during a pre-flight audit,
+  not before. If retraining ever needs to compare against the all-cause
+  label again, change only this one constant; every consumer (Stage 1's
+  `split_xy()`, every Stage 2 module) follows it automatically.
 - Truncation asymmetry between Stage 2 (4096 tokens) and Stage 3 (now a
   20,000-character safety cap, effectively near-full note) is much smaller
   than before session 15 but not eliminated for pathologically long notes.

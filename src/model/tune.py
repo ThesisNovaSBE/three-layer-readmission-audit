@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import numpy as np
 
@@ -55,10 +56,10 @@ from src.model.splits import grouped_train_test_split, make_cv
 from src.schemas import MODEL_TARGET_COL
 
 # Short, filename-safe tag identifying which label a study/journal file
-# belongs to. "unplanned"/"allcause" rather than the raw column name so a
-# switch between the two can never accidentally collide on the same journal
-# file and silently resume trials optimized against a different target.
-_TARGET_TAG = "unplanned" if MODEL_TARGET_COL.endswith("_unplanned") else "allcause"
+# belongs to -- derived directly from MODEL_TARGET_COL (not a suffix/name
+# guess) so a THIRD future label variant can't silently collide with an
+# existing tag the way a hardcoded "unplanned"/"allcause" binary would.
+_TARGET_TAG = re.sub(r"[^a-z0-9]+", "", MODEL_TARGET_COL.lower())
 
 
 def _load_or_create_study(model_dir, name: str, seed: int) -> optuna.Study:

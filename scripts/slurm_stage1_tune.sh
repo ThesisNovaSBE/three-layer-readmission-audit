@@ -63,15 +63,16 @@ echo "[slurm] Job ${SLURM_JOB_ID} started on $(hostname) at $(date)"
 echo "[slurm] Repo: $(pwd)"
 echo "[slurm] Git: $(git rev-parse --short HEAD)"
 
-# ── Step 1: rebuild feature matrix (idempotent; skips if up-to-date) ─────────
+# ── Step 1: rebuild feature matrix (always rebuilds -- no staleness check) ───
 echo "[slurm] Building feature matrix …"
 python -m src.data.features --mode full
 
 # ── Step 2: Optuna hyperparameter search (400 trials) ────────────────────────
-# Stored in models/optuna_stage1_xgboost_journal.log — resumable if job is
-# preempted (resubmit unchanged; run_study() picks up recorded trials
-# automatically). File-backed, not sqlite -- sqlite's locking is unreliable
-# on this filesystem, especially with concurrent trials (see tune.py).
+# Stored in models/optuna_stage1_xgboost_<target>_journal.log (the filename
+# embeds which label was searched against -- see tune.py) — resumable if
+# job is preempted (resubmit unchanged; run_study() picks up recorded
+# trials automatically). File-backed, not sqlite -- sqlite's locking is
+# unreliable on this filesystem, especially with concurrent trials.
 echo "[slurm] Running Optuna tune (400 trials, GPU, 8 concurrent) …"
 python -m src.model.tune --mode full --device cuda --tune-n-jobs 8
 
