@@ -24,6 +24,13 @@ cd ~/thesis
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
+# dataloader_num_workers=8 (config.yaml) forks 8 worker processes that each
+# touch the fast (Rust-backed) tokenizer -- a known combination that warns
+# or, on some versions/platforms, deadlocks under fork-based multiprocessing
+# (the default on Linux). Disabling is the standard fix and has no downside
+# here (tokenization is CPU-light relative to the model forward pass).
+export TOKENIZERS_PARALLELISM=false
+
 # ── Pre-flight checks ────────────────────────────────────────
 echo "=== Pre-flight checks ==="
 echo "Job ID:  $SLURM_JOB_ID"
