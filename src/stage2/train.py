@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import time
 from dataclasses import dataclass
 
 import joblib
@@ -52,7 +53,9 @@ except ImportError as _torch_err:
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import TARGET_COL
+# Aliased: Stage 2 must train on the same target Stage 1 uses
+# (MODEL_TARGET_COL, unplanned readmission per src/schemas.py).
+from src.schemas import MODEL_TARGET_COL as TARGET_COL
 from src.stage2._utils import band_key
 from src.stage2.dataset import ClinicalNotesDataset, build_notes_dataframe, load_notes
 from src.stage2.splits import build_splits
@@ -154,9 +157,15 @@ def _build_age_stratified_sample(
             continue
         n_take = min(n_target, len(cell))
         if n_take < n_target:
+            shortfall_pct = 100 * (1 - n_take / n_target)
+            severity = "WARNING" if shortfall_pct > 5 else "note"
             print(
-                f"  [stage2/train] Cell {key}: {len(cell):,} available "
-                f"(target {n_target:,}) — using all"
+                f"  [stage2/train] {severity}: cell {key} short by "
+                f"{shortfall_pct:.0f}% -- {len(cell):,} available vs "
+                f"{n_target:,} targeted (using all available). If this is "
+                f"large and unexpected, age_group_train_targets in "
+                f"config.yaml may need re-deriving against the current "
+                f"data/label (see the comment above that config block)."
             )
         parts.append(cell.sample(n=n_take, random_state=seed))
 
@@ -219,8 +228,25 @@ def _checkpoint_step(path) -> int:
     return int(path.name.rsplit("-", 1)[-1])
 
 
-def _find_resume_checkpoint(checkpoint_dir) -> str | None:
-    """Return the path of the latest checkpoint, or None if none exist.
+def _run_fingerprint(train_df: pd.DataFrame, hp: "_TrainHparams") -> dict:
+    """Identify which data/config a checkpoint directory was trained under.
+
+    Compared against a saved fingerprint before resuming (below) so a
+    checkpoint dir left over from a *different* run (different label column,
+    different training-sample size/composition, different model/sequence
+    length) can never be silently resumed from as if it were this run.
+    """
+    return {
+        "n_train": int(len(train_df)),
+        "target_col": TARGET_COL,
+        "max_seq_length": hp.max_length,
+        "model_name": hp.model_name,
+    }
+
+
+def _find_resume_checkpoint(checkpoint_dir, fingerprint: dict) -> str | None:
+    """Return the path of the latest checkpoint, or None if none exist or
+    the existing ones don't match this run.
 
     Called before ``trainer.train()`` to enable automatic crash recovery —
     if training is interrupted, restarting the script resumes from the last
@@ -230,14 +256,45 @@ def _find_resume_checkpoint(checkpoint_dir) -> str | None:
     HuggingFace names checkpoints ``checkpoint-<step>`` with no zero-padding,
     so a plain string sort orders "checkpoint-1500" before "checkpoint-500"
     and would silently resume from an older checkpoint than the true latest.
+
+    Before trusting any checkpoint found, compares ``fingerprint`` against a
+    ``RUN_FINGERPRINT.json`` saved alongside it. A mismatch (or no fingerprint
+    at all, e.g. checkpoints left over from before this check existed) means
+    the checkpoints belong to a different run -- e.g. this project's Stage 1
+    artifact was rsync'd onto the cluster as a plain directory, not a git
+    clone, so gitignored dirs like this one can silently carry over stale
+    state across unrelated runs. Stale checkpoints are moved aside rather
+    than resumed from or silently overwritten.
     """
+    fp_path = checkpoint_dir / "RUN_FINGERPRINT.json"
     if checkpoint_dir.exists():
         existing = sorted(checkpoint_dir.glob("checkpoint-*"), key=_checkpoint_step)
         if existing:
-            print(f"[stage2/train] Resuming from checkpoint: {existing[-1].name}")
-            return str(existing[-1])
+            cached = json.loads(fp_path.read_text()) if fp_path.exists() else None
+            if cached == fingerprint:
+                print(f"[stage2/train] Resuming from checkpoint: {existing[-1].name}")
+                return str(existing[-1])
+            stale_dir = checkpoint_dir.parent / f"{checkpoint_dir.name}_stale_{int(time.time())}"
+            checkpoint_dir.rename(stale_dir)
+            print(
+                f"[stage2/train] Checkpoints under {checkpoint_dir.name} don't "
+                f"match this run (found={cached}, expected={fingerprint}) -- "
+                f"moved aside to {stale_dir.name}, starting fresh."
+            )
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    fp_path.write_text(json.dumps(fingerprint, indent=2))
     print("\n[stage2/train] Starting fine-tuning from scratch ...")
     return None
+
+
+def _prepare_resume(model_dir, train_df: pd.DataFrame, hp: "_TrainHparams") -> str | None:
+    """Compute this run's fingerprint and return a checkpoint path to resume
+    from, if a valid (matching) one exists. Thin wrapper kept separate from
+    ``train_stage2`` purely to keep that function's local-variable count
+    under the project's pylint limit.
+    """
+    fingerprint = _run_fingerprint(train_df, hp)
+    return _find_resume_checkpoint(model_dir / "stage2_checkpoints", fingerprint)
 
 
 def _compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
@@ -447,9 +504,7 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
         callbacks=[EarlyStoppingCallback(early_stopping_patience=hp.patience)],
     )
 
-    trainer.train(
-        resume_from_checkpoint=_find_resume_checkpoint(model_dir / "stage2_checkpoints")
-    )
+    trainer.train(resume_from_checkpoint=_prepare_resume(model_dir, train_df, hp))
 
     _save_results(trainer, val_dataset, model_dir, tokenizer)
     print("[stage2/train] Done. Run calibrate.py next.")

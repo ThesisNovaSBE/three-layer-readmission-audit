@@ -55,7 +55,7 @@ def _load_stage1_test(artifact: dict, cfg: AppConfig) -> pd.DataFrame:
     return pd.DataFrame({
         "hadm_id": matrix.iloc[idx]["hadm_id"].to_numpy(),
         "subject_id": groups[idx],
-        "readmission_30d": y[idx],
+        "readmission_30d_unplanned": y[idx],
         "stage1_score": stage1_score,
     })
 
@@ -137,7 +137,7 @@ def compare_layers(cfg: AppConfig) -> dict:
     print(f"[compare_layers] Joined (notes-covered) population: {len(joined):,} / "
           f"{len(stage1_df):,} Stage 1 test admissions ({coverage:.1%} note coverage)")
 
-    y = joined["readmission_30d"].to_numpy()
+    y = joined["readmission_30d_unplanned"].to_numpy()
     groups = joined["subject_id"].to_numpy()
     s1_scores = joined["stage1_score"].to_numpy()
     s2_scores = joined["stage2_score"].to_numpy()
@@ -151,7 +151,7 @@ def compare_layers(cfg: AppConfig) -> dict:
     stage1_notes_cohort = _metrics_block(y, s1_scores, groups, artifact["threshold"])
     stage2_notes_cohort = _metrics_block(y, s2_scores, groups, stage2_threshold)
 
-    y_full = stage1_df["readmission_30d"].to_numpy()
+    y_full = stage1_df["readmission_30d_unplanned"].to_numpy()
     stage1_full_population = _metrics_block(
         y_full, stage1_df["stage1_score"].to_numpy(),
         stage1_df["subject_id"].to_numpy(), artifact["threshold"],

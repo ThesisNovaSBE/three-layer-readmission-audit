@@ -24,7 +24,9 @@ except ImportError as _torch_err:
     ) from _torch_err
 
 from src.config_schema import AppConfig
-from src.schemas import TARGET_COL
+# Aliased: Stage 2 must train on the same target Stage 1 uses
+# (MODEL_TARGET_COL, unplanned readmission per src/schemas.py).
+from src.schemas import MODEL_TARGET_COL as TARGET_COL
 
 
 def load_notes(cfg: AppConfig, hadm_ids: set | None = None) -> pd.DataFrame:

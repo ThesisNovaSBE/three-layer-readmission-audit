@@ -79,7 +79,9 @@ from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
 from src.model.calibration import apply_calibration
-from src.schemas import TARGET_COL
+# Aliased: Stage 2 must score/report against the same target Stage 1 uses
+# (MODEL_TARGET_COL, unplanned readmission per src/schemas.py).
+from src.schemas import MODEL_TARGET_COL as TARGET_COL
 from src.stage2._utils import band_key, get_stage2_model_path
 from src.stage2.dataset import ClinicalNotesDataset, build_notes_dataframe, load_notes
 

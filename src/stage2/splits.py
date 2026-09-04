@@ -15,7 +15,8 @@ Output (saved to data/processed/):
   stage2_val_hadm_ids.csv        — validation set (20 %)
   stage2_cal_hadm_ids.csv        — calibration set (20 %)
 
-Each file contains: hadm_id, subject_id, age_band, readmission_30d
+Each file contains: hadm_id, subject_id, age_band, and the model's target
+column (``MODEL_TARGET_COL`` in src/schemas.py — unplanned readmission).
 
 Usage::
 
@@ -26,15 +27,22 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from src.config import get_data_dir, get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import TARGET_COL
+# Aliased: Stage 2 must train/split on the same target Stage 1 uses
+# (MODEL_TARGET_COL, unplanned readmission per src/schemas.py) -- every
+# reference to TARGET_COL below already means "the model's target", so
+# aliasing here keeps this module's own code unchanged.
+from src.schemas import MODEL_TARGET_COL as TARGET_COL
 
 
 def build_splits(
@@ -52,22 +60,14 @@ def build_splits(
 
     Returns:
         Dict with keys ``"finetune"``, ``"val"``, ``"cal"`` — each a DataFrame
-        of ``(hadm_id, subject_id, age_band, readmission_30d)``.
+        of ``(hadm_id, subject_id, age_band, <model target column>)``.
+        Cached output is only reused if a saved fingerprint (Stage 1
+        ``train_idx`` hash + target column name) matches the current
+        artifact and target — otherwise it's rebuilt, even without
+        ``force=True``.
     """
     processed_dir = get_data_dir() / "processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
-
-    ft_path = processed_dir / "stage2_finetune_hadm_ids.csv"
-    val_path = processed_dir / "stage2_val_hadm_ids.csv"
-    cal_path = processed_dir / "stage2_cal_hadm_ids.csv"
-
-    if not force and ft_path.exists() and val_path.exists() and cal_path.exists():
-        print("[stage2/splits] Loading cached splits from data/processed/")
-        return {
-            "finetune": pd.read_csv(ft_path),
-            "val":      pd.read_csv(val_path),
-            "cal":      pd.read_csv(cal_path),
-        }
 
     seed = cfg.run.random_state
     val_frac = cfg.stage2.val_fraction
@@ -80,6 +80,10 @@ def build_splits(
 
     mode = artifact["mode"]
     train_idx = artifact["train_idx"]
+
+    cached = _load_cached_splits_if_fresh(processed_dir, train_idx, TARGET_COL, force)
+    if cached is not None:
+        return cached
 
     matrix = load_feature_matrix(cfg, mode)
     train_df = matrix.iloc[train_idx][
@@ -121,12 +125,64 @@ def build_splits(
     val_df = _get_hadm_ids(patients_val)
     cal_df = _get_hadm_ids(patients_cal)
 
-    ft_df.to_csv(ft_path, index=False)
-    val_df.to_csv(val_path, index=False)
-    cal_df.to_csv(cal_path, index=False)
+    ft_df.to_csv(processed_dir / "stage2_finetune_hadm_ids.csv", index=False)
+    val_df.to_csv(processed_dir / "stage2_val_hadm_ids.csv", index=False)
+    cal_df.to_csv(processed_dir / "stage2_cal_hadm_ids.csv", index=False)
+    (processed_dir / "stage2_splits_manifest.json").write_text(
+        json.dumps(_splits_fingerprint(train_idx, TARGET_COL), indent=2)
+    )
 
     _report(ft_df, val_df, cal_df)
     return {"finetune": ft_df, "val": val_df, "cal": cal_df}
+
+
+def _splits_fingerprint(train_idx, target_col: str) -> dict:
+    """Identify which Stage 1 split + label a cached set of Stage 2 splits
+    was built from, so a stale cache (e.g. left over from an earlier run on
+    a different or since-retrained Stage 1 artifact, or a different model
+    target) is detected and rebuilt instead of silently reused.
+    """
+    idx_hash = hashlib.sha256(np.asarray(train_idx).tobytes()).hexdigest()[:16]
+    return {
+        "train_idx_hash": idx_hash,
+        "n_train": int(len(train_idx)),
+        "target_col": target_col,
+    }
+
+
+def _load_cached_splits_if_fresh(
+    processed_dir, train_idx, target_col: str, force: bool
+) -> dict[str, pd.DataFrame] | None:
+    """Return cached Stage 2 splits if they exist and match the current
+    Stage 1 ``train_idx`` + target column, else ``None`` (caller rebuilds).
+    """
+    ft_path = processed_dir / "stage2_finetune_hadm_ids.csv"
+    val_path = processed_dir / "stage2_val_hadm_ids.csv"
+    cal_path = processed_dir / "stage2_cal_hadm_ids.csv"
+    manifest_path = processed_dir / "stage2_splits_manifest.json"
+
+    if force or not (ft_path.exists() and val_path.exists() and cal_path.exists()):
+        return None
+
+    current_fp = _splits_fingerprint(train_idx, target_col)
+    cached_fp = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+    if cached_fp != current_fp:
+        print(
+            f"[stage2/splits] Cached splits are STALE (cached={cached_fp}, "
+            f"current={current_fp}) -- rebuilding rather than risking a "
+            "silent train_idx/label mismatch."
+        )
+        return None
+
+    print(
+        "[stage2/splits] Loading cached splits from data/processed/ "
+        "(fingerprint matches current Stage 1 artifact + target)"
+    )
+    return {
+        "finetune": pd.read_csv(ft_path),
+        "val":      pd.read_csv(val_path),
+        "cal":      pd.read_csv(cal_path),
+    }
 
 
 def _report(

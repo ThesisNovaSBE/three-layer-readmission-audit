@@ -110,21 +110,38 @@ stage2:
   # fine-tune fraction = 0.60 (implicit: 1 - val - cal)
 
   # ── Age × label stratified sampling for fine-tune set ──
-  # Target note count per (age_band, readmission_30d) cell.
+  # Target note count per (age_band, readmission_30d_unplanned) cell.
   # 70+ is oversampled to address the recall gap found in the v1 model.
-  # Cells with fewer available notes than the target use all available notes.
-  # Total: ~249,000 notes (~99% of ~251k available) — scaled for A100 80GB on GWDG Grete.
-  # 70+ group is deliberately oversampled to address the recall gap found in the v1 model.
-  # Cells with fewer available notes than the target fall back to using all available.
+  #
+  # Recomputed 2026-09-04 against REAL local MIMIC-IV data (Stage 1's actual
+  # train-partition note-matched counts under the unplanned target -- not
+  # estimated). The previous numbers here (all-cause-era: 18-40_1=10000,
+  # 41-55_1=15000, 56-70_1=20000, 70+_1=30000, with _0 targets 25000/37000/
+  # 50000/62000) requested more positive notes than exist under ANY label,
+  # worst for 70+ (only 46.9% of its 30000 target actually available) -- and
+  # because the "_0" targets were simultaneously close to fully achievable,
+  # the silent per-cell fallback (_build_age_stratified_sample in
+  # src/stage2/train.py, "use all available if short") inverted the
+  # intended design: 70+ ended up the LEAST oversampled band (18.7%
+  # positive) instead of the most, exactly backwards from the v1 recall-gap
+  # fix this config exists to deliver. Every "_1" target below is now set
+  # to its measured real ceiling (so the fallback never silently fires);
+  # every "_0" target is scaled to reproduce each band's ORIGINAL intended
+  # positive ratio using that real ceiling -- 70+ is deliberately the
+  # highest (32.6%), as designed, not the lowest. Total drops from what was
+  # actually being used before (~223k, achieved by accident, not by these
+  # numbers) to ~167k -- a deliberate trade of data volume for actually
+  # delivering the documented fairness intervention. Re-derive these
+  # numbers again if the cohort, label, or MIMIC-IV release ever changes.
   age_group_train_targets:
-    "18-40_0": 25000   # age 18-40, not readmitted
-    "18-40_1": 10000   # age 18-40, readmitted
-    "41-55_0": 37000   # age 41-55, not readmitted
-    "41-55_1": 15000   # age 41-55, readmitted
-    "56-70_0": 50000   # age 56-70, not readmitted
-    "56-70_1": 20000   # age 56-70, readmitted
-    "70+_0":   62000   # age 70+,   not readmitted
-    "70+_1":   30000   # age 70+,   readmitted  ← oversampled vs natural rate
+    "18-40_0": 19772   # age 18-40, not readmitted  (scaled to match 18-40_1's real ceiling at the original ~28.6% ratio)
+    "18-40_1": 7909    # age 18-40, readmitted      (real ceiling -- all available notes)
+    "41-55_0": 29053   # age 41-55, not readmitted  (scaled to match 41-55_1's real ceiling at the original ~28.9% ratio)
+    "41-55_1": 11777   # age 41-55, readmitted      (real ceiling -- all available notes)
+    "56-70_0": 39388   # age 56-70, not readmitted  (scaled to match 56-70_1's real ceiling at the original ~28.6% ratio)
+    "56-70_1": 15755   # age 56-70, readmitted      (real ceiling -- all available notes)
+    "70+_0":   29068   # age 70+,   not readmitted  (scaled to match 70+_1's real ceiling at the original ~32.6% ratio)
+    "70+_1":   14065   # age 70+,   readmitted      (real ceiling -- all available notes) ← still the most oversampled band, as designed
 
   # ── Training hyperparameters ──
   batch_size: 8

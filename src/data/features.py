@@ -32,7 +32,7 @@ from src.config import get_data_dir, has_real_data, load_config
 from src.config_schema import AppConfig
 from src.data import synthetic as synth
 from src.data.comorbidity import charlson_per_admission
-from src.schemas import ID_COLS, TARGET_COL, TARGET_COL_UNPLANNED
+from src.schemas import ID_COLS, MODEL_TARGET_COL, TARGET_COL, TARGET_COL_UNPLANNED
 
 # MIMIC-IV v3 uses "EW EMER." / "DIRECT EMER." — not the legacy "EMERGENCY" string.
 # The legacy string is retained so synthetic data (which uses "EMERGENCY") still works.
@@ -422,10 +422,14 @@ def load_feature_matrix(cfg: AppConfig, mode: str | None = None) -> pd.DataFrame
 
 
 def split_xy(matrix: pd.DataFrame):
-    """Return ``(features, y, groups, subgroups, feature_cols)`` for modelling."""
+    """Return ``(features, y, groups, subgroups, feature_cols)`` for modelling.
+
+    ``y`` is ``MODEL_TARGET_COL`` (unplanned readmission), not the all-cause
+    ``TARGET_COL`` -- see src/schemas.py.
+    """
     feat_cols = feature_columns(matrix)
     features = matrix[feat_cols].reset_index(drop=True)
-    y = matrix[TARGET_COL].to_numpy()
+    y = matrix[MODEL_TARGET_COL].to_numpy()
     groups = matrix["subject_id"].to_numpy()
     subgroups = matrix[["gender", "age_band"]].reset_index(drop=True)
     return features, y, groups, subgroups, feat_cols
@@ -459,7 +463,11 @@ def main() -> None:
 
     print(f"[features] Wrote {len(matrix):,} rows x {matrix.shape[1]} cols -> {out_path}")
     print(f"[features] Model features: {len(feature_columns(matrix))}")
-    print(f"[features] Readmission rate: {matrix[TARGET_COL].mean():.1%}")
+    print(f"[features] Readmission rate (all-cause):  {matrix[TARGET_COL].mean():.1%}")
+    print(
+        f"[features] Readmission rate (unplanned):  "
+        f"{matrix[TARGET_COL_UNPLANNED].mean():.1%}  <- model target"
+    )
 
 
 if __name__ == "__main__":

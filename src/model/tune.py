@@ -3,10 +3,13 @@
 - Search spaces come from src/model/models.py (ranges per docs/MODELING_PLAN.md).
 - Grouped, stratified CV on the TRAINING portion only (test set never touched).
 - MedianPruner stops unpromising trials early.
-- Study is persisted to models/optuna_stage1_<model>_journal.log (Optuna's
-  JournalFileBackend, not sqlite) -- resubmitting after a preemption/crash
-  resumes toward the same trial target instead of restarting the whole
-  search. JournalFileBackend, not sqlite, deliberately: sqlite's
+- Study is persisted to models/optuna_stage1_<model>_<target>_journal.log
+  (Optuna's JournalFileBackend, not sqlite) -- resubmitting after a
+  preemption/crash resumes toward the same trial target instead of
+  restarting the whole search. The filename embeds which label
+  (MODEL_TARGET_COL in src/schemas.py) it was searched against, so changing
+  the target starts a fresh study instead of resuming trials scored against
+  a different objective. JournalFileBackend, not sqlite, deliberately: sqlite's
   file-locking is unreliable on the NFS-style shared filesystems typical of
   HPC project directories (KISSKI/Grete), especially with >1 concurrent
   trial (below) -- this is the kind of thing that shows up as intermittent,
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 
 import numpy as np
 
@@ -49,6 +53,13 @@ from src.model.cv import fit_predict_fold
 from src.model.metrics import auprc
 from src.model.models import suggest_params
 from src.model.splits import grouped_train_test_split, make_cv
+from src.schemas import MODEL_TARGET_COL
+
+# Short, filename-safe tag identifying which label a study/journal file
+# belongs to -- derived directly from MODEL_TARGET_COL (not a suffix/name
+# guess) so a THIRD future label variant can't silently collide with an
+# existing tag the way a hardcoded "unplanned"/"allcause" binary would.
+_TARGET_TAG = re.sub(r"[^a-z0-9]+", "", MODEL_TARGET_COL.lower())
 
 
 def _load_or_create_study(model_dir, name: str, seed: int) -> optuna.Study:
@@ -59,15 +70,23 @@ def _load_or_create_study(model_dir, name: str, seed: int) -> optuna.Study:
     trials already recorded under this study name. JournalFileBackend (not
     sqlite) for NFS-safe locking on shared HPC filesystems -- see module
     docstring.
+
+    The journal filename and study name both embed ``_TARGET_TAG`` (which
+    label column ``MODEL_TARGET_COL`` currently points at) so switching the
+    model's target creates a fresh study instead of "resuming" trials whose
+    recorded objective values were computed against a *different* label --
+    confirmed necessary 2026-09-04, when the target was switched from
+    all-cause to unplanned readmission mid-project with an existing
+    ~290-trial journal already on disk for the old target.
     """
     sampler = optuna.samplers.TPESampler(seed=seed)
     pruner = optuna.pruners.MedianPruner(n_warmup_steps=1)
-    journal_path = model_dir / f"optuna_stage1_{name}_journal.log"
+    journal_path = model_dir / f"optuna_stage1_{name}_{_TARGET_TAG}_journal.log"
     storage = optuna.storages.JournalStorage(
         optuna.storages.journal.JournalFileBackend(str(journal_path))
     )
     return optuna.create_study(
-        study_name=f"stage1_{name}",
+        study_name=f"stage1_{name}_{_TARGET_TAG}",
         storage=storage,
         direction="maximize", sampler=sampler, pruner=pruner,
         load_if_exists=True,
