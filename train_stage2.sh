@@ -46,6 +46,18 @@ ls -lh models/stage1_xgboost.joblib
 
 echo "Checking local Clinical-Longformer model..."
 ls -lh models/clinical_longformer/config.json
+# config.json is git-tracked and always exists after a pull -- it proves
+# nothing about whether the actual weights were downloaded. Compute nodes
+# have no internet, so a missing weights file here would only surface as a
+# crash deep into the job. Check for the real weight file explicitly.
+if ! compgen -G "models/clinical_longformer/model.safetensors" > /dev/null \
+   && ! compgen -G "models/clinical_longformer/pytorch_model.bin" > /dev/null; then
+    echo "ERROR: no model weights found in models/clinical_longformer/"
+    echo "  (only tokenizer/config files are git-tracked -- the weights are not)."
+    echo "  Run 'bash download_model.sh' on the login node first."
+    exit 1
+fi
+echo "  OK — weight file present: $(ls -1 models/clinical_longformer/*.safetensors models/clinical_longformer/*.bin 2>/dev/null)"
 
 echo "Checking MIMIC-IV-Note path..."
 python -c "
@@ -69,5 +81,16 @@ echo "=== All checks passed — starting training ==="
 
 # ── Run ──────────────────────────────────────────────────────
 python setup_stage2.py --mode full
+
+# setup_stage2.py's own predict step (above) only scores Stage 1-flagged
+# admissions (the deployment/cascade population) -- that's biased toward an
+# already-high-risk subset and not valid for comparing Stage 2 against
+# Stage 1 on equal footing (RQ1). predict_stage2_all scores every
+# test-partition admission with a note, independent of Stage 1's flag, per
+# docs/ARCHITECTURE.md's deferred-next-step list. Reuses the model +
+# calibration setup_stage2.py just produced -- same GPU allocation, no
+# second job needed.
+echo "[stage2] Scoring population-wide (independent of Stage 1's flag, for RQ1) ..."
+python -m src.stage2.predict --all
 
 echo "Finished: $(date)"
