@@ -109,8 +109,9 @@ contribute, and do it with small, local, fairness-audited models."*
    Discussion. (Composite/fictional — never a real MIMIC record.)
 2. **Alert-budget-matched comparison** as the recurring clinical metric: does the audited
    pipeline outperform the structured screen alone at the *same* alert volume
-   (`_control_arm_report`)? Every results table repeats this comparison. [Numbers pending
-   Stage 1/2 retrain — see `docs/ARCHITECTURE.md` §4.]
+   (`_control_arm_report`)? Every results table repeats this comparison. [Stage 1's own
+   control-arm number now exists (`MODEL_CARD.md`); the real cascade comparison still
+   needs Stage 2's retrain — see `docs/ARCHITECTURE.md` §4.]
 3. **Name the pipeline.** Prefer "screen, independent read, audit" over the retired
    "triage-and-verify" framing — use it consistently as a
    brand (figure titles, table captions), so the committee remembers *the pattern*, not just
@@ -130,8 +131,10 @@ contribute, and do it with small, local, fairness-audited models."*
 > described a high-recall XGBoost screen (recall ≥ 0.85, flagging 67% of admissions) and a
 > Stage 2 that "vetoes" alarms as a gatekeeper. Neither is current: Stage 1 is now
 > capacity-constrained (flags the top ~15% by risk), and Stage 2 is an independent second
-> opinion Stage 3 reasons over, not a gate. Numbers below are placeholders pending
-> retraining (`docs/ARCHITECTURE.md` §4) — replace before sending to Prof. Shen.
+> opinion Stage 3 reasons over, not a gate. **Updated 2026-09-05:** Stage 1 has now been
+> retrained for real (400-trial search, targeting unplanned readmission, AUROC 0.7215 —
+> see `MODEL_CARD.md`); Stage 2/Stage 3 numbers below are still placeholders pending their
+> retrain/first full run (`docs/ARCHITECTURE.md` §4) — replace before sending to Prof. Shen.
 
 > **An LLM Auditor for Hospital Readmission Alerts: Independent Verification Beyond
 > Prediction**
@@ -146,7 +149,7 @@ contribute, and do it with small, local, fairness-audited models."*
 >
 > This thesis proposes and evaluates a three-layer pipeline built around a role no prior
 > study in a systematic 49-study literature review has used a language model for: auditing
-> another model's output. A structured XGBoost model flags the highest-risk [K]% of
+> another model's output. A structured XGBoost model flags the highest-risk 15% of
 > admissions using MIMIC-IV data (521,191 admissions) — a capacity a hospital can actually
 > follow up on, not a recall floor that flags most of it. A fine-tuned clinical language
 > model (Clinical-Longformer) reads the same population's discharge notes independently,
@@ -173,8 +176,9 @@ contribute, and do it with small, local, fairness-audited models."*
 > auditor over both — not a black box that predicts, but a system whose disagreements are
 > visible and whose overrides explain themselves.
 
-*(Numbers to fill in once Stage 1/Stage 2 are retrained under the current config —
-`docs/ARCHITECTURE.md` §4. Word count target unchanged at ~400.)*
+*(Stage 1 numbers are now real (`MODEL_CARD.md`); Stage 2/Stage 3 numbers still to
+fill in once retrained/run under the current config — `docs/ARCHITECTURE.md` §4.
+Word count target unchanged at ~400.)*
 
 ---
 
@@ -186,8 +190,9 @@ contribute, and do it with small, local, fairness-audited models."*
   to show it empirically against a matched-budget structured-only baseline.
 - **"Why not just raise Stage 1's threshold to the alert budget you want and skip the LLMs?"**
   → That's exactly the control arm (`_control_arm_report`): Stage 1 alone, same alert volume,
-  same evaluation. The cascade has to beat *that*, not an unconstrained Stage 1 — numbers
-  pending retrain.
+  same evaluation. The cascade has to beat *that*, not an unconstrained Stage 1 — Stage 1's
+  side of that number is now real (`MODEL_CARD.md`), the full cascade comparison is still
+  pending Stage 2's retrain.
 - **"What's novel?"** → The *auditor* framing (LLM independently reviews another model's
   flagged output, on stated evidence, with a quoted and verified justification for every
   override) — a role absent from a systematic 49-study literature review — plus the
