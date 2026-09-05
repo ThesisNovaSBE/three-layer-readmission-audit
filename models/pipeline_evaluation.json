@@ -1,0 +1,342 @@
+{
+  "note": "Stage 1 test partition used for all three layers. Stage 2 scores come from stage2_results.csv \u2014 patients in Stage 1's test partition are out-of-sample for Stage 2. 'pipeline.full_cohort' is the primary, deployable number (100% of test admissions; flagged-no-note patients fall back to the Stage 1 flag per the C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes flagged-no-note admissions and must always be reported alongside full_cohort, never alone. The final prediction is Stage 3's uphold/override decision wherever a batch Stage 3 run covers the admission (see 'stage3' below for coverage); Stage 2's threshold is only a fallback where Stage 3 hasn't run yet. 'pipeline.control_arm_stage1_matched' is Stage 1 alone at the same alert volume as the full system \u2014 the single comparison that determines whether the cascade earns its complexity; report it alongside full_cohort every time, never omit it. 'pipeline.conditional_triggering' is a post-hoc analysis (not a different execution mode -- the real batch run always audits every flagged+noted admission) of what discordant-only Stage 3 triggering would have cost/saved; null until a batch Stage 3 run exists.",
+  "stage1": {
+    "n": 104242,
+    "pos_rate": 0.1902592045432743,
+    "auroc": 0.7215074172602733,
+    "auprc": 0.3965205278220835,
+    "threshold": 0.32349323493234927,
+    "precision": 0.4311,
+    "recall": 0.35239,
+    "f1": 0.38779,
+    "f2": 0.36575,
+    "tp": 6989,
+    "fp": 9223,
+    "fn": 12844,
+    "tn": 75186,
+    "by_age_band": {
+      "18-40": {
+        "n": 23650,
+        "pos_rate": 0.17801268498942918,
+        "auroc": 0.7501345940490504,
+        "precision": 0.44987,
+        "recall": 0.37625,
+        "f1": 0.40978,
+        "f2": 0.38898,
+        "tp": 1584,
+        "fp": 1937,
+        "fn": 2626,
+        "tn": 17503
+      },
+      "41-55": {
+        "n": 22890,
+        "pos_rate": 0.20620358235037134,
+        "auroc": 0.7369288056304394,
+        "precision": 0.43607,
+        "recall": 0.44725,
+        "f1": 0.44159,
+        "f2": 0.44496,
+        "tp": 2111,
+        "fp": 2730,
+        "fn": 2609,
+        "tn": 15440
+      },
+      "56-70": {
+        "n": 30352,
+        "pos_rate": 0.20087638376383765,
+        "auroc": 0.7277296940714546,
+        "precision": 0.44353,
+        "recall": 0.39036,
+        "f1": 0.41525,
+        "f2": 0.39995,
+        "tp": 2380,
+        "fp": 2986,
+        "fn": 3717,
+        "tn": 21269
+      },
+      "70+": {
+        "n": 27350,
+        "pos_rate": 0.17572212065813528,
+        "auroc": 0.6645403259307107,
+        "precision": 0.36795,
+        "recall": 0.19018,
+        "f1": 0.25075,
+        "f2": 0.21052,
+        "tp": 914,
+        "fp": 1570,
+        "fn": 3892,
+        "tn": 20974
+      }
+    }
+  },
+  "stage2": {
+    "n": 8786,
+    "pos_rate": 0.24231732301388573,
+    "auroc": 0.6632230167279427,
+    "auprc": 0.3788027126252522,
+    "precision": 0.2742,
+    "recall": 0.91404,
+    "f1": 0.42185,
+    "f2": 0.6232,
+    "tp": 1946,
+    "fp": 5151,
+    "fn": 183,
+    "tn": 1506,
+    "by_age_band": {
+      "18-40": {
+        "n": 1213,
+        "pos_rate": 0.24814509480626545,
+        "auroc": 0.7311155796467914,
+        "precision": 0.31621,
+        "recall": 0.92027,
+        "f1": 0.47069,
+        "f2": 0.66587,
+        "tp": 277,
+        "fp": 599,
+        "fn": 24,
+        "tn": 313
+      },
+      "41-55": {
+        "n": 1937,
+        "pos_rate": 0.25348477026329375,
+        "auroc": 0.6563833653057948,
+        "precision": 0.28195,
+        "recall": 0.9165,
+        "f1": 0.43124,
+        "f2": 0.63202,
+        "tp": 450,
+        "fp": 1146,
+        "fn": 41,
+        "tn": 300
+      },
+      "56-70": {
+        "n": 2763,
+        "pos_rate": 0.24647122692725298,
+        "auroc": 0.6614319508097517,
+        "precision": 0.27708,
+        "recall": 0.90896,
+        "f1": 0.4247,
+        "f2": 0.62424,
+        "tp": 619,
+        "fp": 1615,
+        "fn": 62,
+        "tn": 467
+      },
+      "70+": {
+        "n": 2873,
+        "pos_rate": 0.22833275321963103,
+        "auroc": 0.6329258666402632,
+        "precision": 0.25094,
+        "recall": 0.91463,
+        "f1": 0.39383,
+        "f2": 0.59821,
+        "tp": 600,
+        "fp": 1791,
+        "fn": 56,
+        "tn": 426
+      }
+    },
+    "available": true,
+    "n_test_with_s2_scores": 8786,
+    "n_flagged_no_note": 14302,
+    "note_coverage_of_flagged": 0.5419442388354305
+  },
+  "stage3": {
+    "available": false,
+    "note": "stage3_batch_results.csv not found -- final prediction is stage2_confirmed (+ C9 Stage 1 fallback), not yet Stage 3's decision. Run `python -m src.stage3.batch` first."
+  },
+  "pipeline": {
+    "full_cohort": {
+      "n": 104242,
+      "pos_rate": 0.1902592045432743,
+      "confirmed_rate": 0.15522534103336466,
+      "precision": 0.43125,
+      "recall": 0.35184,
+      "f1": 0.38752,
+      "f2": 0.36529,
+      "tp": 6978,
+      "fp": 9203,
+      "fn": 12855,
+      "tn": 75206,
+      "by_age_band": {
+        "18-40": {
+          "n": 23650,
+          "pos_rate": 0.17801268498942918,
+          "precision": 0.44982,
+          "recall": 0.37577,
+          "f1": 0.40947,
+          "f2": 0.38856,
+          "tp": 1582,
+          "fp": 1935,
+          "fn": 2628,
+          "tn": 17505
+        },
+        "41-55": {
+          "n": 22890,
+          "pos_rate": 0.20620358235037134,
+          "precision": 0.43644,
+          "recall": 0.44661,
+          "f1": 0.44147,
+          "f2": 0.44454,
+          "tp": 2108,
+          "fp": 2722,
+          "fn": 2612,
+          "tn": 15448
+        },
+        "56-70": {
+          "n": 30352,
+          "pos_rate": 0.20087638376383765,
+          "precision": 0.4437,
+          "recall": 0.3897,
+          "f1": 0.41495,
+          "f2": 0.39942,
+          "tp": 2376,
+          "fp": 2979,
+          "fn": 3721,
+          "tn": 21276
+        },
+        "70+": {
+          "n": 27350,
+          "pos_rate": 0.17572212065813528,
+          "precision": 0.36789,
+          "recall": 0.18976,
+          "f1": 0.25038,
+          "f2": 0.21011,
+          "tp": 912,
+          "fp": 1567,
+          "fn": 3894,
+          "tn": 20977
+        }
+      }
+    },
+    "notes_cohort": {
+      "n": 89940,
+      "pos_rate": 0.15150100066711142,
+      "confirmed_rate": 0.020891705581498776,
+      "precision": 0.41032,
+      "recall": 0.05658,
+      "f1": 0.09945,
+      "f2": 0.06837,
+      "tp": 771,
+      "fp": 1108,
+      "fn": 12855,
+      "tn": 75206,
+      "by_age_band": {
+        "18-40": {
+          "n": 20367,
+          "pos_rate": 0.1348259439289046,
+          "precision": 0.50427,
+          "recall": 0.04297,
+          "f1": 0.07919,
+          "f2": 0.05259,
+          "tp": 118,
+          "fp": 116,
+          "fn": 2628,
+          "tn": 17505
+        },
+        "41-55": {
+          "n": 18618,
+          "pos_rate": 0.15232570630572564,
+          "precision": 0.40143,
+          "recall": 0.07898,
+          "f1": 0.132,
+          "f2": 0.0941,
+          "tp": 224,
+          "fp": 334,
+          "fn": 2612,
+          "tn": 15448
+        },
+        "56-70": {
+          "n": 25655,
+          "pos_rate": 0.15521340869226272,
+          "precision": 0.39666,
+          "recall": 0.06554,
+          "f1": 0.1125,
+          "f2": 0.07868,
+          "tp": 261,
+          "fp": 397,
+          "fn": 3721,
+          "tn": 21276
+        },
+        "70+": {
+          "n": 25300,
+          "pos_rate": 0.16055335968379447,
+          "precision": 0.39161,
+          "recall": 0.04136,
+          "f1": 0.07482,
+          "f2": 0.05037,
+          "tp": 168,
+          "fp": 261,
+          "fn": 3894,
+          "tn": 20977
+        }
+      }
+    },
+    "control_arm_stage1_matched": {
+      "n": 104242,
+      "pos_rate": 0.1902592045432743,
+      "confirmed_rate": 0.15552272596458241,
+      "precision": 0.4311,
+      "recall": 0.35239,
+      "f1": 0.38779,
+      "f2": 0.36575,
+      "tp": 6989,
+      "fp": 9223,
+      "fn": 12844,
+      "tn": 75186,
+      "by_age_band": {
+        "18-40": {
+          "n": 23650,
+          "pos_rate": 0.17801268498942918,
+          "precision": 0.44987,
+          "recall": 0.37625,
+          "f1": 0.40978,
+          "f2": 0.38898,
+          "tp": 1584,
+          "fp": 1937,
+          "fn": 2626,
+          "tn": 17503
+        },
+        "41-55": {
+          "n": 22890,
+          "pos_rate": 0.20620358235037134,
+          "precision": 0.43607,
+          "recall": 0.44725,
+          "f1": 0.44159,
+          "f2": 0.44496,
+          "tp": 2111,
+          "fp": 2730,
+          "fn": 2609,
+          "tn": 15440
+        },
+        "56-70": {
+          "n": 30352,
+          "pos_rate": 0.20087638376383765,
+          "precision": 0.44353,
+          "recall": 0.39036,
+          "f1": 0.41525,
+          "f2": 0.39995,
+          "tp": 2380,
+          "fp": 2986,
+          "fn": 3717,
+          "tn": 21269
+        },
+        "70+": {
+          "n": 27350,
+          "pos_rate": 0.17572212065813528,
+          "precision": 0.36795,
+          "recall": 0.19018,
+          "f1": 0.25075,
+          "f2": 0.21052,
+          "tp": 914,
+          "fp": 1570,
+          "fn": 3892,
+          "tn": 20974
+        }
+      },
+      "threshold": 0.32349323493234927,
+      "target_alert_rate": 0.15522534103336466
+    },
+    "conditional_triggering": null
+  }
+}
