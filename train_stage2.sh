@@ -4,7 +4,15 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=75:00:00
+# Bumped from 48h 2026-09-06: a smoke test measured 2.42s/optimizer-step,
+# which alone extrapolates to ~60h for the full 10 epochs (88,600 steps) --
+# and that doesn't even include the periodic full-validation-set eval pass
+# every save_steps=500 steps, whose real cost is still unmeasured. 75h is
+# a deliberately generous ceiling, not a measured requirement. If eval
+# overhead turns out to be large, even this may not be enough for all 10
+# epochs -- early_stopping_patience=3 may end it sooner regardless. Watch
+# the first real eval pass (shortly after step 500) to get an actual number.
 #SBATCH --job-name=thesis-stage2
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_%j.err
