@@ -81,8 +81,16 @@ echo "[slurm] Training with best params (GPU) …"
 python -m src.model.train --mode full --device cuda
 
 # ── Step 4: Standard Stage 1 evaluation (val set) ────────────────────────────
+# No --mode flag: evaluate.py has no such argument (only --model) -- it reads
+# mode from the saved artifact (artifact["mode"]) automatically. Passing
+# --mode here previously crashed the job (exit 2) AFTER a full, successful
+# 400-trial tune + train, since argparse's default abbreviation matching
+# silently treated "--mode" as "--model" and rejected "full" as an invalid
+# model name -- confirmed real 2026-09-05, job 15737094. This bug had been
+# sitting here unexercised in every earlier run, all of which failed/were
+# killed before reaching this step.
 echo "[slurm] Running Stage 1 evaluation …"
-python -m src.model.evaluate --mode full
+python -m src.model.evaluate
 
 # ── Step 5: End-to-end blind pipeline evaluation ─────────────────────────────
 echo "[slurm] Running end-to-end pipeline evaluation …"
