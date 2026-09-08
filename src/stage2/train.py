@@ -374,11 +374,25 @@ def _save_results(
     val_dataset: ClinicalNotesDataset,
     model_dir,
     tokenizer: object,
+    fingerprint: dict,
 ) -> None:
-    """Save the best model, tokenizer, and validation metrics."""
+    """Save the best model, tokenizer, and validation metrics.
+
+    Also writes ``stage2_model_fingerprint.json`` next to the saved model --
+    calibrate.py compares against this before trusting a cached calibration,
+    the same staleness-detection pattern as the checkpoint/splits fixes
+    above. Without it, calibrate.py's plain file-existence cache check
+    would silently reuse a calibration fit against a *different* (e.g. the
+    old v1) model's score distribution -- confirmed a real, live bug
+    2026-09-06: a real retrain's calibrate step printed "Loading existing
+    calibration" and reused the pre-existing (stale) file untouched.
+    """
     save_path = model_dir / "stage2_longformer_best"
     trainer.save_model(str(save_path))
     tokenizer.save_pretrained(str(save_path))  # type: ignore[union-attr]
+    (model_dir / "stage2_model_fingerprint.json").write_text(
+        json.dumps(fingerprint, indent=2)
+    )
     print(f"[stage2/train] Saved fine-tuned model -> {save_path}")
 
     results = trainer.evaluate(val_dataset)
@@ -506,7 +520,7 @@ def train_stage2(cfg: AppConfig, artifact: dict | None = None) -> None:
 
     trainer.train(resume_from_checkpoint=_prepare_resume(model_dir, train_df, hp))
 
-    _save_results(trainer, val_dataset, model_dir, tokenizer)
+    _save_results(trainer, val_dataset, model_dir, tokenizer, _run_fingerprint(train_df, hp))
     print("[stage2/train] Done. Run calibrate.py next.")
 
 
