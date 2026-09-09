@@ -4,7 +4,11 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=03:00:00
+#SBATCH --time=06:00:00
+# Bumped from 3h 2026-09-09: a real run measured calibration=1h19m, cascade
+# predict=17m, population-wide predict=~1h41m (79% done at cutoff) -- total
+# ~3.3h needed, and none of these steps are resumable/cached, so a timeout
+# means redoing the whole thing. 6h gives real headroom, not another guess.
 #SBATCH --job-name=thesis-stage2-finish
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err
