@@ -190,8 +190,8 @@ def explain_patient(
         results_df:     Pre-loaded Stage 2 results DataFrame (optional).
         artifact:       Pre-loaded Stage 1 XGBoost artifact dict (optional).
         feature_matrix: Pre-loaded full feature matrix (optional).
-        model_name:     Ollama model tag to audit with. Defaults to
-                        ``cfg.stage3.ollama_model``. Pass
+        model_name:     local model path to audit with. Defaults to
+                        ``cfg.stage3.model_name``. Pass
                         ``cfg.stage3.robustness_model`` to run the same
                         patient through the scale-robustness arm instead.
         suppress_note:  blind-note validation control (session 19 Phase D1)
@@ -254,7 +254,7 @@ def explain_patient(
         attention_sentences=prompt_attention,
         hide_stage2=suppress_stage2,
     )
-    resolved_model_name = model_name or cfg.stage3.ollama_model
+    resolved_model_name = model_name or cfg.stage3.model_name
     annotation = call_llm(
         prompt, cfg, model_name=resolved_model_name, note_text=prompt_note_text
     )

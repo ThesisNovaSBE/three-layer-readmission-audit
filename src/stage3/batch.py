@@ -267,7 +267,7 @@ def run_blind_note_control(
                          diagnostic, not a second full audit.
         artifact / results_df / feature_matrix: pre-loaded objects, as in
                          :func:`run_batch_audit` — avoids reloading per call.
-        model_name:     Ollama model tag. Defaults to ``cfg.stage3.ollama_model``.
+        model_name:     local model path. Defaults to ``cfg.stage3.model_name``.
 
     Returns:
         DataFrame, one row per ``hadm_id``, same fields as a batch audit row.
@@ -325,7 +325,7 @@ def check_self_agreement(
         hadm_ids:       admissions to run twice.
         artifact / results_df / feature_matrix: pre-loaded objects, as in
                          :func:`run_batch_audit`.
-        model_name:     Ollama model tag. Defaults to ``cfg.stage3.ollama_model``.
+        model_name:     local model path. Defaults to ``cfg.stage3.model_name``.
 
     Returns:
         Dict with per-field agreement fractions (``decision_model_agreement``,

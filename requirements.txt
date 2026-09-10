@@ -20,7 +20,10 @@ torch>=2.1
 accelerate>=1.1.0      # required by HuggingFace Trainer
 
 # Stage 3 — local LLM independent audit of Stage 1's flagged cases
-ollama>=0.3
+# vLLM (switched from Ollama 2026-09-10, see config.yaml's stage3.model_name
+# comment) -- GPU-only, no meaningful CPU/Mac path, so not installed as part
+# of the default local dev setup; install on the cluster only.
+vllm>=0.6
 shap>=0.44   # SHAP values for Stage 1 feature attribution (falls back to gain importances)
 
 # Notebooks / EDA

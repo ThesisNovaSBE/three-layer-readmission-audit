@@ -136,7 +136,9 @@ class Stage3Config(BaseModel):
 
     model_config = ConfigDict(frozen=False)
 
-    ollama_model: str = "phi4-mini"
+    model_name: str = "models/medgemma-27b-text-it"  # local path -- compute
+    # nodes have no internet, see download_stage3_model.sh. Served via vLLM
+    # (guided/structured JSON decoding), not Ollama -- switched 2026-09-10.
     robustness_model: str | None = None
     temperature: float = 0.0
     attention_extraction: bool = True  # extract Longformer attention spans (needs trained model)
