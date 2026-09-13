@@ -650,12 +650,19 @@ def call_llm(
         ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
     """
     model_name = model_name or cfg.stage3.model_name
+    # Deliberately NOT inside the try/except below: a missing/broken vLLM
+    # install is a setup failure, not a per-patient annotation problem --
+    # confirmed a real, live bug 2026-09-13: a smoke test with vLLM not
+    # installed silently logged "annotation_failed" for all 10 patients
+    # instead of crashing, which at full batch scale (~9,800 calls) would
+    # have ground through hours of compute before anyone noticed nothing
+    # had actually worked. Let this raise immediately and loudly instead.
+    engine = _get_engine(model_name)
+    from vllm import SamplingParams  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+    from vllm.sampling_params import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        GuidedDecodingParams,
+    )
     try:
-        engine = _get_engine(model_name)  # raises ImportError if vLLM isn't installed
-        from vllm import SamplingParams  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-        from vllm.sampling_params import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-            GuidedDecodingParams,
-        )
         sampling_params = SamplingParams(
             temperature=cfg.stage3.temperature,
             max_tokens=2048,

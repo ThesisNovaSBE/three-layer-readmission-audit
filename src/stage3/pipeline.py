@@ -173,16 +173,24 @@ def explain_patient(
     results_df: pd.DataFrame | None = None,
     artifact: dict | None = None,
     feature_matrix: pd.DataFrame | None = None,
+    note_text: str | None = None,
     model_name: str | None = None,
     suppress_note: bool = False,
     suppress_stage2: bool = False,
 ) -> ExplanationResult:
     """Generate a Stage 3 explanation for one patient on demand.
 
-    All heavy objects (artifact, results_df, feature_matrix) can be pre-loaded
-    by the caller and passed in as keyword arguments — the API server does this
-    at startup so each explanation request does not pay the load cost again.
-    When ``None``, each is loaded fresh from disk.
+    All heavy objects (artifact, results_df, feature_matrix, note_text) can be
+    pre-loaded by the caller and passed in as keyword arguments — the API
+    server does this at startup so each explanation request does not pay the
+    load cost again. When ``None``, each is loaded fresh from disk.
+    ``note_text`` specifically matters for batch use: it defaults to loading
+    via ``load_notes(cfg, hadm_ids={hadm_id})``, a full chunked scan of the
+    MIMIC-IV-Note file for a single admission — fine for one-at-a-time API
+    requests, but re-scanning the whole file per admission in a loop (as
+    `batch.py` was doing before this parameter existed) does not scale to a
+    ~9,800-admission batch. `batch.py` now loads all needed notes once
+    upfront and passes each one in here directly.
 
     Args:
         hadm_id:        Hospital admission ID to explain.
@@ -190,6 +198,8 @@ def explain_patient(
         results_df:     Pre-loaded Stage 2 results DataFrame (optional).
         artifact:       Pre-loaded Stage 1 XGBoost artifact dict (optional).
         feature_matrix: Pre-loaded full feature matrix (optional).
+        note_text:      Pre-loaded discharge note text for this admission
+                        (optional) — see above.
         model_name:     local model path to audit with. Defaults to
                         ``cfg.stage3.model_name``. Pass
                         ``cfg.stage3.robustness_model`` to run the same
@@ -225,7 +235,10 @@ def explain_patient(
         loaded_artifact, feature_row, top_k=cfg.stage3.top_shap_features
     )
 
-    note_text = _load_note_text(hadm_id, patient["subject_id"], cfg)
+    note_text = (
+        note_text if note_text is not None
+        else _load_note_text(hadm_id, patient["subject_id"], cfg)
+    )
     attention_sentences = _get_attention(hadm_id, note_text, cfg)
 
     cohort_s1, cohort_s2 = _cohort_scores(df)

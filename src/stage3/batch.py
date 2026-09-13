@@ -3,9 +3,10 @@
 ``src/stage3/pipeline.py``'s ``explain_patient`` is on-demand, single-patient
 only (built for the API). This module runs it over every Stage 1-flagged,
 note-covered admission in ``models/stage2_results.csv``, preloading the
-Stage 1 artifact, Stage 2 results, and feature matrix once (instead of per
-request), and writing results incrementally so a slow or interrupted Ollama
-run doesn't lose completed work.
+Stage 1 artifact, Stage 2 results, feature matrix, and (2026-09-13,
+critical at this scale) every needed discharge note in one pass rather than
+one MIMIC-IV-Note file scan per admission — and writes results incrementally
+so a slow or interrupted LLM-serving run doesn't lose completed work.
 
 This is required, not optional, for two things the on-demand path cannot
 produce on its own:
@@ -51,6 +52,7 @@ import pandas as pd
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
+from src.schemas import TARGET_COL
 from src.stage3.explain import sweep_discordance_thresholds
 from src.stage3.pipeline import explain_patient
 
@@ -91,6 +93,35 @@ def _already_done(out_path: Path) -> set[int]:
         return set()
     existing = pd.read_csv(out_path, usecols=["hadm_id"])
     return set(existing["hadm_id"].astype(int).tolist())
+
+
+def _preload_notes(
+    cfg: AppConfig, target_hadm_ids: list[int], results_df: pd.DataFrame
+) -> dict[int, str]:
+    """Load discharge note text for every target admission in a single pass.
+
+    ``explain_patient()`` defaults to loading one admission's note via its
+    own full chunked scan of the MIMIC-IV-Note file per call — reasonable
+    for the on-demand API (one request at a time), but re-scanning the
+    whole file once per admission in this loop does not scale to a
+    ~9,800-admission batch. Confirmed a real cost, not a theoretical one: a
+    10-patient smoke test (2026-09-13) triggered 10 separate full-file
+    scans. Missing hadm_ids map to `""`, matching
+    ``src.stage3.pipeline._load_note_text``'s own failure behaviour.
+    """
+    from src.stage2.dataset import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+        build_notes_dataframe,
+        load_notes,
+    )
+
+    subject_lookup = results_df.set_index("hadm_id")["subject_id"].to_dict()
+    label_df = pd.DataFrame([
+        {"hadm_id": h, "subject_id": subject_lookup.get(h), TARGET_COL: 0}
+        for h in target_hadm_ids
+    ])
+    notes_raw = load_notes(cfg, hadm_ids=set(target_hadm_ids))
+    notes_df = build_notes_dataframe(notes_raw, label_df)
+    return dict(zip(notes_df["hadm_id"], notes_df["text"]))
 
 
 def run_batch_audit(
@@ -135,6 +166,10 @@ def run_batch_audit(
         f"{len(done):,} already done, {len(pending):,} pending"
     )
 
+    print(f"[stage3/batch] Pre-loading notes for {len(pending):,} admissions "
+          "(single pass, not one scan per admission) ...")
+    notes_lookup = _preload_notes(cfg, pending, results_df)
+
     write_header = not (resume and out_path.exists())
     mode = "a" if resume and out_path.exists() else "w"
     n_ok = n_failed = n_annotation_failed = 0
@@ -150,10 +185,11 @@ def run_batch_audit(
                     hadm_id, cfg,
                     results_df=results_df, artifact=artifact,
                     feature_matrix=feature_matrix,
+                    note_text=notes_lookup.get(hadm_id, ""),
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 # One bad admission (missing note, parse failure upstream,
-                # transient Ollama error) must not kill the whole batch.
+                # transient LLM-serving error) must not kill the whole batch.
                 print(f"[stage3/batch] [{i}/{len(pending)}] hadm_id={hadm_id} FAILED: {exc}")
                 n_failed += 1
                 continue

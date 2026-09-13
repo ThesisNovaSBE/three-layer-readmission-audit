@@ -69,6 +69,7 @@ def _patched(results_df, explain_side_effect):  # pylint: disable=redefined-oute
         patch("src.stage3.batch._load_results", return_value=results_df),
         patch("src.stage3.batch.load_feature_matrix", return_value=pd.DataFrame()),
         patch("src.stage3.batch.explain_patient", side_effect=explain_side_effect),
+        patch("src.stage3.batch._preload_notes", return_value={}),
     )
 
 
@@ -79,8 +80,8 @@ def test_writes_one_row_per_admission(tmp_path, results_df):  # pylint: disable=
     def side_effect(hadm_id, *_a, **_kw):
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out)
 
     written = pd.read_csv(out)
@@ -96,8 +97,8 @@ def test_grounds_columns_are_json_serialised(tmp_path, results_df):  # pylint: d
     def side_effect(hadm_id, *_a, **_kw):
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out, limit=1)
 
     written = pd.read_csv(out)
@@ -114,8 +115,8 @@ def test_one_failure_does_not_stop_the_batch(tmp_path, results_df):  # pylint: d
             raise RuntimeError("simulated Ollama timeout")
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out)
 
     written = pd.read_csv(out)
@@ -132,15 +133,15 @@ def test_resume_skips_already_written_admissions(tmp_path, results_df):  # pylin
         calls.append(hadm_id)
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out)
 
     assert sorted(calls) == [10, 11, 12, 13]
     calls.clear()
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out, resume=True)
 
     assert not calls
@@ -155,8 +156,8 @@ def test_limit_restricts_target_count(tmp_path, results_df):  # pylint: disable=
     def side_effect(hadm_id, *_a, **_kw):
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out, limit=2)
 
     written = pd.read_csv(out)
@@ -170,8 +171,8 @@ def test_annotation_failed_rows_still_written(tmp_path, results_df):  # pylint: 
     def side_effect(hadm_id, *_a, **_kw):
         return _fake_result(hadm_id, fail=hadm_id == 12)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         run_batch_audit(cfg=SimpleNamespace(), out_path=out)
 
     written = pd.read_csv(out)
@@ -215,8 +216,8 @@ def test_blind_note_control_calls_explain_patient_with_suppress_note(results_df)
         calls.append(kwargs)
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         out = run_blind_note_control(SimpleNamespace(), [10, 11])
 
     assert len(out) == 2
@@ -232,8 +233,8 @@ def test_no_stage2_control_calls_explain_patient_with_suppress_stage2(results_df
         calls.append(kwargs)
         return _fake_result(hadm_id)
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         out = run_no_stage2_control(SimpleNamespace(), [10])
 
     assert len(out) == 1
@@ -248,8 +249,8 @@ def test_self_agreement_reports_full_agreement_for_identical_output(results_df):
     def side_effect(hadm_id, *_a, **_kw):
         return _fake_result(hadm_id, decision="uphold")
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         report = check_self_agreement(SimpleNamespace(), [10, 11])
 
     assert report["n"] == 2
@@ -269,8 +270,8 @@ def test_self_agreement_detects_a_mismatch(results_df):  # pylint: disable=redef
         decision = "uphold" if call_count["n"] % 2 == 1 else "override"
         return _fake_result(hadm_id, decision=decision if hadm_id == 11 else "uphold")
 
-    p1, p2, p3, p4 = _patched(results_df, side_effect)
-    with p1, p2, p3, p4:
+    p1, p2, p3, p4, p5 = _patched(results_df, side_effect)
+    with p1, p2, p3, p4, p5:
         report = check_self_agreement(SimpleNamespace(), [10, 11])
 
     assert 11 in report["disagreements"]
