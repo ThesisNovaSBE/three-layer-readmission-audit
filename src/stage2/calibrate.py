@@ -261,6 +261,40 @@ def _score_cal_notes(
     return raw_logits, labels_arr, bands
 
 
+def _current_model_fingerprint(model_dir) -> dict | None:
+    """Return the fingerprint of the model currently on disk, or None if it
+    has none (e.g. it predates this check) -- see src.stage2.train."""
+    fp_path = model_dir / "stage2_model_fingerprint.json"
+    return json.loads(fp_path.read_text()) if fp_path.exists() else None
+
+
+def _load_cached_calibration_if_fresh(cal_path, current_model_fp: dict | None) -> dict | None:
+    """Return the cached calibration if it exists and matches the model
+    currently on disk, else None (caller recomputes).
+
+    A calibration fit against a *different* model (e.g. an earlier retrain,
+    or the old v1 checkpoint) is silently wrong for the current one --
+    confirmed a real, live bug 2026-09-06: a fresh retrain's calibrate step
+    loaded a stale pre-existing calibration file untouched, just because
+    the file existed. If the current model has no fingerprint on disk,
+    there's no way to verify a match, so this recomputes rather than risk
+    trusting a silent mismatch.
+    """
+    if not cal_path.exists():
+        return None
+    cached = json.loads(cal_path.read_text())
+    if current_model_fp is not None and cached.get("model_fingerprint") == current_model_fp:
+        print("[calibrate] Loading existing calibration from", cal_path,
+              "(fingerprint matches current model)")
+        return cached
+    print(
+        f"[calibrate] Cached calibration at {cal_path} doesn't verifiably "
+        "match the current model -- recomputing rather than risking a "
+        "silent mismatch."
+    )
+    return None
+
+
 # ── Main calibration routine ──────────────────────────────────────────────────
 
 def calibrate(cfg: AppConfig, artifact: dict | None = None, force: bool = False) -> dict:
@@ -276,10 +310,12 @@ def calibrate(cfg: AppConfig, artifact: dict | None = None, force: bool = False)
     """
     model_dir = get_model_dir()
     cal_path = model_dir / "stage2_calibration.json"
+    current_model_fp = _current_model_fingerprint(model_dir)
 
-    if not force and cal_path.exists():
-        print("[calibrate] Loading existing calibration from", cal_path)
-        return json.loads(cal_path.read_text())
+    if not force:
+        cached = _load_cached_calibration_if_fresh(cal_path, current_model_fp)
+        if cached is not None:
+            return cached
 
     stage2_path = get_stage2_model_path(model_dir)
 
@@ -321,6 +357,7 @@ def calibrate(cfg: AppConfig, artifact: dict | None = None, force: bool = False)
         "strategy": strategy,
         "recall_floor": recall_floor,
         "calibration_metrics": cal_metrics,
+        "model_fingerprint": current_model_fp,
     }
 
     cal_path.write_text(json.dumps(result, indent=2))

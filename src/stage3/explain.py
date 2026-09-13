@@ -8,7 +8,9 @@ taxonomy while also acting as an explainer of Stage 2's decision. Neither
 implements what the literature review's own gap analysis calls for: an LLM
 that independently audits *another model's* output.
 
-The design here has phi4-mini act as a deliberating auditor. It receives
+The design here has the auditor model (``cfg.stage3.model_name`` —
+``google/medgemma-27b-text-it`` as of 2026-09-10, previously phi4-mini via
+Ollama; see config.yaml) act as a deliberating auditor. It receives
 Stage 1's score and SHAP attributions, Stage 2's independently-derived
 note-based score, and the discharge note itself, and returns its own
 uphold/override/insufficient_evidence judgment — not a narration of a
@@ -39,27 +41,29 @@ Three things are deliberately NOT delegated to the LLM:
    grounds the model itself extracted (see :func:`compute_decision_rule`) —
    not a second opinion asked of the model, a check on whether the model's
    own stated decision actually follows its own stated rubric.
-3. **Whether the auditor's own decision is reproducible.** Ollama temperature
-   is pinned at 0 (``cfg.stage3.temperature``) for every evaluation run.
+3. **Whether the auditor's own decision is reproducible.** Sampling
+   temperature is pinned at 0 (``cfg.stage3.temperature``) for every
+   evaluation run.
 """
 
 from __future__ import annotations
 
 import textwrap
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from pydantic import BaseModel, ValidationError
 
-try:
-    import ollama
-except ImportError as _err:
-    raise ImportError(
-        "Ollama is required for Stage 3. "
-        "Install with: pip install ollama  then  ollama pull phi4-mini"
-    ) from _err
-
 from src.config_schema import AppConfig
+
+# vLLM is deliberately NOT imported at module level: it's GPU/Linux-only
+# (won't even install on the CUDA-less Mac this project is otherwise
+# developed on), and everything else in this module (prompt building,
+# response parsing, quote verification, decision-rule computation) has
+# nothing to do with model serving and must stay importable/testable
+# without it. Imported lazily inside _get_engine() instead.
+if TYPE_CHECKING:
+    from vllm import LLM
 
 
 # ── Taxonomy ───────────────────────────────────────────────────────────────────
@@ -581,31 +585,61 @@ def build_prompt(
     )
 
 
+_ENGINE_CACHE: dict[str, "LLM"] = {}
+
+
+def _get_engine(model_name: str) -> "LLM":
+    """Return a cached vLLM engine for this model, loading it once per process.
+
+    Loading a 27B-class model takes real time and VRAM -- call_llm() runs
+    once per patient (thousands of times in a batch run), so the engine
+    must be created once and reused across calls, never re-instantiated
+    per call. Untested at real scale as of 2026-09-10 -- smoke-test on a
+    small --limit slice before a full batch run, same discipline as every
+    other cluster job this project has run.
+    """
+    if model_name not in _ENGINE_CACHE:
+        try:
+            from vllm import LLM as _LLM  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        except ImportError as exc:
+            raise ImportError(
+                "vLLM is required for Stage 3 (switched from Ollama 2026-09-10 "
+                "-- see config.yaml's stage3.model_name comment). GPU/Linux "
+                "only -- install on the cluster: pip install vllm"
+            ) from exc
+        print(f"[stage3] Loading vLLM engine for '{model_name}' (one-time load) ...")
+        _ENGINE_CACHE[model_name] = _LLM(model=model_name, dtype="bfloat16", trust_remote_code=True)
+    return _ENGINE_CACHE[model_name]
+
+
 def call_llm(
     prompt: str,
     cfg: AppConfig,
     model_name: str | None = None,
     note_text: str = "",
 ) -> dict[str, Any]:
-    """Call an Ollama-hosted model and return the parsed annotation dict.
+    """Call a vLLM-served local model and return the parsed annotation dict.
 
-    Uses schema-constrained generation (``format=<JSON schema>``, not the
-    generic ``format="json"``) — this is what nearly eliminates malformed-
-    JSON parse failures, per the colleague review that motivated this design.
+    Uses guided/structured JSON decoding (``GuidedDecodingParams(json=...)``,
+    not free-text generation) — this is what nearly eliminates malformed-
+    JSON parse failures, per the colleague review that motivated this design
+    (previously Ollama's ``format=<JSON schema>``; switched to vLLM
+    2026-09-10 for cluster batch throughput, see config.yaml's
+    ``stage3.model_name`` comment for why).
 
     Generalised so the same prompt can be run through a different model —
     e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
     the auditor's value depends on model scale, without duplicating the
-    prompt/parsing logic. All models here are assumed Ollama-hosted (local);
-    routing to a cloud API is a separate, currently unmade decision — see
-    docs/ARCHITECTURE.md.
+    prompt/parsing logic. All models here are assumed locally-served (via
+    vLLM, fully offline); routing to a cloud API is a separate, currently
+    unmade decision — see docs/ARCHITECTURE.md.
 
     Args:
         prompt:     built by :func:`build_prompt`.
         cfg:        validated project config (reads ``stage3.temperature``
                     — pinned at 0 for reproducibility).
-        model_name: Ollama model tag to use. Defaults to
-                    ``cfg.stage3.ollama_model`` (the primary auditor model).
+        model_name: local model path to use. Defaults to
+                    ``cfg.stage3.model_name`` (the primary auditor model).
         note_text:  the same raw note text passed to :func:`build_prompt` —
                     used to verify each ground's quote against it and to
                     compute ``decision_rule``, not re-sent to the model.
@@ -615,20 +649,28 @@ def call_llm(
         ``planned_return``, ``clinical_justification``, ``decision_model``,
         ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
     """
-    model_name = model_name or cfg.stage3.ollama_model
+    model_name = model_name or cfg.stage3.model_name
     try:
-        response = ollama.chat(
-            model=model_name,
+        engine = _get_engine(model_name)  # raises ImportError if vLLM isn't installed
+        from vllm import SamplingParams  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        from vllm.sampling_params import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+            GuidedDecodingParams,
+        )
+        sampling_params = SamplingParams(
+            temperature=cfg.stage3.temperature,
+            max_tokens=2048,
+            guided_decoding=GuidedDecodingParams(json=_LLMOutput.model_json_schema()),
+        )
+        outputs = engine.chat(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            options={"temperature": cfg.stage3.temperature},
-            format=_LLMOutput.model_json_schema(),
+            sampling_params=sampling_params,
         )
-        raw = response.message.content
+        raw = outputs[0].outputs[0].text
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "clinical_justification": f"[ollama error: {exc}]"}
+        return {**_PARSE_FAILURE, "clinical_justification": f"[vLLM error: {exc}]"}
 
     annotation = _parse_response(raw)
     if annotation["annotation_failed"]:

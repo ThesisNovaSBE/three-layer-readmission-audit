@@ -1,0 +1,105 @@
+{
+  "note": "RQ1: Stage 1 (structured) vs. Stage 2 (notes-only), both scored on the notes-covered subset of the Stage 1 test partition -- the only population both models can be fairly compared on. stage1_full_population is deployment context, not (yet confirmed as) the headline RQ1 number -- see docs/ARCHITECTURE.md.",
+  "note_coverage_of_test_partition": 0.6020509967191727,
+  "stage1_notes_cohort": {
+    "n": 62759,
+    "pos_rate": 0.19845759173983013,
+    "auroc": {
+      "point_estimate": 0.7092969231217114,
+      "ci_lower": 0.702498263478091,
+      "ci_upper": 0.7162673502002538,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "auprc": {
+      "point_estimate": 0.38669644953775717,
+      "ci_lower": 0.3708525594595913,
+      "ci_upper": 0.40332000949186575,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "operating_point": {
+      "threshold": 0.32349323493234927,
+      "recall": 0.33938177438779604,
+      "precision": 0.4270128295787453,
+      "specificity": 0.8872455470737913,
+      "f2": 0.3539074666354091,
+      "tp": 4227,
+      "fp": 5672,
+      "tn": 44632,
+      "fn": 8228
+    }
+  },
+  "stage2_notes_cohort": {
+    "n": 62759,
+    "pos_rate": 0.19845759173983013,
+    "auroc": {
+      "point_estimate": 0.7101250203659382,
+      "ci_lower": 0.7033909982198486,
+      "ci_upper": 0.7165892028405043,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "auprc": {
+      "point_estimate": 0.38060320828472544,
+      "ci_lower": 0.366724449679166,
+      "ci_upper": 0.395747832509478,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "operating_point": {
+      "threshold": 0.5953412753092775,
+      "recall": 0.33608992372541147,
+      "precision": 0.42287099707041115,
+      "specificity": 0.8864305025445293,
+      "f2": 0.350474723287396,
+      "tp": 4186,
+      "fp": 5713,
+      "tn": 44591,
+      "fn": 8269
+    }
+  },
+  "stage1_full_population": {
+    "n": 104242,
+    "pos_rate": 0.1902592045432743,
+    "auroc": {
+      "point_estimate": 0.7215074172602733,
+      "ci_lower": 0.7147249010384442,
+      "ci_upper": 0.7292980492525819,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "auprc": {
+      "point_estimate": 0.3965205278220835,
+      "ci_lower": 0.3734900539813446,
+      "ci_upper": 0.42517162005349246,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "operating_point": {
+      "threshold": 0.32349323493234927,
+      "recall": 0.3523924771844905,
+      "precision": 0.43110041944238836,
+      "specificity": 0.8907344003601512,
+      "f2": 0.3657477183287282,
+      "tp": 6989,
+      "fp": 9223,
+      "tn": 75186,
+      "fn": 12844
+    }
+  },
+  "auroc_diff_stage2_minus_stage1": {
+    "point_estimate": 0.000828097244226722,
+    "ci_lower": -0.004107512519107515,
+    "ci_upper": 0.005426457612299327,
+    "confidence": 0.95,
+    "n_resamples_used": 1000,
+    "n_resamples_requested": 1000
+  }
+}

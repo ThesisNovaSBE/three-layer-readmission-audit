@@ -47,7 +47,7 @@ def test_pydantic_dot_access():
     # These should not raise
     _ = cfg.stage1.model
     _ = cfg.stage2.model_name
-    _ = cfg.stage3.ollama_model
+    _ = cfg.stage3.model_name
     _ = cfg.run.mode
     _ = cfg.data.mimic_iv_dir
 
@@ -63,7 +63,7 @@ def test_stage3_config_defaults():
     """Stage 3 schema defaults must match expected values."""
     s3 = Stage3Config()
     assert s3.attention_extraction is True
-    assert s3.ollama_model == "phi4-mini"
+    assert s3.model_name == "models/medgemma-27b-text-it"
     assert s3.top_shap_features == 5
 
 

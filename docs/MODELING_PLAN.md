@@ -2,6 +2,7 @@
 
 > Scope: Stage 1 only — predict unplanned 30-day readmission from the **structured** tables of MIMIC-IV. Clinical notes (Stage 2) are out of scope here.
 > Target hardware: MacBook Pro 14" (Apple Silicon, M-5). All training runs locally and fast (CPU, multi-core).
+> **Updated 2026-09-05:** the CPU-only/local constraint below described the original quick-iteration plan. The full 400-trial search now runs on GWDG KISSKI (A100 80GB GPU, `scripts/slurm_stage1_tune.sh`) — real, completed AUROC 0.7215 / AUPRC 0.3965 on the held-out test set, see `MODEL_CARD.md`. Also note: "unplanned" as the actual model target (not just this doc's stated scope) only became true the same day — see `docs/ARCHITECTURE.md` §6. The search-space and methodology sections below are still accurate; only the hardware/timing assumptions are superseded.
 > Read `PROJECT_TLDR.md` and the latest `sessions/` entry first.
 
 ---

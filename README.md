@@ -16,32 +16,40 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 ## Results
 
-> **Note (2026-08-25):** The numbers below are from the pre-session-15
-> artifacts — Stage 1 at the old recall-floor threshold, before the
-> capacity-constrained retrain, and before Stage 2's 4096-token retrain.
-> They are kept here as the last known-good reference point, not as current
-> results. See `docs/ARCHITECTURE.md` §4 for what retraining is pending.
+> **Note (2026-09-05):** Stage 1 below is the real retrain — 400-trial
+> Optuna search, capacity-constrained threshold, isotonic calibration,
+> targeting **unplanned** readmission (switched from all-cause the same
+> day — every model before this one silently used all-cause despite that
+> being the project's stated scope; see `docs/ARCHITECTURE.md` §6). Stage 2
+> is still the v1 checkpoint — its retrain under the current config
+> (unplanned label, corrected age-group oversampling, 4096 tokens) hasn't
+> run yet. See `MODEL_CARD.md` for the full breakdown and `docs/ARCHITECTURE.md`
+> §4 for what's still pending.
 
-### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test, pre-retrain)
+### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test n=104,242, target=unplanned)
 
 | Metric | Value |
 |--------|-------|
-| AUROC | 0.706 |
-| AUPRC | 0.406 |
-| Recall @ thr=0.354 (recall-floor policy) | 0.848 |
-| Precision @ thr=0.354 | 0.256 |
-| F2 | 0.580 |
+| AUROC | 0.7215 |
+| AUPRC | 0.3965 (base rate 19.0%) |
+| Recall @ thr=0.3235 (capacity=15%, primary policy) | 0.352 |
+| Precision @ thr=0.3235 | 0.431 |
+| F2 | 0.366 |
 
-### Stage 1+2 — Combined (notes cohort, thr₂=0.3, pre-retrain)
+Recall-floor (secondary, for literature comparability): recall≥0.85 →
+precision=0.247. Beats 3 of 4 published benchmarks cited in `evaluate.py`
+(LACE 0.694, Xiao 2018 0.715, Fraccaro 2016 0.684); behind Rajkomar 2018
+(0.773). Weakest subgroup: age 70+ (AUROC 0.665, recall only 19.0% vs.
+35–45% for other age bands) — see `MODEL_CARD.md` for the full fairness
+breakdown.
 
-Evaluated on the 43,776 Stage 1–flagged patients who have discharge notes.
+### Stage 1+2 — Combined
 
-| Metric | Stage 1 baseline | Stage 1+2 |
-|--------|-----------------|-----------|
-| Precision | 0.256 | **0.309** (+21%) |
-| Recall (notes cohort) | 1.000 | 0.709 |
-| F2 | 0.632 | 0.563 |
-| Confirmed flags | 43,776 | 25,699 |
+Not shown here — Stage 1's target just changed and Stage 2 hasn't been
+retrained to match yet, so a combined number right now would mix a
+new-target Stage 1 with an old-target Stage 2 and wouldn't mean anything
+as a real result. See `MODEL_CARD.md`'s Stage 1+2 section for the current
+(explicitly transitional) numbers and why they shouldn't be cited as-is.
 
 ---
 

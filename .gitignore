@@ -15,12 +15,19 @@
 models/**/*.pkl
 models/**/*.joblib
 models/**/*.pt
+models/**/*.pth
 models/**/*.bin
 models/**/*.safetensors
 *.safetensors
 *.onnx
-# Intermediate training checkpoints (keep only the best model metadata)
-models/stage2_checkpoints/
+# Intermediate training checkpoints (keep only the best model metadata).
+# Trailing wildcard also matches src/stage2/train.py's stale-checkpoint
+# rename target (models/stage2_checkpoints_stale_<timestamp>/) -- without
+# it, a renamed-aside stale checkpoint dir's small metadata files (not
+# caught by the *.pt/*.safetensors patterns above -- confirmed 2026-09-10,
+# *.pth specifically slipped through until added above too) silently
+# become trackable again.
+models/stage2_checkpoints*/
 # Best model weights (too large for git; store separately or use HuggingFace Hub)
 models/stage2_longformer_best/model.safetensors
 models/stage2_longformer_best/training_args.bin
