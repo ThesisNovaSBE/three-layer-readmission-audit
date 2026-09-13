@@ -1,21 +1,24 @@
 # Model Card — Readmission Prediction Pipeline
 
-> **See `docs/ARCHITECTURE.md` for the current design.** Stage 1 below is the
-> real 2026-09-05 retrain (400-trial Optuna search, capacity-constrained
-> threshold, isotonic calibration, **unplanned** readmission as the target —
-> switched from all-cause the same day, see `docs/ARCHITECTURE.md` §6) on
-> the full real MIMIC-IV dataset (n=521,191) on GWDG KISSKI (A100 80GB).
-> Stage 2 below is still the v1 checkpoint (pre-dates the unplanned-label
-> switch, the corrected age-group oversampling targets, and the 4096-token
-> window) — its retrain under the current config has not run yet. The
-> Stage 3 section matches the current independent-auditor design already in
-> code, but has not been run at full scale yet either.
+> **See `docs/ARCHITECTURE.md` for the current design.** Stage 1 and Stage 2
+> below are both the real 2026-09 retrains — Stage 1 (2026-09-05): 400-trial
+> Optuna search, capacity-constrained threshold, isotonic calibration,
+> **unplanned** readmission as the target (switched from all-cause the same
+> day, see `docs/ARCHITECTURE.md` §6) on the full real MIMIC-IV dataset
+> (n=521,191). Stage 2 (2026-09-09/10): retrained under the corrected
+> unplanned-label + rebalanced age-group targets + 4096-token window,
+> including a calibration-staleness bug found and fixed mid-session (see
+> `sessions/2026-09-13_session-23.md`) — the numbers below are from
+> *after* that fix, not the initial (miscalibrated) run. Both on GWDG
+> KISSKI (A100 80GB). Stage 3 has switched from Ollama/phi4-mini to
+> vLLM/MedGemma-27B-text-it (2026-09-10) — matches the current code, but
+> has only been smoke-tested at small scale, not run at full scale yet.
 
 ## Model Details
 
 - **Stage 1:** Classical ML classifiers (Logistic Regression, XGBoost, HistGradientBoosting) on structured EHR features; isotonic-calibrated (since 2026-08-26); capacity-constrained operating point (primary, since 2026-08-25) with recall-floor kept as a secondary comparison table. Two label variants exist in the feature matrix, `readmission_30d` (all-cause) and `readmission_30d_unplanned` (excludes outcome admissions with a planned `admission_type`; added 2026-08-26) — **the model's actual target is `readmission_30d_unplanned`** as of 2026-09-05 (`MODEL_TARGET_COL` in `src/schemas.py`), matching this project's stated scope; every model trained before that date, including the original artifact, silently used all-cause instead
-- **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`), note-only (no structured features) — 4096-token context (raised from 2048 on 2026-08-25), trained on MIMIC-III; produces an independent, note-based risk estimate, not a gate on Stage 1's flag. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.
-- **Stage 3:** Independent LLM audit via Ollama (`phi4-mini`, temperature=0) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
+- **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`), note-only (no structured features) — 4096-token context (raised from 2048 on 2026-08-25), trained on real MIMIC-IV-Note discharge summaries; produces an independent, note-based risk estimate, not a gate on Stage 1's flag. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.
+- **Stage 3:** Independent LLM audit via vLLM (`google/medgemma-27b-text-it`, temperature=0, switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
 - **Model type:** Three-layer LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
@@ -72,66 +75,105 @@ point is only 19.0% vs. 35–45% for the other three bands. This is the
 documented "v1 recall gap" that Stage 2's age-group oversampling exists to
 address — see `config.yaml`'s `stage2.age_group_train_targets` comment.
 
-### Stage 2 — Clinical-Longformer v1 (fine-tuned on 15k stratified notes, capped eval set of 3k)
+### Stage 2 — Clinical-Longformer (real retrain, completed 2026-09-09/10, target=unplanned readmission)
 
-> **Note:** metrics below are from the v1 checkpoint (completed 2026-08-01),
-> which pre-dates the unplanned-label switch, the corrected age-group
-> oversampling targets (2026-09-04 — the v1 run's 70+ oversampling was
-> likely also broken the same way, since the underlying cause wasn't
-> label-specific), and the current 4096-token window. A v2 retrain under
-> the current config has not been run yet — this section will be updated
-> once it completes.
+Trained on 141,767 age-stratified notes (real per-band availability came in
+lower than the config's targets across the board — every positive-label
+cell hit the "use all available" fallback; see `config.yaml`'s
+`age_group_train_targets` comment and `sessions/2026-09-13_session-23.md`).
+`EarlyStoppingCallback` (patience=3) stopped training at ~1.02 of the
+configured 10 epochs once validation AUPRC peaked — Val AUPRC=0.372,
+AUROC=0.704. A calibration-staleness bug (reused a pre-existing calibration
+file without checking it matched this model) was found and fixed the same
+session; numbers below are post-fix.
+
+**Test-set evaluation (notes cohort, n=9,899 Stage 1-flagged-with-note admissions):**
 
 | Metric | Value |
 |--------|-------|
-| AUROC | 0.6404 |
-| AUPRC | 0.3411 |
-| Best epoch | 2 / 5 (early stopping at epoch 4) |
-| Training notes | 15,000 (stratified subsample; 21.1% positive) — v1 only |
-| Eval notes (checkpoint selection) | 3,000 (stratified cap) — v1 only |
+| AUROC | 0.622 |
+| AUPRC | 0.538 |
+| Recall | 0.974 |
+| Precision | 0.437 |
+| F2 | 0.782 |
+| ECE | 0.1957 |
 
-**Retraining config (v2, not yet run):**
+Per-age-group:
+
+| Band | N | AUROC | Recall | Precision | F2 | ECE |
+|------|---|-------|--------|-----------|-----|-----|
+| 18-40 | 1,570 | 0.626 | 0.956 | 0.507 | 0.812 | 0.2028 |
+| 41-55 | 2,836 | 0.617 | 0.975 | 0.437 | 0.782 | 0.2324 |
+| 56-70 | 3,514 | 0.632 | 0.983 | 0.432 | 0.783 | 0.1879 |
+| 70+   | 1,979 | 0.581 | 0.974 | 0.392 | 0.751 | 0.1543 |
+
+Fairness gaps: recall gap 0.027 (worst: 18-40), precision gap 0.115 (worst:
+70+), AUROC gap 0.051. 70+ remains the hardest band for Stage 2 too, though
+the recall gap specifically is small — the age-group oversampling fix
+appears to have helped recall parity even though precision/AUROC gaps
+remain, worth digging into further for the fairness discussion.
+
+**Training config:**
 
 | Parameter | Value |
 |-----------|-------|
-| Training notes | ~166,787 (recomputed 2026-09-04 against real per-band note availability — see `config.yaml`'s `age_group_train_targets` comment; previous ~249,000 figure was based on unachievable all-cause-era targets) |
+| Training notes | 141,767 (real availability; see note above) |
 | GPU | NVIDIA A100-SXM4-80GB (GWDG KISSKI) |
 | Precision | bf16 |
 | Batch size | 8 (effective 16 with grad. accum. ×2) |
 | Gradient checkpointing | disabled (80 GB VRAM sufficient) |
 | Sequence length | 4096 tokens (raised from 2048 on 2026-08-25) |
 
-### Stage 1+2 — Combined pipeline
+### RQ1 — Does the note text add signal beyond structured data?
 
-> **Not a valid long-term reference — transitional only.** The table below
-> is `models/pipeline_evaluation.json` as of 2026-09-05: the *new* Stage 1
-> (unplanned target, capacity threshold) combined with the *old* v1 Stage 2
-> (all-cause-trained, pre-oversampling-fix). Combining a new-target Stage 1
-> with an old-target Stage 2 is not a coherent long-term comparison — it's
-> included here only because it's what the current committed artifacts
-> actually produce, not as a claim about the pipeline's real performance.
-> The previous version of this section (thr₁=0.354, thr₂=0.3 sweep) was
-> itself from before the capacity-threshold/calibration changes and is
-> superseded, not just outdated. **This whole section will be replaced**
-> once Stage 2 is retrained under the current config.
+`compare_layers.py` scores Stage 1 and Stage 2 **independently, on the
+identical 62,759-admission notes-covered population** (neither model gates
+or feeds the other) — the fair, apples-to-apples comparison this project's
+own docs call for:
+
+| Model | AUROC |
+|-------|-------|
+| Stage 1 (structured) | 0.7093 |
+| Stage 2 (notes-only) | 0.7101 |
+| Difference | +0.0008 [-0.0041, +0.0054] (95% CI) |
+
+**Null result** — the CI straddles zero. This is explicitly anticipated and
+reportable per this project's own design docs, not a failure of either
+model: on this population, the discharge note alone carries no more (and no
+less) predictive signal than the structured record alone.
+
+### Stage 1+2 — Combined pipeline
 
 | Metric | Value |
 |--------|-------|
 | Stage 1 alone (test n=104,242) | AUROC=0.7215, recall=0.352, precision=0.431 |
-| Stage 2 alone (flagged+noted, n=8,786, 54.2% note coverage of flagged) | AUROC=0.663, recall=0.914, precision=0.274 |
-| Pipeline, full cohort (n=104,242, C9 no-note fallback applied) | precision=0.431, recall=0.352, F1=0.388, F2=0.365 |
-| Pipeline, notes cohort only (n=89,940) | precision=0.410, recall=0.057 |
-| Control arm (Stage 1 alone @ matched 15.5% alert rate) | precision=0.431, recall=0.352, F1=0.388, F2=0.366 |
+| Stage 2 alone (flagged+noted, n=9,899, 61.1% note coverage of flagged) | AUROC=0.622, recall=0.974, precision=0.437 |
+| Pipeline, full cohort (n=104,242, C9 no-note fallback applied) | precision=0.437, recall=0.347, F1=0.387, F2=0.362 |
+| Pipeline, notes cohort only (n=97,929) | precision=0.437, recall=0.241 |
+| Control arm (Stage 1 alone @ matched 15.1% alert rate) | precision=0.431, recall=0.352, F1=0.388, F2=0.366 |
 
-The control arm being nearly identical to the full pipeline here is an
-artifact of the Stage 1/Stage 2 label mismatch above, not a real finding
-about whether Stage 2 adds value — do not cite this as an RQ2 result.
+The control arm is nearly identical to the full pipeline here — but unlike
+the previous (mismatched-vintage) version of this table, this is now a real
+finding, not an artifact: the current cascade (Stage 1 → Stage 2 prune
+only) does not yet beat matched-budget Stage 1 alone. This is expected and
+incomplete, not a negative result to draw conclusions from yet — Stage 3
+(the actual "auditor" layer this pipeline is designed around) hasn't run at
+full scale yet. The real RQ2 answer is pending that.
 
-## Stage 3 — Independent LLM Audit (phi4-mini)
+## Stage 3 — Independent LLM Audit (MedGemma-27B via vLLM)
 
-Rewritten 2026-08-25, extended 2026-08-28. Available both on-demand (one
-patient per call, via the API) and in batch (`src/stage3/batch.py`, every
-Stage 1-flagged, note-covered admission). For each patient, phi4-mini
+Rewritten 2026-08-25, extended 2026-08-28. Switched serving from
+Ollama/phi4-mini to vLLM/`google/medgemma-27b-text-it` on 2026-09-10, once
+the batch run moved to cluster GPU hardware — vLLM's guided/structured
+decoding preserves the schema-constrained JSON generation Ollama's
+`format=` provided (plain `transformers.generate()` has no built-in
+equivalent), and MedGemma is the only evaluated candidate benchmarked
+directly on MIMIC-IV-style reasoning; see `sessions/2026-09-13_session-23.md`
+and `config.yaml`'s `stage3.model_name` comment for the full comparison and
+license check. Available both on-demand (one patient per call, via the
+API) and in batch (`src/stage3/batch.py`, every Stage 1-flagged,
+note-covered admission) — batch has only been smoke-tested at small scale
+as of this writing, not run at full scale. For each patient, the model
 receives:
 - Stage 1's score + top-k SHAP-ranked structured risk factors
 - Stage 2's independently-derived, note-based score
@@ -139,7 +181,7 @@ receives:
 - The discharge note itself (near-full text, ~20,000-char safety cap — not a
   5-sentence attention summary)
 
-phi4-mini reaches its **own** independent decision — it is not asked to
+The model reaches its **own** independent decision — it is not asked to
 narrate or classify a decision Stage 2 already made.
 
 **Output per patient:**

@@ -82,11 +82,16 @@ See that session log for the full reasoning trail.
   decision) is still computed and still useful for the N1 ablation's
   "cascade" arm, but is **not** the final word on a patient — see Layer 3.
 
-### Layer 3 — phi4-mini (independent auditor)
+### Layer 3 — MedGemma-27B via vLLM (independent auditor)
 
 Rewritten 2026-08-25, extended 2026-08-28 (session 18) and 2026-08-28
 (session 19) (`src/stage3/explain.py`, `src/stage3/pipeline.py`,
-`src/stage3/models.py`). Inputs: Stage 1's score + SHAP-ranked reasons,
+`src/stage3/models.py`). Serving switched from Ollama/phi4-mini to
+vLLM/`google/medgemma-27b-text-it` 2026-09-10 (session 23) once the batch
+run moved to cluster GPU hardware — see `config.yaml`'s `stage3.model_name`
+comment for the model/license comparison and
+`sessions/2026-09-13_session-23.md` for the full reasoning. Inputs: Stage
+1's score + SHAP-ranked reasons,
 Stage 2's score, the discharge note itself (near-full text, not a 5-sentence
 attention summary), and a pre-computed discordance mode.
 
@@ -119,10 +124,15 @@ fallback. `insufficient_evidence` (new third value) is a code-side judgment
 about the note's length — a note below `_MIN_INFORMATIVE_NOTE_CHARS`
 cannot ground either finding regardless of what was extracted from it.
 
-**Schema-constrained generation (session 19).** `call_llm` passes a JSON
-schema (`_LLMOutput.model_json_schema()`) to Ollama's `format=` parameter,
-not the generic `format="json"` — this is what nearly eliminates malformed-
-JSON parse failures. The prompt was also reordered so the model emits
+**Schema-constrained generation (session 19; serving mechanism changed
+session 23, same guarantee preserved).** `call_llm` passes a JSON schema
+(`_LLMOutput.model_json_schema()`) as a guided-decoding constraint —
+originally to Ollama's `format=` parameter, now to vLLM's
+`GuidedDecodingParams` (the switch to vLLM was specifically conditional on
+finding an equivalent, since bare `transformers.generate()` has no
+built-in structured-output support) — not the generic `format="json"` —
+this is what nearly eliminates malformed-JSON parse failures. The prompt
+was also reordered so the model emits
 grounds/evidence *before* `decision` (previously `decision` was asked first)
 — an autoregressive model conditions on what it has already written, so
 asking for decision first invited the model to invent justification to fit
@@ -416,21 +426,27 @@ Everything in this section needs either GPU/compute time or an explicit
 decision — the code to run once either is resolved already exists as of
 session 17.
 
-- **Retrain Stage 1** with the rebuilt feature matrix (400-trial Optuna,
-  session-14 feature fixes, isotonic calibration) —
-  `scripts/slurm_stage1_tune.sh` is ready.
-- **Retrain Stage 2** at `max_seq_length=4096` — no script changes needed,
-  just a fresh KISSKI/Grete job (plain Longformer only, per §2).
-- **Run `predict_stage2_all` at full scale** once Stage 2 is retrained — the
-  code exists (session 17) but has only been smoke-tested on a small
-  `--limit` slice against the stale, pre-retrain model.
-- **Run `compare_layers.py`** once both retrains + the full-scale
-  `stage2_results_all.csv` exist, to produce the first real RQ1 numbers.
-  Blocked on the headline-denominator decision below before the result is
-  reported as "the" RQ1 answer, not on writing more code.
-- **Run `batch.py` at full scale** once Stage 1 + Stage 2 are retrained, to
-  produce real RQ2 numbers and let `evaluate_pipeline.py`'s `stage3` coverage
-  block become non-empty.
+- ~~Retrain Stage 1~~ **Done (2026-09-05, session 22/23)** — 400-trial
+  Optuna search, unplanned-readmission target, AUROC 0.7215. See
+  `MODEL_CARD.md`.
+- ~~Retrain Stage 2~~ **Done (2026-09-09/10, session 23)** — 4096 tokens,
+  corrected age-group oversampling, unplanned target. See `MODEL_CARD.md`.
+- ~~Run `predict_stage2_all` at full scale~~ **Done (session 23)** — real
+  population-wide scores exist in `models/stage2_results_all.csv`.
+- ~~Run `compare_layers.py`~~ **Done (session 23)** — first real RQ1
+  numbers: Stage 1 AUROC 0.7093 vs. Stage 2 AUROC 0.7101, a null result
+  (see `MODEL_CARD.md`). The headline-denominator decision below (notes-
+  covered subset as headline) still needs explicit confirmation before this
+  is written up as "the" RQ1 answer in the thesis text, but the numbers
+  themselves are real and current.
+- **Run `batch.py` at full scale** — the actual next step as of session 23.
+  Cluster infrastructure (`download_stage3_model.sh`,
+  `scripts/slurm_stage3_batch.sh`) and the vLLM/MedGemma serving switch are
+  in place; a 10-patient smoke test was queued but not yet confirmed
+  working end-to-end. Needed to produce real RQ2 numbers and let
+  `evaluate_pipeline.py`'s `stage3` coverage block become non-empty — the
+  current pipeline numbers (cascade ≈ control arm) are not yet the real
+  RQ2 answer, since Stage 3 hasn't run.
 - **Run `batch.py --sweep`** once the above exists, to actually validate
   `discordance_displacement_pp` rather than leave it at the provisional 20.
 - **Wire and run the Layer 3 robustness arm** — blocked on the model-choice
@@ -476,9 +492,11 @@ session 17.
   permitted on this data?** MIMIC-IV/MIMIC-IV-Note are governed by a
   PhysioNet Data Use Agreement; sending credentialed data to a third-party
   cloud API is very likely restricted without a specific agreement.
-  Recommendation: default to a larger *local* Ollama model, not a cloud API,
-  unless the DUA is explicitly checked and permits it. `stage3.robustness_model`
-  is deliberately left `null` pending this — do not set it without checking.
+  Recommendation: default to a larger *local* model (served the same way
+  as the primary auditor, vLLM as of session 23 — see `stage3.model_name`),
+  not a cloud API, unless the DUA is explicitly checked and permits it.
+  `stage3.robustness_model` is deliberately left `null` pending this — do
+  not set it without checking.
 - **RQ1's headline comparison denominator.** Layer 2 only ever covers
   admissions with a note (~63% in past runs); Layer 1 covers 100%.
   Recommendation (per the remediation review's denominator-integrity point):
