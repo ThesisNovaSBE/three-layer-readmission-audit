@@ -586,6 +586,7 @@ def build_prompt(
 
 
 _ENGINE_CACHE: dict[str, "LLM"] = {}
+_ENGINE_LOAD_ERROR: dict[str, Exception] = {}
 
 
 def _get_engine(model_name: str) -> "LLM":
@@ -597,18 +598,36 @@ def _get_engine(model_name: str) -> "LLM":
     per call. Untested at real scale as of 2026-09-10 -- smoke-test on a
     small --limit slice before a full batch run, same discipline as every
     other cluster job this project has run.
+
+    A failed load is cached too and re-raised immediately on every
+    subsequent call, instead of retrying the full (tens-of-seconds)
+    construction attempt again -- confirmed a real cost 2026-09-13: a
+    driver/CUDA mismatch made every one of 10 patients in a smoke test
+    independently re-attempt and re-fail the same doomed engine load. The
+    failure mode (missing install, incompatible CUDA driver, etc.) cannot
+    change mid-process, so retrying serves no purpose and only burns
+    GPU-node time that would compound at full ~9,800-admission scale.
     """
+    if model_name in _ENGINE_LOAD_ERROR:
+        raise _ENGINE_LOAD_ERROR[model_name]
     if model_name not in _ENGINE_CACHE:
         try:
             from vllm import LLM as _LLM  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
         except ImportError as exc:
-            raise ImportError(
+            _ENGINE_LOAD_ERROR[model_name] = ImportError(
                 "vLLM is required for Stage 3 (switched from Ollama 2026-09-10 "
                 "-- see config.yaml's stage3.model_name comment). GPU/Linux "
                 "only -- install on the cluster: pip install vllm"
-            ) from exc
+            )
+            raise _ENGINE_LOAD_ERROR[model_name] from exc
         print(f"[stage3] Loading vLLM engine for '{model_name}' (one-time load) ...")
-        _ENGINE_CACHE[model_name] = _LLM(model=model_name, dtype="bfloat16", trust_remote_code=True)
+        try:
+            _ENGINE_CACHE[model_name] = _LLM(
+                model=model_name, dtype="bfloat16", trust_remote_code=True
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            _ENGINE_LOAD_ERROR[model_name] = exc
+            raise
     return _ENGINE_CACHE[model_name]
 
 
