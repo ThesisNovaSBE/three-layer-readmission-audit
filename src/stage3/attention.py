@@ -34,6 +34,12 @@ _TORCH_AVAILABLE = (
     and importlib.util.find_spec("transformers") is not None
 )
 
+# Loading the fine-tuned Longformer from disk is expensive and this function
+# is called once per patient in a batch loop -- cache it per model_dir so a
+# ~9,800-admission run loads the checkpoint once, not 9,800 times. Confirmed
+# a real cost 2026-09-13: a 10-patient smoke test reloaded the model 10 times.
+_MODEL_CACHE: dict[str, tuple] = {}
+
 
 def _split_sentences(text: str) -> list[str]:
     """Split a clinical note into sentence-length fragments."""
@@ -119,10 +125,14 @@ def extract_attention_spans(
         print(f"[stage3/attention] {exc} — skipping attention extraction.")
         return empty
 
-    print(f"[stage3/attention] Loading model from {stage2_path} ...")
-    tokenizer = AutoTokenizer.from_pretrained(str(stage2_path))
-    model = LongformerForSequenceClassification.from_pretrained(str(stage2_path))
-    model.eval()
+    cache_key = str(stage2_path)
+    if cache_key not in _MODEL_CACHE:
+        print(f"[stage3/attention] Loading model from {stage2_path} ...")
+        tokenizer = AutoTokenizer.from_pretrained(str(stage2_path))
+        model = LongformerForSequenceClassification.from_pretrained(str(stage2_path))
+        model.eval()
+        _MODEL_CACHE[cache_key] = (tokenizer, model)
+    tokenizer, model = _MODEL_CACHE[cache_key]
 
     result: dict[int, list[str]] = {}
     print(f"[stage3/attention] Extracting spans for {len(hadm_ids):,} notes ...")
@@ -148,10 +158,20 @@ def extract_attention_spans(
             out = model(**enc, output_attentions=True)
 
         # global_attentions: tuple per layer; last layer is most informative.
-        # Shape varies: (batch, heads, num_global, seq_len) — CLS attending to others.
+        # Confirmed empirically 2026-09-13 (transformers 5.x, this model):
+        # shape is (batch, heads, seq_len, num_global_attn_indices) -- the
+        # LAST dim indexes global tokens, not the third. The original
+        # assumption here had those two dims swapped, so squeeze(0) never
+        # collapsed the real size-1 dim, leaving a (seq_len, 1) tensor whose
+        # .tolist() produced nested single-element lists -- crashed sum()
+        # in _sentences_by_attention with "unsupported operand type(s) for
+        # +: 'int' and 'list'" for every patient in a full dry run.
+        # global_attention_mask only marks position 0 (CLS) as global, so
+        # index 0 of the last dim is that one global token's attention to
+        # every position.
         if out.global_attentions:
-            ga = out.global_attentions[-1]  # (1, heads, 1, seq_len)
-            weights = ga.squeeze(0).mean(0).squeeze(0).tolist()  # (seq_len,)
+            ga = out.global_attentions[-1]  # (1, heads, seq_len, 1)
+            weights = ga[0, :, :, 0].mean(0).tolist()  # (seq_len,)
         elif out.attentions:
             # Fallback: local attention from position 0 (CLS)
             la = out.attentions[-1]  # (1, heads, seq_len, seq_len)
