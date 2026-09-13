@@ -36,7 +36,7 @@ import pandas as pd
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import TARGET_COL
+from src.schemas import MODEL_TARGET_COL
 from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
 from src.stage3.explain import build_prompt, call_llm, compute_discordance, is_note_truncated
@@ -131,7 +131,7 @@ def _load_note_text(hadm_id: int, subject_id: int, cfg: AppConfig) -> str:
         label_df = pd.DataFrame([{
             "hadm_id": hadm_id,
             "subject_id": subject_id,
-            TARGET_COL: 0,  # label not needed for explanation
+            MODEL_TARGET_COL: 0,  # label not needed for explanation
         }])
         notes_df = build_notes_dataframe(notes_raw, label_df)
         if notes_df.empty:

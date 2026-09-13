@@ -52,7 +52,7 @@ import pandas as pd
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
-from src.schemas import TARGET_COL
+from src.schemas import MODEL_TARGET_COL
 from src.stage3.explain import sweep_discordance_thresholds
 from src.stage3.pipeline import explain_patient
 
@@ -116,7 +116,7 @@ def _preload_notes(
 
     subject_lookup = results_df.set_index("hadm_id")["subject_id"].to_dict()
     label_df = pd.DataFrame([
-        {"hadm_id": h, "subject_id": subject_lookup.get(h), TARGET_COL: 0}
+        {"hadm_id": h, "subject_id": subject_lookup.get(h), MODEL_TARGET_COL: 0}
         for h in target_hadm_ids
     ])
     notes_raw = load_notes(cfg, hadm_ids=set(target_hadm_ids))
