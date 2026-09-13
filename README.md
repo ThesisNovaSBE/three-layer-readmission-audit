@@ -78,7 +78,7 @@ Stage 1+2 section.
 No MIMIC access? The pipeline runs on synthetic data out of the box.
 
 ```bash
-git clone <repo-url> && cd 20260401_Thesis
+git clone https://github.com/ThesisNovaSBE/three-layer-readmission-audit.git && cd three-layer-readmission-audit
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
