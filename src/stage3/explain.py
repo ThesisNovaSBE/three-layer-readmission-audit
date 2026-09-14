@@ -614,10 +614,16 @@ def _get_engine(model_name: str) -> "LLM":
         try:
             from vllm import LLM as _LLM  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
         except ImportError as exc:
+            # Include the original exception, not just a generic "not
+            # installed" message -- confirmed 2026-09-14 that swallowing it
+            # hid the real cause (vLLM installed but some submodule failing
+            # to import) behind a misleading "pip install vllm" instruction
+            # in the batch log, wasting a diagnostic round-trip.
             _ENGINE_LOAD_ERROR[model_name] = ImportError(
-                "vLLM is required for Stage 3 (switched from Ollama 2026-09-10 "
-                "-- see config.yaml's stage3.model_name comment). GPU/Linux "
-                "only -- install on the cluster: pip install vllm"
+                "vLLM import failed for Stage 3 (switched from Ollama "
+                "2026-09-10 -- see config.yaml's stage3.model_name comment). "
+                f"GPU/Linux only -- if not installed: pip install vllm. "
+                f"Underlying error: {exc!r}"
             )
             raise _ENGINE_LOAD_ERROR[model_name] from exc
         print(f"[stage3] Loading vLLM engine for '{model_name}' (one-time load) ...")
