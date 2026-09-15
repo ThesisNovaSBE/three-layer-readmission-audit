@@ -667,13 +667,70 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
-def call_llm(
-    prompt: str,
+def _finalize_annotation(
+    raw: str, note_text: str, *, likely_truncated: bool
+) -> dict[str, Any]:
+    """Parse one raw model response into a finished annotation dict.
+
+    Shared by :func:`call_llm_batch` for every item in a batch -- quote
+    verification and ``decision_rule`` need each patient's own
+    ``note_text``, so this can't be hoisted above the per-item loop.
+    """
+    annotation = _parse_response(raw)
+    if annotation["annotation_failed"]:
+        # Hitting the token cap is the most actionable failure mode to
+        # distinguish at a glance (raise _MAX_NEW_TOKENS) versus a genuine
+        # malformed/off-taxonomy response (a prompt or model-capability
+        # issue) -- checked via EOS-token presence per sequence, not a
+        # batch-wide generated-length heuristic (with left-padding for
+        # batched generation, sequences that finish early still show the
+        # batch's max generated length, so length alone can't tell them
+        # apart from a sequence that was genuinely truncated).
+        if likely_truncated:
+            annotation["clinical_justification"] = (
+                f"[TRUNCATED at max_new_tokens={_MAX_NEW_TOKENS}] "
+                + annotation["clinical_justification"]
+            )
+        return annotation
+
+    mitigating = [
+        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        for g in annotation["mitigating_grounds"]
+    ]
+    aggravating = [
+        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        for g in annotation["aggravating_grounds"]
+    ]
+    annotation["mitigating_grounds"] = mitigating
+    annotation["aggravating_grounds"] = aggravating
+    annotation["all_quotes_verified"] = all(
+        g["quote_verified"] for g in mitigating + aggravating
+    )
+    annotation["decision_rule"] = compute_decision_rule(
+        annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
+    )
+    return annotation
+
+
+def call_llm_batch(
+    prompts: list[str],
     cfg: AppConfig,
     model_name: str | None = None,
-    note_text: str = "",
-) -> dict[str, Any]:
-    """Call a locally-served model and return the parsed annotation dict.
+    note_texts: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Call a locally-served model for MULTIPLE patients in one batched
+    ``generate()`` call, instead of one call per patient.
+
+    Added 2026-09-15 after measuring one-patient-at-a-time HF generation:
+    40 minutes for 10 patients extrapolates to weeks of wall-clock time for
+    the full ~9,800-admission batch. HF's ``generate()`` supports padding
+    multiple prompts into one forward-pass batch directly; lm-format-
+    enforcer's guided decoding supports this too via HF's per-sequence
+    ``prefix_allowed_tokens_fn(batch_id, input_ids)`` signature -- one
+    parser instance is shared correctly across the whole batch since every
+    patient uses the same ``_LLMOutput`` schema. Left-padding is required
+    for decoder-only batched generation (right-padding would misalign
+    where each sequence's real next-token position is).
 
     Uses schema-constrained decoding via ``lm-format-enforcer``'s
     ``prefix_allowed_tokens_fn`` hook into HF ``generate()`` — this is what
@@ -687,7 +744,7 @@ def call_llm(
     diagnosis). The schema-constrained-JSON guarantee is preserved across
     every switch; only the serving mechanism has changed.
 
-    Generalised so the same prompt can be run through a different model —
+    Generalised so the same prompts can be run through a different model —
     e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
     the auditor's value depends on model scale, without duplicating the
     prompt/parsing logic. All models here are assumed locally-served, fully
@@ -695,21 +752,29 @@ def call_llm(
     decision — see docs/ARCHITECTURE.md.
 
     Args:
-        prompt:     built by :func:`build_prompt`.
+        prompts:    prompts built by :func:`build_prompt`, one per patient.
         cfg:        validated project config (reads ``stage3.temperature``
                     — pinned at 0 for reproducibility).
         model_name: local model path to use. Defaults to
                     ``cfg.stage3.model_name`` (the primary auditor model).
-        note_text:  the same raw note text passed to :func:`build_prompt` —
-                    used to verify each ground's quote against it and to
-                    compute ``decision_rule``, not re-sent to the model.
+        note_texts: one raw note text per prompt, same order as ``prompts``
+                    — used to verify each ground's quote and to compute
+                    ``decision_rule``, not re-sent to the model. Defaults
+                    to ``""`` per prompt if not given.
 
     Returns:
-        Dict with keys ``mitigating_grounds``, ``aggravating_grounds``,
-        ``planned_return``, ``clinical_justification``, ``decision_model``,
-        ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
+        List of annotation dicts, same order as ``prompts``, each with keys
+        ``mitigating_grounds``, ``aggravating_grounds``, ``planned_return``,
+        ``clinical_justification``, ``decision_model``, ``decision_rule``,
+        ``all_quotes_verified``, ``annotation_failed``.
     """
+    if not prompts:
+        return []
     model_name = model_name or cfg.stage3.model_name
+    note_texts = note_texts if note_texts is not None else [""] * len(prompts)
+    if len(note_texts) != len(prompts):
+        raise ValueError("note_texts must be the same length as prompts")
+
     # Deliberately NOT inside the try/except below: a missing/broken
     # torch/transformers install is a setup failure, not a per-patient
     # annotation problem -- confirmed a real, live bug 2026-09-13 with the
@@ -735,14 +800,20 @@ def call_llm(
         build_transformers_prefix_allowed_tokens_fn,
     )
     try:
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
+        tokenizer.padding_side = "left"  # required for batched decoder-only generation
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        chat_texts = [
+            tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": p},
+                ],
+                tokenize=False, add_generation_prompt=True,
+            )
+            for p in prompts
         ]
-        chat_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = tokenizer(chat_text, return_tensors="pt").to(model.device)
+        inputs = tokenizer(chat_texts, return_tensors="pt", padding=True).to(model.device)
         parser = JsonSchemaParser(_LLMOutput.model_json_schema())
         prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
         do_sample = cfg.stage3.temperature > 0
@@ -753,42 +824,54 @@ def call_llm(
                 do_sample=do_sample,
                 temperature=cfg.stage3.temperature if do_sample else None,
                 prefix_allowed_tokens_fn=prefix_fn,
-                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
             )
+        # Left-padding aligns every sequence's real input to end at the same
+        # position, so generated tokens for the WHOLE batch start at this
+        # one shared index -- no per-sequence prompt-length bookkeeping needed.
         prompt_len = inputs["input_ids"].shape[1]
-        n_generated = output_ids.shape[1] - prompt_len
-        raw = tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True)
+        generated_ids = output_ids[:, prompt_len:]
+        raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        eos_id = tokenizer.eos_token_id
+        truncated_flags = [
+            (eos_id not in row.tolist()) if eos_id is not None else False
+            for row in generated_ids
+        ]
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+        return [
+            {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+            for _ in prompts
+        ]
 
-    annotation = _parse_response(raw)
-    if annotation["annotation_failed"]:
-        # Hitting the token cap is the most actionable failure mode to
-        # distinguish at a glance (raise _MAX_NEW_TOKENS) versus a genuine
-        # malformed/off-taxonomy response (a prompt or model-capability
-        # issue) -- n_generated >= cap is a hard, unambiguous signal, not
-        # an inference from output shape.
-        if n_generated >= _MAX_NEW_TOKENS:
-            annotation["clinical_justification"] = (
-                f"[TRUNCATED at max_new_tokens={_MAX_NEW_TOKENS}] "
-                + annotation["clinical_justification"]
-            )
-        return annotation
+    return [
+        _finalize_annotation(raw, note_text, likely_truncated=truncated)
+        for raw, note_text, truncated in zip(raws, note_texts, truncated_flags)
+    ]
 
-    mitigating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
-        for g in annotation["mitigating_grounds"]
-    ]
-    aggravating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
-        for g in annotation["aggravating_grounds"]
-    ]
-    annotation["mitigating_grounds"] = mitigating
-    annotation["aggravating_grounds"] = aggravating
-    annotation["all_quotes_verified"] = all(
-        g["quote_verified"] for g in mitigating + aggravating
-    )
-    annotation["decision_rule"] = compute_decision_rule(
-        annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
-    )
-    return annotation
+
+def call_llm(
+    prompt: str,
+    cfg: AppConfig,
+    model_name: str | None = None,
+    note_text: str = "",
+) -> dict[str, Any]:
+    """Call a locally-served model for a single patient.
+
+    Thin wrapper around :func:`call_llm_batch` with a batch of one -- kept
+    for the on-demand API path (:func:`src.stage3.pipeline.explain_patient`)
+    where batching doesn't apply. See :func:`call_llm_batch` for the full
+    mechanism/design docstring.
+
+    Args:
+        prompt:     built by :func:`build_prompt`.
+        cfg:        validated project config.
+        model_name: local model path to use. Defaults to
+                    ``cfg.stage3.model_name``.
+        note_text:  the same raw note text passed to :func:`build_prompt`.
+
+    Returns:
+        Annotation dict -- see :func:`call_llm_batch`.
+    """
+    return call_llm_batch(
+        [prompt], cfg, model_name=model_name, note_texts=[note_text]
+    )[0]

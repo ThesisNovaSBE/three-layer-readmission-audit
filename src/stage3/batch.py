@@ -1,12 +1,20 @@
 """Batch Stage 3 audit runner.
 
 ``src/stage3/pipeline.py``'s ``explain_patient`` is on-demand, single-patient
-only (built for the API). This module runs it over every Stage 1-flagged,
-note-covered admission in ``models/stage2_results.csv``, preloading the
-Stage 1 artifact, Stage 2 results, feature matrix, and (2026-09-13,
-critical at this scale) every needed discharge note in one pass rather than
-one MIMIC-IV-Note file scan per admission — and writes results incrementally
-so a slow or interrupted LLM-serving run doesn't lose completed work.
+only (built for the API). This module runs the same evidence-assembly logic
+over every Stage 1-flagged, note-covered admission in
+``models/stage2_results.csv``, preloading the Stage 1 artifact, Stage 2
+results, feature matrix, and (2026-09-13, critical at this scale) every
+needed discharge note in one pass rather than one MIMIC-IV-Note file scan
+per admission — and writes results incrementally so a slow or interrupted
+LLM-serving run doesn't lose completed work. Since 2026-09-15, the LLM call
+itself is also batched across ``cfg.stage3.generation_batch_size`` patients
+per ``generate()`` call (see :func:`_process_chunk`) rather than one
+patient at a time -- measured too slow at ~9,800-admission scale otherwise
+(40 min for 10 patients extrapolates to weeks). ``run_batch_audit`` calls
+``pipeline._prepare_patient`` / ``explain.call_llm_batch`` /
+``pipeline._assemble_result`` directly instead of ``explain_patient``, so
+it can batch the middle step across a whole chunk of patients.
 
 This is required, not optional, for two things the on-demand path cannot
 produce on its own:
@@ -45,6 +53,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 import joblib
 import pandas as pd
@@ -53,8 +62,8 @@ from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
-from src.stage3.explain import sweep_discordance_thresholds
-from src.stage3.pipeline import explain_patient
+from src.stage3.explain import call_llm_batch, sweep_discordance_thresholds
+from src.stage3.pipeline import _assemble_result, _prepare_patient, explain_patient
 
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
@@ -124,6 +133,116 @@ def _preload_notes(
     return dict(zip(notes_df["hadm_id"], notes_df["text"]))
 
 
+def _process_chunk(
+    chunk: list[int],
+    cfg: AppConfig,
+    *,
+    results_df: pd.DataFrame,
+    artifact: dict,
+    feature_matrix: pd.DataFrame,
+    notes_lookup: dict[int, str],
+    writer: "csv.DictWriter",
+    fh,
+) -> tuple[int, int, int]:
+    """Prepare, batch-generate, assemble, and write one chunk of patients.
+
+    Extracted from run_batch_audit() (2026-09-15) to fix a pylint
+    too-many-locals -- same reason src/stage2/calibrate.py's cache helpers
+    were split out. Returns (n_ok, n_failed, n_annotation_failed) deltas
+    for this chunk only; the caller accumulates running totals.
+    """
+    n_ok = n_failed = n_annotation_failed = 0
+    prepared: list[tuple[int, object]] = []
+    for hadm_id in chunk:
+        try:
+            prepared.append((hadm_id, _prepare_patient(
+                hadm_id, cfg,
+                results_df=results_df, artifact=artifact,
+                feature_matrix=feature_matrix,
+                note_text=notes_lookup.get(hadm_id, ""),
+            )))
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # One bad admission (missing note, malformed feature row) must
+            # not kill the whole batch.
+            print(f"[stage3/batch] [prep] hadm_id={hadm_id} FAILED: {exc}")
+            n_failed += 1
+
+    if not prepared:
+        return n_ok, n_failed, n_annotation_failed
+
+    prompts = [p.prompt for _, p in prepared]
+    note_texts = [p.prompt_note_text for _, p in prepared]
+    try:
+        annotations = call_llm_batch(prompts, cfg, note_texts=note_texts)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # A whole-chunk generation failure (OOM, transient LLM-serving
+        # error) must not kill the rest of the batch -- mark every patient
+        # in this chunk failed and let the caller move on to the next chunk.
+        ids = ", ".join(str(h) for h, _ in prepared)
+        print(f"[stage3/batch] [generate] hadm_ids=[{ids}] FAILED: {exc}")
+        return n_ok, n_failed + len(prepared), n_annotation_failed
+
+    for (_, prep), annotation in zip(prepared, annotations):
+        result = _assemble_result(prep, annotation)
+        row = result.model_dump()
+        row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
+        row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
+        writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
+        fh.flush()
+        n_ok += 1
+        if row["annotation_failed"]:
+            n_annotation_failed += 1
+
+    return n_ok, n_failed, n_annotation_failed
+
+
+class _BatchSetup(NamedTuple):
+    """Everything run_batch_audit needs loaded before writing any rows."""
+
+    artifact: dict
+    results_df: pd.DataFrame
+    feature_matrix: pd.DataFrame
+    notes_lookup: dict[int, str]
+    pending: list[int]
+
+
+def _setup_batch(
+    cfg: AppConfig,
+    *,
+    hadm_ids: list[int] | None,
+    limit: int | None,
+    resume: bool,
+    out_path: Path,
+) -> _BatchSetup:
+    """Load artifact/results/feature-matrix/notes and resolve the target
+    admission list -- extracted (2026-09-15) alongside _process_chunk to
+    fix a pylint too-many-locals on run_batch_audit."""
+    # Artifact MUST load before torch — see src/stage3/pipeline.py.
+    artifact = _load_artifact(cfg)
+    results_df = _load_results(get_model_dir())
+    feature_matrix = load_feature_matrix(cfg, "full")
+
+    targets = hadm_ids if hadm_ids is not None else results_df["hadm_id"].astype(int).tolist()
+    if limit is not None:
+        targets = targets[:limit]
+
+    done = _already_done(out_path) if resume else set()
+    pending = [h for h in targets if h not in done]
+    print(
+        f"[stage3/batch] {len(targets):,} target admissions, "
+        f"{len(done):,} already done, {len(pending):,} pending"
+    )
+
+    print(f"[stage3/batch] Pre-loading notes for {len(pending):,} admissions "
+          "(single pass, not one scan per admission) ...")
+    notes_lookup = _preload_notes(cfg, pending, results_df)
+
+    return _BatchSetup(
+        artifact=artifact, results_df=results_df, feature_matrix=feature_matrix,
+        notes_lookup=notes_lookup, pending=pending,
+    )
+
+
 def run_batch_audit(
     cfg: AppConfig,
     *,
@@ -147,64 +266,42 @@ def run_batch_audit(
     Returns:
         The output path written to.
     """
-    # Artifact MUST load before torch — see src/stage3/pipeline.py.
-    artifact = _load_artifact(cfg)
-    model_dir = get_model_dir()
-    results_df = _load_results(model_dir)
-    feature_matrix = load_feature_matrix(cfg, "full")
-
-    out_path = out_path or (model_dir / "stage3_batch_results.csv")
-
-    targets = hadm_ids if hadm_ids is not None else results_df["hadm_id"].astype(int).tolist()
-    if limit is not None:
-        targets = targets[:limit]
-
-    done = _already_done(out_path) if resume else set()
-    pending = [h for h in targets if h not in done]
-    print(
-        f"[stage3/batch] {len(targets):,} target admissions, "
-        f"{len(done):,} already done, {len(pending):,} pending"
+    out_path = out_path or (get_model_dir() / "stage3_batch_results.csv")
+    setup = _setup_batch(
+        cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path
     )
-
-    print(f"[stage3/batch] Pre-loading notes for {len(pending):,} admissions "
-          "(single pass, not one scan per admission) ...")
-    notes_lookup = _preload_notes(cfg, pending, results_df)
 
     write_header = not (resume and out_path.exists())
     mode = "a" if resume and out_path.exists() else "w"
     n_ok = n_failed = n_annotation_failed = 0
+    # Patients per batched generate() call, not per-row CSV write -- rows
+    # are still written and flushed one at a time within a chunk, so
+    # --resume's crash-recovery granularity is unchanged. Only the LLM call
+    # itself is batched. See cfg.stage3.generation_batch_size's docstring
+    # for why: one-patient-at-a-time generation measured too slow at scale
+    # (2026-09-15).
+    chunk_size = max(1, cfg.stage3.generation_batch_size)
 
     with open(out_path, mode, newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_OUTPUT_FIELDS)
         if write_header:
             writer.writeheader()
 
-        for i, hadm_id in enumerate(pending, start=1):
-            try:
-                result = explain_patient(
-                    hadm_id, cfg,
-                    results_df=results_df, artifact=artifact,
-                    feature_matrix=feature_matrix,
-                    note_text=notes_lookup.get(hadm_id, ""),
-                )
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                # One bad admission (missing note, parse failure upstream,
-                # transient LLM-serving error) must not kill the whole batch.
-                print(f"[stage3/batch] [{i}/{len(pending)}] hadm_id={hadm_id} FAILED: {exc}")
-                n_failed += 1
-                continue
+        for chunk_start in range(0, len(setup.pending), chunk_size):
+            chunk = setup.pending[chunk_start:chunk_start + chunk_size]
+            d_ok, d_failed, d_annotation_failed = _process_chunk(
+                chunk, cfg,
+                results_df=setup.results_df, artifact=setup.artifact,
+                feature_matrix=setup.feature_matrix, notes_lookup=setup.notes_lookup,
+                writer=writer, fh=fh,
+            )
+            n_ok += d_ok
+            n_failed += d_failed
+            n_annotation_failed += d_annotation_failed
 
-            row = result.model_dump()
-            row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
-            row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
-            writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
-            fh.flush()
-            n_ok += 1
-            if row["annotation_failed"]:
-                n_annotation_failed += 1
-            if i % 25 == 0 or i == len(pending):
-                print(f"[stage3/batch] [{i}/{len(pending)}] "
-                      f"ok={n_ok} failed={n_failed} annotation_failed={n_annotation_failed}")
+            i_done = chunk_start + len(chunk)
+            print(f"[stage3/batch] [{i_done}/{len(setup.pending)}] "
+                  f"ok={n_ok} failed={n_failed} annotation_failed={n_annotation_failed}")
 
     print(f"[stage3/batch] Done. Saved -> {out_path} "
           f"(ok={n_ok}, failed={n_failed}, annotation_failed={n_annotation_failed})")

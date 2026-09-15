@@ -234,6 +234,13 @@ stage3:
   # scores are not guaranteed to be comparably calibrated even after isotonic
   # calibration — rank displacement is invariant to that risk.
   discordance_displacement_pp: 20.0  # |displacement| >= this (percentile points) => discordant
+  # Patients per batched generate() call in batch.py (2026-09-15, after
+  # measuring one-patient-at-a-time HF generation was too slow at scale:
+  # 40 min for 10 patients extrapolates to weeks for the full ~9,800-
+  # admission run). Conservative default -- VRAM headroom depends on note
+  # length and hasn't been swept empirically yet; raise once real cluster
+  # timing/VRAM headroom is confirmed.
+  generation_batch_size: 4
 
 # ── Output ──
 output:

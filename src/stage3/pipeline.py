@@ -3,7 +3,7 @@
 This is the sole entry point for Stage 3.  It is called by the API when a
 clinician requests review of a specific flagged patient — never in batch.
 
-The function assembles evidence from all three layers and lets phi4-mini
+The function assembles evidence from all three layers and lets MedGemma-27B
 reach its own decision:
 
 * **Stage 1** (XGBoost on structured EHR): the risk score and SHAP-ranked
@@ -11,11 +11,12 @@ reach its own decision:
 * **Stage 2** (Clinical-Longformer on the discharge note): an
   independently-derived, note-only risk estimate — evidence for the auditor,
   not a decision it explains.
-* **Stage 3** (phi4-mini via Ollama): reads the discharge note plus both
-  scores, extracts mitigating/aggravating grounds with quotes, and returns
-  its own uphold/override/insufficient_evidence judgment with a
-  justification — alongside ``decision_rule``, the same decision
-  recomputed deterministically in code from the extracted grounds.
+* **Stage 3** (MedGemma-27B via HF ``transformers.generate()`` +
+  lm-format-enforcer): reads the discharge note plus both scores, extracts
+  mitigating/aggravating grounds with quotes, and returns its own
+  uphold/override/insufficient_evidence judgment with a justification —
+  alongside ``decision_rule``, the same decision recomputed deterministically
+  in code from the extracted grounds.
 
 Usage::
 
@@ -28,6 +29,8 @@ Usage::
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 import joblib
 import numpy as np
@@ -166,7 +169,27 @@ def _get_attention(
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def explain_patient(
+class _PreparedPatient(NamedTuple):
+    """Everything :func:`explain_patient` computes before calling the LLM.
+
+    Split out 2026-09-15 so :mod:`src.stage3.batch` can prepare a whole
+    chunk of patients, submit all their prompts to
+    :func:`src.stage3.explain.call_llm_batch` together in one batched
+    ``generate()`` call, then assemble each result -- instead of one
+    patient at a time. See :func:`_prepare_patient` / :func:`_assemble_result`.
+    """
+
+    patient: dict
+    discordance: dict
+    shap_strings: list[str]
+    attention_sentences: list[str]
+    note_text: str
+    prompt: str
+    prompt_note_text: str
+    resolved_model_name: str
+
+
+def _prepare_patient(
     hadm_id: int,
     cfg: AppConfig,
     *,
@@ -177,8 +200,9 @@ def explain_patient(
     model_name: str | None = None,
     suppress_note: bool = False,
     suppress_stage2: bool = False,
-) -> ExplanationResult:
-    """Generate a Stage 3 explanation for one patient on demand.
+) -> _PreparedPatient:
+    """Assemble one patient's evidence and build their prompt -- everything
+    :func:`explain_patient` does up to (not including) the LLM call.
 
     All heavy objects (artifact, results_df, feature_matrix, note_text) can be
     pre-loaded by the caller and passed in as keyword arguments — the API
@@ -215,7 +239,9 @@ def explain_patient(
                         prompt. Same real-values-reported caveat as above.
 
     Returns:
-        :class:`ExplanationResult` with all fields populated.
+        :class:`_PreparedPatient` ready for :func:`call_llm`/
+        :func:`~src.stage3.explain.call_llm_batch` and then
+        :func:`_assemble_result`.
 
     Raises:
         FileNotFoundError: if required model files are missing.
@@ -268,10 +294,28 @@ def explain_patient(
         hide_stage2=suppress_stage2,
     )
     resolved_model_name = model_name or cfg.stage3.model_name
-    annotation = call_llm(
-        prompt, cfg, model_name=resolved_model_name, note_text=prompt_note_text
+
+    return _PreparedPatient(
+        patient=patient,
+        discordance=discordance,
+        shap_strings=shap_strings,
+        attention_sentences=attention_sentences,
+        note_text=note_text,
+        prompt=prompt,
+        prompt_note_text=prompt_note_text,
+        resolved_model_name=resolved_model_name,
     )
 
+
+def _assemble_result(
+    prepared: _PreparedPatient, annotation: dict
+) -> ExplanationResult:
+    """Build the final :class:`ExplanationResult` from a prepared patient
+    plus the LLM's parsed annotation. The second half of what
+    :func:`explain_patient` does in one shot — see :func:`_prepare_patient`.
+    """
+    patient = prepared.patient
+    discordance = prepared.discordance
     return ExplanationResult(
         hadm_id=patient["hadm_id"],
         stage1_score=patient["stage1_score"],
@@ -282,8 +326,8 @@ def explain_patient(
         r2=discordance["r2"],
         displacement=discordance["displacement"],
         discordance_mode=str(discordance["mode"]),
-        top_shap_features=shap_strings,
-        attention_sentences=attention_sentences,
+        top_shap_features=prepared.shap_strings,
+        attention_sentences=prepared.attention_sentences,
         mitigating_grounds=annotation["mitigating_grounds"],
         aggravating_grounds=annotation["aggravating_grounds"],
         all_quotes_verified=annotation["all_quotes_verified"],
@@ -291,10 +335,62 @@ def explain_patient(
         clinical_justification=annotation["clinical_justification"],
         decision_model=annotation["decision_model"],
         decision_rule=annotation["decision_rule"],
-        note_truncated=is_note_truncated(note_text),
-        model_name=resolved_model_name,
+        note_truncated=is_note_truncated(prepared.note_text),
+        model_name=prepared.resolved_model_name,
         annotation_failed=annotation["annotation_failed"],
     )
+
+
+def explain_patient(
+    hadm_id: int,
+    cfg: AppConfig,
+    *,
+    results_df: pd.DataFrame | None = None,
+    artifact: dict | None = None,
+    feature_matrix: pd.DataFrame | None = None,
+    note_text: str | None = None,
+    model_name: str | None = None,
+    suppress_note: bool = False,
+    suppress_stage2: bool = False,
+) -> ExplanationResult:
+    """Generate a Stage 3 explanation for one patient on demand.
+
+    Does prepare -> call -> assemble in sequence for this single patient —
+    unchanged behavior/signature from before the 2026-09-15 batching split
+    (see :func:`_prepare_patient`). ``batch.py`` calls the two halves
+    directly instead, so it can batch the LLM call across many patients.
+
+    Args:
+        hadm_id:        Hospital admission ID to explain.
+        cfg:            Validated project configuration.
+        results_df:     Pre-loaded Stage 2 results DataFrame (optional).
+        artifact:       Pre-loaded Stage 1 XGBoost artifact dict (optional).
+        feature_matrix: Pre-loaded full feature matrix (optional).
+        note_text:      Pre-loaded discharge note text for this admission
+                        (optional).
+        model_name:     local model path to audit with. Defaults to
+                        ``cfg.stage3.model_name``.
+        suppress_note:  blind-note validation control (session 19 Phase D1).
+        suppress_stage2: no-Stage-2 validation control (Phase D2).
+
+    Returns:
+        :class:`ExplanationResult` with all fields populated.
+
+    Raises:
+        FileNotFoundError: if required model files are missing.
+        KeyError:          if the patient is not in Stage 2 results.
+    """
+    prepared = _prepare_patient(
+        hadm_id, cfg,
+        results_df=results_df, artifact=artifact, feature_matrix=feature_matrix,
+        note_text=note_text, model_name=model_name,
+        suppress_note=suppress_note, suppress_stage2=suppress_stage2,
+    )
+    annotation = call_llm(
+        prepared.prompt, cfg,
+        model_name=prepared.resolved_model_name, note_text=prepared.prompt_note_text,
+    )
+    return _assemble_result(prepared, annotation)
 
 
 def main() -> None:
