@@ -11,14 +11,17 @@
 > `sessions/2026-09-13_session-23.md`) — the numbers below are from
 > *after* that fix, not the initial (miscalibrated) run. Both on GWDG
 > KISSKI (A100 80GB). Stage 3 has switched from Ollama/phi4-mini to
-> vLLM/MedGemma-27B-text-it (2026-09-10) — matches the current code, but
-> has only been smoke-tested at small scale, not run at full scale yet.
+> MedGemma-27B-text-it (2026-09-10), served via plain HF transformers +
+> lm-format-enforcer (2026-09-15, after vLLM proved structurally
+> incompatible with KISSKI's CUDA 12.8 driver ceiling) — matches the
+> current code, but has only been smoke-tested at small scale, not run at
+> full scale yet.
 
 ## Model Details
 
 - **Stage 1:** Classical ML classifiers (Logistic Regression, XGBoost, HistGradientBoosting) on structured EHR features; isotonic-calibrated (since 2026-08-26); capacity-constrained operating point (primary, since 2026-08-25) with recall-floor kept as a secondary comparison table. Two label variants exist in the feature matrix, `readmission_30d` (all-cause) and `readmission_30d_unplanned` (excludes outcome admissions with a planned `admission_type`; added 2026-08-26) — **the model's actual target is `readmission_30d_unplanned`** as of 2026-09-05 (`MODEL_TARGET_COL` in `src/schemas.py`), matching this project's stated scope; every model trained before that date, including the original artifact, silently used all-cause instead
 - **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`), note-only (no structured features) — 4096-token context (raised from 2048 on 2026-08-25), trained on real MIMIC-IV-Note discharge summaries; produces an independent, note-based risk estimate, not a gate on Stage 1's flag. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.
-- **Stage 3:** Independent LLM audit via vLLM (`google/medgemma-27b-text-it`, temperature=0, switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
+- **Stage 3:** Independent LLM audit via HF `transformers.generate()` + `lm-format-enforcer` (`google/medgemma-27b-text-it`, temperature=0, switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 after KISSKI's CUDA 12.8 driver ceiling proved incompatible with vLLM's kernel stack) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
 - **Model type:** Three-layer LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
@@ -160,17 +163,22 @@ incomplete, not a negative result to draw conclusions from yet — Stage 3
 (the actual "auditor" layer this pipeline is designed around) hasn't run at
 full scale yet. The real RQ2 answer is pending that.
 
-## Stage 3 — Independent LLM Audit (MedGemma-27B via vLLM)
+## Stage 3 — Independent LLM Audit (MedGemma-27B via HF transformers + lm-format-enforcer)
 
 Rewritten 2026-08-25, extended 2026-08-28. Switched serving from
-Ollama/phi4-mini to vLLM/`google/medgemma-27b-text-it` on 2026-09-10, once
-the batch run moved to cluster GPU hardware — vLLM's guided/structured
-decoding preserves the schema-constrained JSON generation Ollama's
-`format=` provided (plain `transformers.generate()` has no built-in
-equivalent), and MedGemma is the only evaluated candidate benchmarked
-directly on MIMIC-IV-style reasoning; see `sessions/2026-09-13_session-23.md`
-and `config.yaml`'s `stage3.model_name` comment for the full comparison and
-license check. Available both on-demand (one patient per call, via the
+Ollama/phi4-mini to `google/medgemma-27b-text-it` on 2026-09-10, once the
+batch run moved to cluster GPU hardware, first via vLLM (its
+guided/structured decoding preserved the schema-constrained JSON
+generation Ollama's `format=` provided), then to plain HF
+`transformers.generate()` + `lm-format-enforcer`'s
+`prefix_allowed_tokens_fn` on 2026-09-15 — same schema-constrained-JSON
+guarantee, different serving mechanism — after KISSKI's CUDA 12.8 driver
+ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS
+kernels regardless of vLLM/torch version (see `sessions/` for the full
+diagnosis). MedGemma is the only evaluated candidate benchmarked directly
+on MIMIC-IV-style reasoning; see `sessions/2026-09-13_session-23.md` and
+`config.yaml`'s `stage3.model_name` comment for the full model comparison
+and license check. Available both on-demand (one patient per call, via the
 API) and in batch (`src/stage3/batch.py`, every Stage 1-flagged,
 note-covered admission) — batch has only been smoke-tested at small scale
 as of this writing, not run at full scale. For each patient, the model

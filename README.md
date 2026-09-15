@@ -8,7 +8,7 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 **Layer 2 — Clinical-Longformer, note-only (independent risk estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads only the discharge note of flagged patients — no structured features — and produces an independent risk estimate, not a gate on Stage 1's flag. (A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.)
 
-**Layer 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via vLLM with guided/structured decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
+**Layer 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via plain HF `transformers.generate()` + `lm-format-enforcer` for guided/structured JSON decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
 
@@ -23,7 +23,7 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 > used all-cause despite that being the project's stated scope; see
 > `docs/ARCHITECTURE.md` §6). See `MODEL_CARD.md` for the full breakdown,
 > including per-age-group fairness metrics and the real RQ1 comparison.
-> Stage 3 (MedGemma-27B via vLLM) has code and cluster infrastructure in
+> Stage 3 (MedGemma-27B via HF transformers) has code and cluster infrastructure in
 > place but has only been smoke-tested at small scale, not run at full
 > scale — see `docs/ARCHITECTURE.md` §4 for what's still pending.
 
@@ -111,7 +111,7 @@ python setup_stage2.py --mode full
 # 5. Stage 3: on-demand audit for one patient, or batch (src/stage3/batch.py)
 #    for every Stage 1-flagged, note-covered admission. Requires the
 #    MedGemma-27B weights pre-downloaded (download_stage3_model.sh) and
-#    vLLM installed (cluster/GPU only — see docs/ARCHITECTURE.md §4):
+#    lm-format-enforcer installed (cluster/GPU only — see docs/ARCHITECTURE.md §4):
 python -m src.stage3.pipeline <hadm_id>
 #    python -m src.stage3.batch          # full batch run
 #    python -m src.stage3.batch --limit 10   # smoke test
@@ -210,7 +210,7 @@ The dashboard has two views:
 │   │   ├── evaluate.py          # Stage 2 evaluation metrics
 │   │   └── predict.py           # Stage 2 inference on Stage 1 flags
 │   └── stage3/
-│       ├── explain.py           # Prompt building, discordance calc, vLLM/MedGemma call
+│       ├── explain.py           # Prompt building, discordance calc, MedGemma call
 │       ├── pipeline.py          # explain_patient() — the on-demand entry point
 │       ├── batch.py             # Batch audit runner — every flagged, note-covered admission
 │       ├── models.py            # ExplanationResult (Pydantic)

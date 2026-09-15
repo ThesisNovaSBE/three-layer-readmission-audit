@@ -82,16 +82,18 @@ See that session log for the full reasoning trail.
   decision) is still computed and still useful for the N1 ablation's
   "cascade" arm, but is **not** the final word on a patient — see Layer 3.
 
-### Layer 3 — MedGemma-27B via vLLM (independent auditor)
+### Layer 3 — MedGemma-27B via HF transformers + lm-format-enforcer (independent auditor)
 
 Rewritten 2026-08-25, extended 2026-08-28 (session 18) and 2026-08-28
 (session 19) (`src/stage3/explain.py`, `src/stage3/pipeline.py`,
 `src/stage3/models.py`). Serving switched from Ollama/phi4-mini to
-vLLM/`google/medgemma-27b-text-it` 2026-09-10 (session 23) once the batch
-run moved to cluster GPU hardware — see `config.yaml`'s `stage3.model_name`
-comment for the model/license comparison and
-`sessions/2026-09-13_session-23.md` for the full reasoning. Inputs: Stage
-1's score + SHAP-ranked reasons,
+`google/medgemma-27b-text-it` 2026-09-10 (session 23), first via vLLM, then
+to plain HF `transformers.generate()` + `lm-format-enforcer` 2026-09-15
+once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible
+with vLLM's flashinfer/CUTLASS kernels regardless of vLLM/torch version —
+see `config.yaml`'s `stage3.model_name` comment for the model/license
+comparison and `sessions/` for the full serving-mechanism diagnosis.
+Inputs: Stage 1's score + SHAP-ranked reasons,
 Stage 2's score, the discharge note itself (near-full text, not a 5-sentence
 attention summary), and a pre-computed discordance mode.
 
@@ -125,13 +127,16 @@ about the note's length — a note below `_MIN_INFORMATIVE_NOTE_CHARS`
 cannot ground either finding regardless of what was extracted from it.
 
 **Schema-constrained generation (session 19; serving mechanism changed
-session 23, same guarantee preserved).** `call_llm` passes a JSON schema
-(`_LLMOutput.model_json_schema()`) as a guided-decoding constraint —
-originally to Ollama's `format=` parameter, now to vLLM's
-`GuidedDecodingParams` (the switch to vLLM was specifically conditional on
-finding an equivalent, since bare `transformers.generate()` has no
-built-in structured-output support) — not the generic `format="json"` —
-this is what nearly eliminates malformed-JSON parse failures. The prompt
+session 23, changed again 2026-09-15, same guarantee preserved each time).**
+`call_llm` passes a JSON schema (`_LLMOutput.model_json_schema()`) as a
+guided-decoding constraint — originally to Ollama's `format=` parameter,
+then to vLLM's `GuidedDecodingParams`, now to `lm-format-enforcer`'s
+`prefix_allowed_tokens_fn` hook into plain HF `transformers.generate()`
+(the vLLM→lm-format-enforcer switch was forced by KISSKI's CUDA 12.8
+driver ceiling being structurally incompatible with vLLM's
+flashinfer/CUTLASS kernels — see `sessions/` for the diagnosis; not the
+generic `format="json"`) — this is what nearly eliminates malformed-JSON
+parse failures. The prompt
 was also reordered so the model emits
 grounds/evidence *before* `decision` (previously `decision` was asked first)
 — an autoregressive model conditions on what it has already written, so
@@ -441,9 +446,10 @@ session 17.
   themselves are real and current.
 - **Run `batch.py` at full scale** — the actual next step as of session 23.
   Cluster infrastructure (`download_stage3_model.sh`,
-  `scripts/slurm_stage3_batch.sh`) and the vLLM/MedGemma serving switch are
-  in place; a 10-patient smoke test was queued but not yet confirmed
-  working end-to-end. Needed to produce real RQ2 numbers and let
+  `scripts/slurm_stage3_batch.sh`) and the MedGemma serving switch (now via
+  HF transformers + lm-format-enforcer, see above) are in place; a
+  10-patient smoke test was queued but not yet confirmed working
+  end-to-end. Needed to produce real RQ2 numbers and let
   `evaluate_pipeline.py`'s `stage3` coverage block become non-empty — the
   current pipeline numbers (cascade ≈ control arm) are not yet the real
   RQ2 answer, since Stage 3 hasn't run.
@@ -493,8 +499,9 @@ session 17.
   PhysioNet Data Use Agreement; sending credentialed data to a third-party
   cloud API is very likely restricted without a specific agreement.
   Recommendation: default to a larger *local* model (served the same way
-  as the primary auditor, vLLM as of session 23 — see `stage3.model_name`),
-  not a cloud API, unless the DUA is explicitly checked and permits it.
+  as the primary auditor — HF transformers + lm-format-enforcer as of
+  2026-09-15, see `stage3.model_name`), not a cloud API, unless the DUA is
+  explicitly checked and permits it.
   `stage3.robustness_model` is deliberately left `null` pending this — do
   not set it without checking.
 - **RQ1's headline comparison denominator.** Layer 2 only ever covers

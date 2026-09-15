@@ -16,6 +16,15 @@ note-based score, and the discharge note itself, and returns its own
 uphold/override/insufficient_evidence judgment — not a narration of a
 decision already made by Stage 2.
 
+Served via plain HuggingFace ``transformers.generate()`` + ``lm-format-
+enforcer`` for schema-constrained decoding (switched from vLLM 2026-09-15):
+KISSKI's driver (CUDA 12.8 ceiling) proved structurally incompatible with
+vLLM's flashinfer/CUTLASS kernels, which hard-require CUDA 13 regardless of
+which vLLM/torch version combination is chosen — see sessions/ for the
+full diagnosis. This keeps the same model at full bf16 precision and the
+same guided-JSON-decoding guarantee vLLM provided, just via a different
+serving mechanism.
+
 Session 19 replaced the single free-text ``primary_clinical_domain`` with a
 fixed, two-sided grounds taxonomy (mitigating vs. aggravating), each ground
 requiring its own verbatim quote, and added a second, code-computed
@@ -56,14 +65,14 @@ from pydantic import BaseModel, ValidationError
 
 from src.config_schema import AppConfig
 
-# vLLM is deliberately NOT imported at module level: it's GPU/Linux-only
-# (won't even install on the CUDA-less Mac this project is otherwise
-# developed on), and everything else in this module (prompt building,
+# torch/transformers are deliberately NOT imported at module level for the
+# generation path: everything else in this module (prompt building,
 # response parsing, quote verification, decision-rule computation) has
-# nothing to do with model serving and must stay importable/testable
-# without it. Imported lazily inside _get_engine() instead.
+# nothing to do with model serving and must stay importable/testable on
+# the CUDA-less Mac this project is otherwise developed on. Imported
+# lazily inside _get_model() instead.
 if TYPE_CHECKING:
-    from vllm import LLM
+    from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 
 # ── Taxonomy ───────────────────────────────────────────────────────────────────
@@ -585,56 +594,62 @@ def build_prompt(
     )
 
 
-_ENGINE_CACHE: dict[str, "LLM"] = {}
-_ENGINE_LOAD_ERROR: dict[str, Exception] = {}
+_MODEL_CACHE: dict[str, tuple["PreTrainedTokenizerBase", "PreTrainedModel"]] = {}
+_MODEL_LOAD_ERROR: dict[str, Exception] = {}
 
 
-def _get_engine(model_name: str) -> "LLM":
-    """Return a cached vLLM engine for this model, loading it once per process.
+def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedModel"]:
+    """Return a cached (tokenizer, model) pair, loading it once per process.
 
     Loading a 27B-class model takes real time and VRAM -- call_llm() runs
-    once per patient (thousands of times in a batch run), so the engine
+    once per patient (thousands of times in a batch run), so the model
     must be created once and reused across calls, never re-instantiated
-    per call. Untested at real scale as of 2026-09-10 -- smoke-test on a
-    small --limit slice before a full batch run, same discipline as every
-    other cluster job this project has run.
+    per call.
 
     A failed load is cached too and re-raised immediately on every
     subsequent call, instead of retrying the full (tens-of-seconds)
-    construction attempt again -- confirmed a real cost 2026-09-13: a
-    driver/CUDA mismatch made every one of 10 patients in a smoke test
-    independently re-attempt and re-fail the same doomed engine load. The
-    failure mode (missing install, incompatible CUDA driver, etc.) cannot
-    change mid-process, so retrying serves no purpose and only burns
-    GPU-node time that would compound at full ~9,800-admission scale.
+    construction attempt again -- carried over from the vLLM version of
+    this function (2026-09-13 finding: a driver/CUDA mismatch made every
+    one of 10 patients in a smoke test independently re-attempt and
+    re-fail the same doomed engine load). The failure mode cannot change
+    mid-process, so retrying serves no purpose and only burns GPU-node
+    time that would compound at full ~9,800-admission scale.
     """
-    if model_name in _ENGINE_LOAD_ERROR:
-        raise _ENGINE_LOAD_ERROR[model_name]
-    if model_name not in _ENGINE_CACHE:
+    if model_name in _MODEL_LOAD_ERROR:
+        raise _MODEL_LOAD_ERROR[model_name]
+    if model_name not in _MODEL_CACHE:
         try:
-            from vllm import LLM as _LLM  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+            import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+            from transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+                AutoModelForCausalLM,
+                AutoTokenizer,
+            )
         except ImportError as exc:
-            # Include the original exception, not just a generic "not
-            # installed" message -- confirmed 2026-09-14 that swallowing it
-            # hid the real cause (vLLM installed but some submodule failing
-            # to import) behind a misleading "pip install vllm" instruction
-            # in the batch log, wasting a diagnostic round-trip.
-            _ENGINE_LOAD_ERROR[model_name] = ImportError(
-                "vLLM import failed for Stage 3 (switched from Ollama "
-                "2026-09-10 -- see config.yaml's stage3.model_name comment). "
-                f"GPU/Linux only -- if not installed: pip install vllm. "
+            _MODEL_LOAD_ERROR[model_name] = ImportError(
+                "torch/transformers import failed for Stage 3. "
                 f"Underlying error: {exc!r}"
             )
-            raise _ENGINE_LOAD_ERROR[model_name] from exc
-        print(f"[stage3] Loading vLLM engine for '{model_name}' (one-time load) ...")
+            raise _MODEL_LOAD_ERROR[model_name] from exc
+        print(f"[stage3] Loading HF model for '{model_name}' (one-time load) ...")
         try:
-            _ENGINE_CACHE[model_name] = _LLM(
-                model=model_name, dtype="bfloat16", trust_remote_code=True
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForCausalLM.from_pretrained(
+                # torch_dtype (not the newer `dtype` alias): HF kept
+                # torch_dtype working (deprecation warning at worst) across
+                # a much wider version range than `dtype` is recognized on
+                # older installs -- unlike _eval_strategy_kwarg() in
+                # src/stage2/train.py, this goes through **kwargs so there's
+                # no signature to introspect at runtime; picking the more
+                # backward-compatible name directly is the safer bet here.
+                model_name, torch_dtype=torch.bfloat16, device_map="cuda",
+                trust_remote_code=True,
             )
+            model.eval()
+            _MODEL_CACHE[model_name] = (tokenizer, model)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            _ENGINE_LOAD_ERROR[model_name] = exc
+            _MODEL_LOAD_ERROR[model_name] = exc
             raise
-    return _ENGINE_CACHE[model_name]
+    return _MODEL_CACHE[model_name]
 
 
 def call_llm(
@@ -643,21 +658,26 @@ def call_llm(
     model_name: str | None = None,
     note_text: str = "",
 ) -> dict[str, Any]:
-    """Call a vLLM-served local model and return the parsed annotation dict.
+    """Call a locally-served model and return the parsed annotation dict.
 
-    Uses guided/structured JSON decoding (``GuidedDecodingParams(json=...)``,
-    not free-text generation) — this is what nearly eliminates malformed-
-    JSON parse failures, per the colleague review that motivated this design
-    (previously Ollama's ``format=<JSON schema>``; switched to vLLM
-    2026-09-10 for cluster batch throughput, see config.yaml's
-    ``stage3.model_name`` comment for why).
+    Uses schema-constrained decoding via ``lm-format-enforcer``'s
+    ``prefix_allowed_tokens_fn`` hook into HF ``generate()`` — this is what
+    nearly eliminates malformed-JSON parse failures, per the colleague
+    review that motivated this design. Mechanism history: Ollama's
+    ``format=<JSON schema>`` (session 15) -> vLLM's ``GuidedDecodingParams``
+    (2026-09-10, for cluster batch throughput) -> plain HF ``generate()`` +
+    lm-format-enforcer (2026-09-15, after KISSKI's CUDA 12.8 driver ceiling
+    proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels
+    regardless of vLLM/torch version -- see sessions/ for the full
+    diagnosis). The schema-constrained-JSON guarantee is preserved across
+    every switch; only the serving mechanism has changed.
 
     Generalised so the same prompt can be run through a different model —
     e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
     the auditor's value depends on model scale, without duplicating the
-    prompt/parsing logic. All models here are assumed locally-served (via
-    vLLM, fully offline); routing to a cloud API is a separate, currently
-    unmade decision — see docs/ARCHITECTURE.md.
+    prompt/parsing logic. All models here are assumed locally-served, fully
+    offline; routing to a cloud API is a separate, currently unmade
+    decision — see docs/ARCHITECTURE.md.
 
     Args:
         prompt:     built by :func:`build_prompt`.
@@ -675,34 +695,46 @@ def call_llm(
         ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
     """
     model_name = model_name or cfg.stage3.model_name
-    # Deliberately NOT inside the try/except below: a missing/broken vLLM
-    # install is a setup failure, not a per-patient annotation problem --
-    # confirmed a real, live bug 2026-09-13: a smoke test with vLLM not
-    # installed silently logged "annotation_failed" for all 10 patients
+    # Deliberately NOT inside the try/except below: a missing/broken
+    # torch/transformers install is a setup failure, not a per-patient
+    # annotation problem -- confirmed a real, live bug 2026-09-13 with the
+    # prior vLLM version of this code: a smoke test with the engine
+    # unavailable silently logged "annotation_failed" for all 10 patients
     # instead of crashing, which at full batch scale (~9,800 calls) would
     # have ground through hours of compute before anyone noticed nothing
     # had actually worked. Let this raise immediately and loudly instead.
-    engine = _get_engine(model_name)
-    from vllm import SamplingParams  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-    from vllm.sampling_params import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-        GuidedDecodingParams,
+    tokenizer, model = _get_model(model_name)
+    import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+    from lm_format_enforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        JsonSchemaParser,
+        build_transformers_prefix_allowed_tokens_fn,
     )
     try:
-        sampling_params = SamplingParams(
-            temperature=cfg.stage3.temperature,
-            max_tokens=2048,
-            guided_decoding=GuidedDecodingParams(json=_LLMOutput.model_json_schema()),
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        chat_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
-        outputs = engine.chat(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            sampling_params=sampling_params,
+        inputs = tokenizer(chat_text, return_tensors="pt").to(model.device)
+        parser = JsonSchemaParser(_LLMOutput.model_json_schema())
+        prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
+        do_sample = cfg.stage3.temperature > 0
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=2048,
+                do_sample=do_sample,
+                temperature=cfg.stage3.temperature if do_sample else None,
+                prefix_allowed_tokens_fn=prefix_fn,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+        raw = tokenizer.decode(
+            output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
         )
-        raw = outputs[0].outputs[0].text
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "clinical_justification": f"[vLLM error: {exc}]"}
+        return {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
 
     annotation = _parse_response(raw)
     if annotation["annotation_failed"]:
