@@ -17,6 +17,8 @@ import warnings
 import numpy as np
 import pandas as pd
 
+_EXPLAINER_CACHE: dict[int, object] = {}
+
 _FEATURE_LABELS: dict[str, str] = {
     "age": "age (years)",
     "los_days": "length of stay (days)",
@@ -77,12 +79,30 @@ def extract_shap_features(
 
     try:
         import shap  # optional dependency  # pylint: disable=import-outside-toplevel
+        cache_key = id(model)
+        if cache_key not in _EXPLAINER_CACHE:
+            # Constructing a TreeExplainer is not free -- confirmed 391ms/call
+            # against the real Stage 1 model (2026-09-13). This function is
+            # called once per patient in a batch run (~9,800 times), so an
+            # uncached explainer would waste ~64 minutes of pure
+            # reconstruction across a full run for an object that is
+            # identical every time the same model is passed in.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _EXPLAINER_CACHE[cache_key] = shap.TreeExplainer(model)
+        explainer = _EXPLAINER_CACHE[cache_key]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            explainer = shap.TreeExplainer(model)
             shap_vals = explainer.shap_values(x)
         use_shap = True
-    except ImportError:
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Deliberately broad, not just ImportError: verified 2026-09-13 that
+        # shap.TreeExplainer raises its own InvalidModelError (not
+        # ImportError) for any model type it doesn't support -- narrower
+        # handling here would crash every patient in a batch run instead of
+        # falling back to gain importances as this function's docstring
+        # promises, if the installed shap version ever can't handle the
+        # real XGBoost artifact for any reason.
         raw_gains = model.feature_importances_
         gains = np.array([
             raw_gains[feature_cols.index(c)] if c in feature_cols else 0.0

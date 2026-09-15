@@ -185,7 +185,7 @@ stage2:
   threshold: 0.30
 
 # ── Stage 3: Explanation (optional) ──
-# Model: google/medgemma-27b-text-it via vLLM (switched from phi4-mini/Ollama
+# Model: google/medgemma-27b-text-it (switched from phi4-mini/Ollama
 # 2026-09-10, now that the full batch run moved to KISSKI's A100 -- the
 # phi4-mini/Ollama choice was specifically a laptop-CPU constraint, no
 # longer binding on cluster GPU hardware). Chosen over Qwen2.5-32B-Instruct
@@ -199,12 +199,15 @@ stage2:
 # as a real service, not research analysis of de-identified data with no
 # clinical deployment -- matches this project's own stated scope, see
 # MODEL_CARD.md's Limitations).
-# Served via vLLM (guided/structured JSON decoding -- preserves the
-# schema-constrained generation Ollama's format= provided, which is what
-# nearly eliminates malformed-JSON parse failures; plain HF
-# transformers.generate() has no built-in equivalent). Compute nodes have
-# no internet -- model must be pre-downloaded on the login node first, see
-# download_stage3_model.sh.
+# Served via plain HF transformers.generate() + lm-format-enforcer for
+# guided/structured JSON decoding. Mechanism history: Ollama's format=
+# (session 15) -> vLLM's GuidedDecodingParams (2026-09-10, for cluster
+# batch throughput) -> this (2026-09-15, after KISSKI's CUDA 12.8 driver
+# ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS
+# kernels regardless of vLLM/torch version -- see sessions/ for the full
+# diagnosis). The schema-constrained-JSON guarantee is preserved across
+# every switch. Compute nodes have no internet -- model must be
+# pre-downloaded on the login node first, see download_stage3_model.sh.
 stage3:
   model_name: "models/medgemma-27b-text-it"
   # Secondary, scale-robustness arm (2026-08-27): re-run the same prompt
@@ -231,6 +234,13 @@ stage3:
   # scores are not guaranteed to be comparably calibrated even after isotonic
   # calibration — rank displacement is invariant to that risk.
   discordance_displacement_pp: 20.0  # |displacement| >= this (percentile points) => discordant
+  # Patients per batched generate() call in batch.py (2026-09-15, after
+  # measuring one-patient-at-a-time HF generation was too slow at scale:
+  # 40 min for 10 patients extrapolates to weeks for the full ~9,800-
+  # admission run). Conservative default -- VRAM headroom depends on note
+  # length and hasn't been swept empirically yet; raise once real cluster
+  # timing/VRAM headroom is confirmed.
+  generation_batch_size: 4
 
 # ── Output ──
 output:

@@ -16,6 +16,15 @@ note-based score, and the discharge note itself, and returns its own
 uphold/override/insufficient_evidence judgment — not a narration of a
 decision already made by Stage 2.
 
+Served via plain HuggingFace ``transformers.generate()`` + ``lm-format-
+enforcer`` for schema-constrained decoding (switched from vLLM 2026-09-15):
+KISSKI's driver (CUDA 12.8 ceiling) proved structurally incompatible with
+vLLM's flashinfer/CUTLASS kernels, which hard-require CUDA 13 regardless of
+which vLLM/torch version combination is chosen — see sessions/ for the
+full diagnosis. This keeps the same model at full bf16 precision and the
+same guided-JSON-decoding guarantee vLLM provided, just via a different
+serving mechanism.
+
 Session 19 replaced the single free-text ``primary_clinical_domain`` with a
 fixed, two-sided grounds taxonomy (mitigating vs. aggravating), each ground
 requiring its own verbatim quote, and added a second, code-computed
@@ -56,14 +65,14 @@ from pydantic import BaseModel, ValidationError
 
 from src.config_schema import AppConfig
 
-# vLLM is deliberately NOT imported at module level: it's GPU/Linux-only
-# (won't even install on the CUDA-less Mac this project is otherwise
-# developed on), and everything else in this module (prompt building,
+# torch/transformers are deliberately NOT imported at module level for the
+# generation path: everything else in this module (prompt building,
 # response parsing, quote verification, decision-rule computation) has
-# nothing to do with model serving and must stay importable/testable
-# without it. Imported lazily inside _get_engine() instead.
+# nothing to do with model serving and must stay importable/testable on
+# the CUDA-less Mac this project is otherwise developed on. Imported
+# lazily inside _get_model() instead.
 if TYPE_CHECKING:
-    from vllm import LLM
+    from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 
 # ── Taxonomy ───────────────────────────────────────────────────────────────────
@@ -135,6 +144,16 @@ PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
 # MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
 # (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
 _NOTE_MAX_CHARS = 20_000
+
+# Output token budget for call_llm()'s generate() call. 2048 was the
+# original (vLLM-era) value, assumed "generous" but never actually
+# measured -- confirmed 2026-09-15 in the first real smoke test that
+# reached inference: 8/10 patients hit this cap mid-JSON (still inside
+# mitigating_grounds/aggravating_grounds, never reaching `decision`),
+# because a response citing several grounds, each carrying a full verbatim
+# quote, plus a justification, can genuinely exceed 2048 tokens. Raised to
+# give real headroom; MedGemma's 131,072-token context has ample room.
+_MAX_NEW_TOKENS = 4096
 
 # Below this length a note cannot ground either a mitigating or an
 # aggravating finding, regardless of what the model claims to have
@@ -506,7 +525,12 @@ def _parse_response(raw: str) -> dict[str, Any]:
                 pass
 
     if parsed is None:
-        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:300]}
+        # 300 chars was too short to diagnose anything -- every 2026-09-15
+        # parse failure showed the same truncated-mid-JSON shape and 300
+        # chars wasn't enough to tell truncation apart from a genuinely
+        # malformed response without re-running the model. 1500 gives real
+        # room to see where generation actually broke.
+        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
 
     mitigating = _validate_grounds(parsed.mitigating_grounds, MITIGATING_GROUNDS)
     aggravating = _validate_grounds(parsed.aggravating_grounds, AGGRAVATING_GROUNDS)
@@ -585,95 +609,88 @@ def build_prompt(
     )
 
 
-_ENGINE_CACHE: dict[str, "LLM"] = {}
+_MODEL_CACHE: dict[str, tuple["PreTrainedTokenizerBase", "PreTrainedModel"]] = {}
+_MODEL_LOAD_ERROR: dict[str, Exception] = {}
 
 
-def _get_engine(model_name: str) -> "LLM":
-    """Return a cached vLLM engine for this model, loading it once per process.
+def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedModel"]:
+    """Return a cached (tokenizer, model) pair, loading it once per process.
 
     Loading a 27B-class model takes real time and VRAM -- call_llm() runs
-    once per patient (thousands of times in a batch run), so the engine
+    once per patient (thousands of times in a batch run), so the model
     must be created once and reused across calls, never re-instantiated
-    per call. Untested at real scale as of 2026-09-10 -- smoke-test on a
-    small --limit slice before a full batch run, same discipline as every
-    other cluster job this project has run.
+    per call.
+
+    A failed load is cached too and re-raised immediately on every
+    subsequent call, instead of retrying the full (tens-of-seconds)
+    construction attempt again -- carried over from the vLLM version of
+    this function (2026-09-13 finding: a driver/CUDA mismatch made every
+    one of 10 patients in a smoke test independently re-attempt and
+    re-fail the same doomed engine load). The failure mode cannot change
+    mid-process, so retrying serves no purpose and only burns GPU-node
+    time that would compound at full ~9,800-admission scale.
     """
-    if model_name not in _ENGINE_CACHE:
+    if model_name in _MODEL_LOAD_ERROR:
+        raise _MODEL_LOAD_ERROR[model_name]
+    if model_name not in _MODEL_CACHE:
         try:
-            from vllm import LLM as _LLM  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+            import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+            from transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+                AutoModelForCausalLM,
+                AutoTokenizer,
+            )
         except ImportError as exc:
-            raise ImportError(
-                "vLLM is required for Stage 3 (switched from Ollama 2026-09-10 "
-                "-- see config.yaml's stage3.model_name comment). GPU/Linux "
-                "only -- install on the cluster: pip install vllm"
-            ) from exc
-        print(f"[stage3] Loading vLLM engine for '{model_name}' (one-time load) ...")
-        _ENGINE_CACHE[model_name] = _LLM(model=model_name, dtype="bfloat16", trust_remote_code=True)
-    return _ENGINE_CACHE[model_name]
+            _MODEL_LOAD_ERROR[model_name] = ImportError(
+                "torch/transformers import failed for Stage 3. "
+                f"Underlying error: {exc!r}"
+            )
+            raise _MODEL_LOAD_ERROR[model_name] from exc
+        print(f"[stage3] Loading HF model for '{model_name}' (one-time load) ...")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForCausalLM.from_pretrained(
+                # torch_dtype (not the newer `dtype` alias): HF kept
+                # torch_dtype working (deprecation warning at worst) across
+                # a much wider version range than `dtype` is recognized on
+                # older installs -- unlike _eval_strategy_kwarg() in
+                # src/stage2/train.py, this goes through **kwargs so there's
+                # no signature to introspect at runtime; picking the more
+                # backward-compatible name directly is the safer bet here.
+                model_name, torch_dtype=torch.bfloat16, device_map="cuda",
+                trust_remote_code=True,
+            )
+            model.eval()
+            _MODEL_CACHE[model_name] = (tokenizer, model)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            _MODEL_LOAD_ERROR[model_name] = exc
+            raise
+    return _MODEL_CACHE[model_name]
 
 
-def call_llm(
-    prompt: str,
-    cfg: AppConfig,
-    model_name: str | None = None,
-    note_text: str = "",
+def _finalize_annotation(
+    raw: str, note_text: str, *, likely_truncated: bool
 ) -> dict[str, Any]:
-    """Call a vLLM-served local model and return the parsed annotation dict.
+    """Parse one raw model response into a finished annotation dict.
 
-    Uses guided/structured JSON decoding (``GuidedDecodingParams(json=...)``,
-    not free-text generation) — this is what nearly eliminates malformed-
-    JSON parse failures, per the colleague review that motivated this design
-    (previously Ollama's ``format=<JSON schema>``; switched to vLLM
-    2026-09-10 for cluster batch throughput, see config.yaml's
-    ``stage3.model_name`` comment for why).
-
-    Generalised so the same prompt can be run through a different model —
-    e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
-    the auditor's value depends on model scale, without duplicating the
-    prompt/parsing logic. All models here are assumed locally-served (via
-    vLLM, fully offline); routing to a cloud API is a separate, currently
-    unmade decision — see docs/ARCHITECTURE.md.
-
-    Args:
-        prompt:     built by :func:`build_prompt`.
-        cfg:        validated project config (reads ``stage3.temperature``
-                    — pinned at 0 for reproducibility).
-        model_name: local model path to use. Defaults to
-                    ``cfg.stage3.model_name`` (the primary auditor model).
-        note_text:  the same raw note text passed to :func:`build_prompt` —
-                    used to verify each ground's quote against it and to
-                    compute ``decision_rule``, not re-sent to the model.
-
-    Returns:
-        Dict with keys ``mitigating_grounds``, ``aggravating_grounds``,
-        ``planned_return``, ``clinical_justification``, ``decision_model``,
-        ``decision_rule``, ``all_quotes_verified``, ``annotation_failed``.
+    Shared by :func:`call_llm_batch` for every item in a batch -- quote
+    verification and ``decision_rule`` need each patient's own
+    ``note_text``, so this can't be hoisted above the per-item loop.
     """
-    model_name = model_name or cfg.stage3.model_name
-    try:
-        engine = _get_engine(model_name)  # raises ImportError if vLLM isn't installed
-        from vllm import SamplingParams  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-        from vllm.sampling_params import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
-            GuidedDecodingParams,
-        )
-        sampling_params = SamplingParams(
-            temperature=cfg.stage3.temperature,
-            max_tokens=2048,
-            guided_decoding=GuidedDecodingParams(json=_LLMOutput.model_json_schema()),
-        )
-        outputs = engine.chat(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            sampling_params=sampling_params,
-        )
-        raw = outputs[0].outputs[0].text
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {**_PARSE_FAILURE, "clinical_justification": f"[vLLM error: {exc}]"}
-
     annotation = _parse_response(raw)
     if annotation["annotation_failed"]:
+        # Hitting the token cap is the most actionable failure mode to
+        # distinguish at a glance (raise _MAX_NEW_TOKENS) versus a genuine
+        # malformed/off-taxonomy response (a prompt or model-capability
+        # issue) -- checked via EOS-token presence per sequence, not a
+        # batch-wide generated-length heuristic (with left-padding for
+        # batched generation, sequences that finish early still show the
+        # batch's max generated length, so length alone can't tell them
+        # apart from a sequence that was genuinely truncated).
+        if likely_truncated:
+            annotation["clinical_justification"] = (
+                f"[TRUNCATED at max_new_tokens={_MAX_NEW_TOKENS}] "
+                + annotation["clinical_justification"]
+            )
         return annotation
 
     mitigating = [
@@ -693,3 +710,168 @@ def call_llm(
         annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
     )
     return annotation
+
+
+def call_llm_batch(
+    prompts: list[str],
+    cfg: AppConfig,
+    model_name: str | None = None,
+    note_texts: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Call a locally-served model for MULTIPLE patients in one batched
+    ``generate()`` call, instead of one call per patient.
+
+    Added 2026-09-15 after measuring one-patient-at-a-time HF generation:
+    40 minutes for 10 patients extrapolates to weeks of wall-clock time for
+    the full ~9,800-admission batch. HF's ``generate()`` supports padding
+    multiple prompts into one forward-pass batch directly; lm-format-
+    enforcer's guided decoding supports this too via HF's per-sequence
+    ``prefix_allowed_tokens_fn(batch_id, input_ids)`` signature -- one
+    parser instance is shared correctly across the whole batch since every
+    patient uses the same ``_LLMOutput`` schema. Left-padding is required
+    for decoder-only batched generation (right-padding would misalign
+    where each sequence's real next-token position is).
+
+    Uses schema-constrained decoding via ``lm-format-enforcer``'s
+    ``prefix_allowed_tokens_fn`` hook into HF ``generate()`` — this is what
+    nearly eliminates malformed-JSON parse failures, per the colleague
+    review that motivated this design. Mechanism history: Ollama's
+    ``format=<JSON schema>`` (session 15) -> vLLM's ``GuidedDecodingParams``
+    (2026-09-10, for cluster batch throughput) -> plain HF ``generate()`` +
+    lm-format-enforcer (2026-09-15, after KISSKI's CUDA 12.8 driver ceiling
+    proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels
+    regardless of vLLM/torch version -- see sessions/ for the full
+    diagnosis). The schema-constrained-JSON guarantee is preserved across
+    every switch; only the serving mechanism has changed.
+
+    Generalised so the same prompts can be run through a different model —
+    e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
+    the auditor's value depends on model scale, without duplicating the
+    prompt/parsing logic. All models here are assumed locally-served, fully
+    offline; routing to a cloud API is a separate, currently unmade
+    decision — see docs/ARCHITECTURE.md.
+
+    Args:
+        prompts:    prompts built by :func:`build_prompt`, one per patient.
+        cfg:        validated project config (reads ``stage3.temperature``
+                    — pinned at 0 for reproducibility).
+        model_name: local model path to use. Defaults to
+                    ``cfg.stage3.model_name`` (the primary auditor model).
+        note_texts: one raw note text per prompt, same order as ``prompts``
+                    — used to verify each ground's quote and to compute
+                    ``decision_rule``, not re-sent to the model. Defaults
+                    to ``""`` per prompt if not given.
+
+    Returns:
+        List of annotation dicts, same order as ``prompts``, each with keys
+        ``mitigating_grounds``, ``aggravating_grounds``, ``planned_return``,
+        ``clinical_justification``, ``decision_model``, ``decision_rule``,
+        ``all_quotes_verified``, ``annotation_failed``.
+    """
+    if not prompts:
+        return []
+    model_name = model_name or cfg.stage3.model_name
+    note_texts = note_texts if note_texts is not None else [""] * len(prompts)
+    if len(note_texts) != len(prompts):
+        raise ValueError("note_texts must be the same length as prompts")
+
+    # Deliberately NOT inside the try/except below: a missing/broken
+    # torch/transformers install is a setup failure, not a per-patient
+    # annotation problem -- confirmed a real, live bug 2026-09-13 with the
+    # prior vLLM version of this code: a smoke test with the engine
+    # unavailable silently logged "annotation_failed" for all 10 patients
+    # instead of crashing, which at full batch scale (~9,800 calls) would
+    # have ground through hours of compute before anyone noticed nothing
+    # had actually worked. Let this raise immediately and loudly instead.
+    tokenizer, model = _get_model(model_name)
+    import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+    # Package name is "lm-format-enforcer" but the importable module is
+    # "lmformatenforcer" (no separators) -- confirmed 2026-09-15 after
+    # `from lm_format_enforcer import ...` failed with "No module named
+    # 'lm_format_enforcer'" despite the package being installed. Also
+    # confirmed: the transformers integration submodule's own internal
+    # import breaks under transformers 5.x (PreTrainedTokenizerBase moved),
+    # so this only works with the cluster's transformers==4.57.6 -- do not
+    # upgrade transformers past that without re-verifying this import chain.
+    from lmformatenforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        JsonSchemaParser,
+    )
+    from lmformatenforcer.integrations.transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        build_transformers_prefix_allowed_tokens_fn,
+    )
+    try:
+        tokenizer.padding_side = "left"  # required for batched decoder-only generation
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        chat_texts = [
+            tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": p},
+                ],
+                tokenize=False, add_generation_prompt=True,
+            )
+            for p in prompts
+        ]
+        inputs = tokenizer(chat_texts, return_tensors="pt", padding=True).to(model.device)
+        parser = JsonSchemaParser(_LLMOutput.model_json_schema())
+        prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
+        do_sample = cfg.stage3.temperature > 0
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=_MAX_NEW_TOKENS,
+                do_sample=do_sample,
+                temperature=cfg.stage3.temperature if do_sample else None,
+                prefix_allowed_tokens_fn=prefix_fn,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+        # Left-padding aligns every sequence's real input to end at the same
+        # position, so generated tokens for the WHOLE batch start at this
+        # one shared index -- no per-sequence prompt-length bookkeeping needed.
+        prompt_len = inputs["input_ids"].shape[1]
+        generated_ids = output_ids[:, prompt_len:]
+        raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        eos_id = tokenizer.eos_token_id
+        truncated_flags = [
+            (eos_id not in row.tolist()) if eos_id is not None else False
+            for row in generated_ids
+        ]
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return [
+            {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+            for _ in prompts
+        ]
+
+    return [
+        _finalize_annotation(raw, note_text, likely_truncated=truncated)
+        for raw, note_text, truncated in zip(raws, note_texts, truncated_flags)
+    ]
+
+
+def call_llm(
+    prompt: str,
+    cfg: AppConfig,
+    model_name: str | None = None,
+    note_text: str = "",
+) -> dict[str, Any]:
+    """Call a locally-served model for a single patient.
+
+    Thin wrapper around :func:`call_llm_batch` with a batch of one -- kept
+    for the on-demand API path (:func:`src.stage3.pipeline.explain_patient`)
+    where batching doesn't apply. See :func:`call_llm_batch` for the full
+    mechanism/design docstring.
+
+    Args:
+        prompt:     built by :func:`build_prompt`.
+        cfg:        validated project config.
+        model_name: local model path to use. Defaults to
+                    ``cfg.stage3.model_name``.
+        note_text:  the same raw note text passed to :func:`build_prompt`.
+
+    Returns:
+        Annotation dict -- see :func:`call_llm_batch`.
+    """
+    return call_llm_batch(
+        [prompt], cfg, model_name=model_name, note_texts=[note_text]
+    )[0]

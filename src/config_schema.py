@@ -137,14 +137,29 @@ class Stage3Config(BaseModel):
     model_config = ConfigDict(frozen=False)
 
     model_name: str = "models/medgemma-27b-text-it"  # local path -- compute
-    # nodes have no internet, see download_stage3_model.sh. Served via vLLM
-    # (guided/structured JSON decoding), not Ollama -- switched 2026-09-10.
+    # nodes have no internet, see download_stage3_model.sh. Served via plain
+    # HF transformers.generate() + lm-format-enforcer for guided/structured
+    # JSON decoding (switched from vLLM 2026-09-15: KISSKI's CUDA 12.8
+    # driver ceiling is structurally incompatible with vLLM's
+    # flashinfer/CUTLASS kernels regardless of vLLM/torch version -- see
+    # sessions/ for the full diagnosis. Previously Ollama, switched
+    # 2026-09-10, then vLLM, switched 2026-09-15).
     robustness_model: str | None = None
     temperature: float = 0.0
     attention_extraction: bool = True  # extract Longformer attention spans (needs trained model)
     top_attention_sentences: int = 5   # sentences to extract per patient
     top_shap_features: int = 5         # Stage 1 SHAP features to include per patient
     discordance_displacement_pp: float = 20.0
+    # Patients per batched generate() call in batch.py (2026-09-15, after
+    # measuring one-patient-at-a-time HF generation was too slow at scale:
+    # 40 min for 10 patients extrapolates to weeks for the full ~9,800-
+    # admission run). HF's generate() supports padding multiple prompts
+    # into one forward-pass batch; lm-format-enforcer's guided decoding
+    # supports this too via HF's per-sequence prefix_allowed_tokens_fn
+    # signature. Conservative default -- VRAM headroom for a given batch
+    # size depends on note length and hasn't been swept empirically yet;
+    # raise this once real cluster timing/VRAM headroom is confirmed.
+    generation_batch_size: int = 4
 
 
 class OutputConfig(BaseModel):

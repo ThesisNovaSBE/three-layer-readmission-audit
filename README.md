@@ -8,7 +8,7 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 **Layer 2 — Clinical-Longformer, note-only (independent risk estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads only the discharge note of flagged patients — no structured features — and produces an independent risk estimate, not a gate on Stage 1's flag. (A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.)
 
-**Layer 3 — phi4-mini (independent auditor):** A local reasoning model (Ollama, temperature=0) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
+**Layer 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via plain HF `transformers.generate()` + `lm-format-enforcer` for guided/structured JSON decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
 
@@ -16,15 +16,16 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 ## Results
 
-> **Note (2026-09-05):** Stage 1 below is the real retrain — 400-trial
-> Optuna search, capacity-constrained threshold, isotonic calibration,
-> targeting **unplanned** readmission (switched from all-cause the same
-> day — every model before this one silently used all-cause despite that
-> being the project's stated scope; see `docs/ARCHITECTURE.md` §6). Stage 2
-> is still the v1 checkpoint — its retrain under the current config
-> (unplanned label, corrected age-group oversampling, 4096 tokens) hasn't
-> run yet. See `MODEL_CARD.md` for the full breakdown and `docs/ARCHITECTURE.md`
-> §4 for what's still pending.
+> **Note (2026-09-13):** Stage 1 and Stage 2 below are both real retrains —
+> 400-trial Optuna search for Stage 1, corrected age-group oversampling +
+> 4096 tokens for Stage 2, both targeting **unplanned** readmission
+> (switched from all-cause 2026-09-05 — every model before that silently
+> used all-cause despite that being the project's stated scope; see
+> `docs/ARCHITECTURE.md` §6). See `MODEL_CARD.md` for the full breakdown,
+> including per-age-group fairness metrics and the real RQ1 comparison.
+> Stage 3 (MedGemma-27B via HF transformers) has code and cluster infrastructure in
+> place but has only been smoke-tested at small scale, not run at full
+> scale — see `docs/ARCHITECTURE.md` §4 for what's still pending.
 
 ### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test n=104,242, target=unplanned)
 
@@ -43,13 +44,32 @@ precision=0.247. Beats 3 of 4 published benchmarks cited in `evaluate.py`
 35–45% for other age bands) — see `MODEL_CARD.md` for the full fairness
 breakdown.
 
+### Stage 2 — Clinical-Longformer (MIMIC-IV-Note, notes cohort n=9,899, target=unplanned)
+
+| Metric | Value |
+|--------|-------|
+| AUROC | 0.622 |
+| AUPRC | 0.538 |
+| Recall | 0.974 |
+| Precision | 0.437 |
+
+Weakest subgroup: age 70+ (AUROC 0.581) — same pattern as Stage 1.
+Full per-age-group breakdown in `MODEL_CARD.md`.
+
+### RQ1 — Does the note text add signal beyond structured data?
+
+Scored independently on the same 62,759-admission notes-covered
+population (neither model gates the other): Stage 1 AUROC 0.7093 vs.
+Stage 2 AUROC 0.7101, diff +0.0008 [-0.0041, +0.0054]. **Null result** —
+expected and reportable per this project's own design docs, not a failure.
+
 ### Stage 1+2 — Combined
 
-Not shown here — Stage 1's target just changed and Stage 2 hasn't been
-retrained to match yet, so a combined number right now would mix a
-new-target Stage 1 with an old-target Stage 2 and wouldn't mean anything
-as a real result. See `MODEL_CARD.md`'s Stage 1+2 section for the current
-(explicitly transitional) numbers and why they shouldn't be cited as-is.
+The current cascade (Stage 1 → Stage 2 prune only, no Stage 3 yet) is
+nearly identical to Stage 1 alone at the same alert budget (control arm) —
+expected and incomplete, since Stage 3 (the actual "auditor" layer) hasn't
+run at full scale yet. Full numbers and caveats in `MODEL_CARD.md`'s
+Stage 1+2 section.
 
 ---
 
@@ -58,7 +78,7 @@ as a real result. See `MODEL_CARD.md`'s Stage 1+2 section for the current
 No MIMIC access? The pipeline runs on synthetic data out of the box.
 
 ```bash
-git clone <repo-url> && cd 20260401_Thesis
+git clone https://github.com/ThesisNovaSBE/three-layer-readmission-audit.git && cd three-layer-readmission-audit
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -88,10 +108,13 @@ python -m src.model.train
 #    Local GPU:              python setup_stage2.py --mode full
 python setup_stage2.py --mode full
 
-# 5. Stage 3: on-demand audit for one patient (no batch runner yet — see
-#    docs/ARCHITECTURE.md §4). Requires Ollama running + phi4-mini pulled:
-#    ollama pull phi4-mini
+# 5. Stage 3: on-demand audit for one patient, or batch (src/stage3/batch.py)
+#    for every Stage 1-flagged, note-covered admission. Requires the
+#    MedGemma-27B weights pre-downloaded (download_stage3_model.sh) and
+#    lm-format-enforcer installed (cluster/GPU only — see docs/ARCHITECTURE.md §4):
 python -m src.stage3.pipeline <hadm_id>
+#    python -m src.stage3.batch          # full batch run
+#    python -m src.stage3.batch --limit 10   # smoke test
 ```
 
 ---
@@ -187,8 +210,9 @@ The dashboard has two views:
 │   │   ├── evaluate.py          # Stage 2 evaluation metrics
 │   │   └── predict.py           # Stage 2 inference on Stage 1 flags
 │   └── stage3/
-│       ├── explain.py           # Prompt building, discordance calc, phi4-mini call
+│       ├── explain.py           # Prompt building, discordance calc, MedGemma call
 │       ├── pipeline.py          # explain_patient() — the on-demand entry point
+│       ├── batch.py             # Batch audit runner — every flagged, note-covered admission
 │       ├── models.py            # ExplanationResult (Pydantic)
 │       ├── attention.py         # Optional auxiliary attention-span extraction
 │       └── shap_extract.py      # SHAP feature extraction from Stage 1

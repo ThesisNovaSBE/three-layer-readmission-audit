@@ -20,10 +20,16 @@ torch>=2.1
 accelerate>=1.1.0      # required by HuggingFace Trainer
 
 # Stage 3 — local LLM independent audit of Stage 1's flagged cases
-# vLLM (switched from Ollama 2026-09-10, see config.yaml's stage3.model_name
-# comment) -- GPU-only, no meaningful CPU/Mac path, so not installed as part
-# of the default local dev setup; install on the cluster only.
-vllm>=0.6
+# Served via plain HF transformers.generate() + lm-format-enforcer for
+# guided/structured JSON decoding. Mechanism history: Ollama's format=
+# (session 15) -> vLLM's GuidedDecodingParams (2026-09-10, for cluster
+# batch throughput) -> this (2026-09-15, after KISSKI's CUDA 12.8 driver
+# ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS
+# kernels regardless of vLLM/torch version -- see sessions/ for the full
+# diagnosis).
+# GPU-only for the 27B model, no meaningful CPU/Mac path -- not installed as
+# part of the default local dev setup; install on the cluster only.
+lm-format-enforcer>=0.10
 shap>=0.44   # SHAP values for Stage 1 feature attribution (falls back to gain importances)
 
 # Notebooks / EDA

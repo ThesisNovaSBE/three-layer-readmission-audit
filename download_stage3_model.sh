@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run this ONCE on the KISSKI login node (which has internet access).
 # Saves google/medgemma-27b-text-it to models/medgemma-27b-text-it/ so
-# compute nodes (no internet) can load it offline via vLLM.
+# compute nodes (no internet) can load it offline via HF transformers.
 #
 # MedGemma is a GATED model -- you must have already accepted the Health AI
 # Developer Foundations terms for it on your Hugging Face account
@@ -56,7 +56,7 @@ snapshot_download(
     repo_id=model_id,
     local_dir=save_dir,
     # Skip original (often fp32/pt) weight duplicates when safetensors are
-    # available -- vLLM reads safetensors directly, no need for both.
+    # available -- HF transformers reads safetensors directly, no need for both.
     ignore_patterns=["*.bin", "*.pth", "*.msgpack", "*.h5", "original/*"],
 )
 
