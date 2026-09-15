@@ -705,8 +705,18 @@ def call_llm(
     # had actually worked. Let this raise immediately and loudly instead.
     tokenizer, model = _get_model(model_name)
     import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
-    from lm_format_enforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+    # Package name is "lm-format-enforcer" but the importable module is
+    # "lmformatenforcer" (no separators) -- confirmed 2026-09-15 after
+    # `from lm_format_enforcer import ...` failed with "No module named
+    # 'lm_format_enforcer'" despite the package being installed. Also
+    # confirmed: the transformers integration submodule's own internal
+    # import breaks under transformers 5.x (PreTrainedTokenizerBase moved),
+    # so this only works with the cluster's transformers==4.57.6 -- do not
+    # upgrade transformers past that without re-verifying this import chain.
+    from lmformatenforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
         JsonSchemaParser,
+    )
+    from lmformatenforcer.integrations.transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
         build_transformers_prefix_allowed_tokens_fn,
     )
     try:
