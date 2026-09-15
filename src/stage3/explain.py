@@ -145,6 +145,16 @@ PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
 # (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
 _NOTE_MAX_CHARS = 20_000
 
+# Output token budget for call_llm()'s generate() call. 2048 was the
+# original (vLLM-era) value, assumed "generous" but never actually
+# measured -- confirmed 2026-09-15 in the first real smoke test that
+# reached inference: 8/10 patients hit this cap mid-JSON (still inside
+# mitigating_grounds/aggravating_grounds, never reaching `decision`),
+# because a response citing several grounds, each carrying a full verbatim
+# quote, plus a justification, can genuinely exceed 2048 tokens. Raised to
+# give real headroom; MedGemma's 131,072-token context has ample room.
+_MAX_NEW_TOKENS = 4096
+
 # Below this length a note cannot ground either a mitigating or an
 # aggravating finding, regardless of what the model claims to have
 # extracted -- decision_rule reports insufficient_evidence rather than
@@ -515,7 +525,12 @@ def _parse_response(raw: str) -> dict[str, Any]:
                 pass
 
     if parsed is None:
-        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:300]}
+        # 300 chars was too short to diagnose anything -- every 2026-09-15
+        # parse failure showed the same truncated-mid-JSON shape and 300
+        # chars wasn't enough to tell truncation apart from a genuinely
+        # malformed response without re-running the model. 1500 gives real
+        # room to see where generation actually broke.
+        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
 
     mitigating = _validate_grounds(parsed.mitigating_grounds, MITIGATING_GROUNDS)
     aggravating = _validate_grounds(parsed.aggravating_grounds, AGGRAVATING_GROUNDS)
@@ -734,20 +749,30 @@ def call_llm(
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=2048,
+                max_new_tokens=_MAX_NEW_TOKENS,
                 do_sample=do_sample,
                 temperature=cfg.stage3.temperature if do_sample else None,
                 prefix_allowed_tokens_fn=prefix_fn,
                 pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
             )
-        raw = tokenizer.decode(
-            output_ids[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        )
+        prompt_len = inputs["input_ids"].shape[1]
+        n_generated = output_ids.shape[1] - prompt_len
+        raw = tokenizer.decode(output_ids[0][prompt_len:], skip_special_tokens=True)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
 
     annotation = _parse_response(raw)
     if annotation["annotation_failed"]:
+        # Hitting the token cap is the most actionable failure mode to
+        # distinguish at a glance (raise _MAX_NEW_TOKENS) versus a genuine
+        # malformed/off-taxonomy response (a prompt or model-capability
+        # issue) -- n_generated >= cap is a hard, unambiguous signal, not
+        # an inference from output shape.
+        if n_generated >= _MAX_NEW_TOKENS:
+            annotation["clinical_justification"] = (
+                f"[TRUNCATED at max_new_tokens={_MAX_NEW_TOKENS}] "
+                + annotation["clinical_justification"]
+            )
         return annotation
 
     mitigating = [
