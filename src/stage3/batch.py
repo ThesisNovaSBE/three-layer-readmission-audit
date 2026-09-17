@@ -521,9 +521,18 @@ def main() -> None:
         help="Run the discordance-threshold sensitivity sweep over an "
              "existing batch result instead of auditing (no LLM calls)",
     )
+    parser.add_argument(
+        "--batch-size", type=int, default=None,
+        help="Override cfg.stage3.generation_batch_size for this run "
+             "(2026-09-17, for sweeping VRAM headroom without editing "
+             "config.yaml each time -- Stage3Config isn't frozen, so this "
+             "mutation is safe).",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
+    if args.batch_size is not None:
+        cfg.stage3.generation_batch_size = args.batch_size
     if args.sweep:
         run_sensitivity_sweep()
     else:
