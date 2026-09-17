@@ -198,7 +198,15 @@ class _LLMOutput(BaseModel):
     mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     planned_return: str
-    clinical_justification: str
+    # max_length=800 chars (2026-09-17): same fix, next field. Capping
+    # grounds alone didn't fix truncation -- overflow just moved here. The
+    # prompt already asks for "2-4 sentences" (~570 chars in a genuine
+    # compliant example) but the model wasn't reliably honoring that as
+    # free text; several 4096-token failures were clinical_justification
+    # alone running past a thousand characters and still getting cut off
+    # mid-sentence. 800 gives real headroom over a compliant response
+    # while still being a hard ceiling, not just an ignorable instruction.
+    clinical_justification: str = Field(max_length=800)
     decision: str
 
 
