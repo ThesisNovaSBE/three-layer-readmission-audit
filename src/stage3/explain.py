@@ -61,7 +61,7 @@ import textwrap
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
 
@@ -184,8 +184,19 @@ class _LLMOutput(BaseModel):
     this project keeps enum validation explicit and testable in Python.
     """
 
-    mitigating_grounds: list[_GroundHit] = []
-    aggravating_grounds: list[_GroundHit] = []
+    # max_length=3 (2026-09-17): confirmed empirically that without a hard
+    # cap, MedGemma cites the same ground category repeatedly with multiple
+    # overlapping quotes (e.g. six separate functional_dependence entries
+    # from one note) instead of being selective, reliably blowing through
+    # even a generous 4096-token output budget -- every one of 7/8 smoke-
+    # test patients hit that cap this way, none from a genuinely malformed
+    # response. This is a real, enforced schema constraint (JSON Schema
+    # maxItems, respected by lm-format-enforcer's guided decoding), not
+    # just a prompt instruction the model can ignore -- matches this
+    # project's existing top-k evidence caps elsewhere (top_shap_features,
+    # top_attention_sentences).
+    mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
+    aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     planned_return: str
     clinical_justification: str
     decision: str
@@ -243,10 +254,14 @@ _USER_TEMPLATE = textwrap.dedent("""
 
     "mitigating_grounds": list of objects {{"ground": <one of the mitigating
       grounds above>, "quote": <exact verbatim sentence from the note>}}.
-      Empty list if none apply.
+      Empty list if none apply. AT MOST 3 entries — choose the 3 most
+      clinically decisive, not every sentence that could loosely relate to
+      a ground. One clear quote per ground is enough; do not cite the same
+      ground multiple times with different quotes.
 
     "aggravating_grounds": same shape, drawn from the aggravating grounds
-      above. Empty list if none apply.
+      above. Empty list if none apply. Same limit: AT MOST 3 entries, most
+      decisive only.
 
     "planned_return": does the note mention a planned return — a scheduled
       chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
