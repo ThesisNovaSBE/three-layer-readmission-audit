@@ -1,7 +1,11 @@
 #!/bin/bash
 # Run this ONCE on the KISSKI login node (which has internet access).
-# Saves google/medgemma-27b-text-it to models/medgemma-27b-text-it/ so
-# compute nodes (no internet) can load it offline via HF transformers.
+# Saves google/medgemma-27b-text-it to KISSKI project storage (not the
+# repo's models/ dir) so compute nodes (no internet) can load it offline
+# via HF transformers. Moved off personal HOME quota 2026-09-18 -- 51GB
+# alone put HOME at 177% of its 60GB soft limit; project storage
+# (/mnt/vast-kisski, 5TB) has no such personal quota. Must match
+# config.yaml's stage3.model_name.
 #
 # MedGemma is a GATED model -- you must have already accepted the Health AI
 # Developer Foundations terms for it on your Hugging Face account
@@ -22,7 +26,7 @@ set -e
 cd ~/thesis
 
 MODEL_ID="google/medgemma-27b-text-it"
-SAVE_DIR="models/medgemma-27b-text-it"
+SAVE_DIR="/projects/extern/kisski/kisski-nova-rpcl/dir.project/thesis-models/medgemma-27b-text-it"
 
 if [ -z "$HF_TOKEN" ]; then
     echo "ERROR: \$HF_TOKEN is not set."
