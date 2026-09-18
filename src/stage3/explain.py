@@ -61,7 +61,7 @@ import textwrap
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
 
@@ -184,10 +184,29 @@ class _LLMOutput(BaseModel):
     this project keeps enum validation explicit and testable in Python.
     """
 
-    mitigating_grounds: list[_GroundHit] = []
-    aggravating_grounds: list[_GroundHit] = []
+    # max_length=3 (2026-09-17): confirmed empirically that without a hard
+    # cap, MedGemma cites the same ground category repeatedly with multiple
+    # overlapping quotes (e.g. six separate functional_dependence entries
+    # from one note) instead of being selective, reliably blowing through
+    # even a generous 4096-token output budget -- every one of 7/8 smoke-
+    # test patients hit that cap this way, none from a genuinely malformed
+    # response. This is a real, enforced schema constraint (JSON Schema
+    # maxItems, respected by lm-format-enforcer's guided decoding), not
+    # just a prompt instruction the model can ignore -- matches this
+    # project's existing top-k evidence caps elsewhere (top_shap_features,
+    # top_attention_sentences).
+    mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
+    aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     planned_return: str
-    clinical_justification: str
+    # max_length=800 chars (2026-09-17): same fix, next field. Capping
+    # grounds alone didn't fix truncation -- overflow just moved here. The
+    # prompt already asks for "2-4 sentences" (~570 chars in a genuine
+    # compliant example) but the model wasn't reliably honoring that as
+    # free text; several 4096-token failures were clinical_justification
+    # alone running past a thousand characters and still getting cut off
+    # mid-sentence. 800 gives real headroom over a compliant response
+    # while still being a hard ceiling, not just an ignorable instruction.
+    clinical_justification: str = Field(max_length=800)
     decision: str
 
 
@@ -243,10 +262,14 @@ _USER_TEMPLATE = textwrap.dedent("""
 
     "mitigating_grounds": list of objects {{"ground": <one of the mitigating
       grounds above>, "quote": <exact verbatim sentence from the note>}}.
-      Empty list if none apply.
+      Empty list if none apply. AT MOST 3 entries — choose the 3 most
+      clinically decisive, not every sentence that could loosely relate to
+      a ground. One clear quote per ground is enough; do not cite the same
+      ground multiple times with different quotes.
 
     "aggravating_grounds": same shape, drawn from the aggravating grounds
-      above. Empty list if none apply.
+      above. Empty list if none apply. Same limit: AT MOST 3 entries, most
+      decisive only.
 
     "planned_return": does the note mention a planned return — a scheduled
       chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
@@ -667,6 +690,33 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
+def _detect_truncated(generated_ids, eos_id: int | None) -> list[bool]:
+    """Per-sequence truncation flag: True if a generated row never produced
+    the EOS token (i.e. generation was cut off by max_new_tokens, not
+    stopped naturally).
+
+    Extracted as a pure function (2026-09-18, audit finding 2.3) so this
+    logic -- the one genuinely new, previously-untested piece of the
+    2026-09-15 batching rewrite -- is directly unit-testable with
+    hand-built token-ID tensors, without needing a real model, tokenizer,
+    or GPU. Only requires ``generated_ids`` support row iteration + a
+    ``.tolist()`` method per row (true for both real torch tensor slices
+    and the small torch.tensor(...) fixtures tests construct directly).
+
+    Args:
+        generated_ids: 2D tensor/array, one row per sequence in the batch,
+                        already sliced to exclude the prompt (see
+                        call_llm_batch).
+        eos_id:         the tokenizer's EOS token id, or None if unknown.
+
+    Returns:
+        One bool per row, True meaning "likely truncated by the token cap".
+    """
+    if eos_id is None:
+        return [False for _ in generated_ids]
+    return [eos_id not in row.tolist() for row in generated_ids]
+
+
 def _finalize_annotation(
     raw: str, note_text: str, *, likely_truncated: bool
 ) -> dict[str, Any]:
@@ -832,11 +882,7 @@ def call_llm_batch(
         prompt_len = inputs["input_ids"].shape[1]
         generated_ids = output_ids[:, prompt_len:]
         raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        eos_id = tokenizer.eos_token_id
-        truncated_flags = [
-            (eos_id not in row.tolist()) if eos_id is not None else False
-            for row in generated_ids
-        ]
+        truncated_flags = _detect_truncated(generated_ids, tokenizer.eos_token_id)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return [
             {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
