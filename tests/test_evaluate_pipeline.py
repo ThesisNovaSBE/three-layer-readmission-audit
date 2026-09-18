@@ -15,6 +15,7 @@ from src.model.evaluate_pipeline import (
     _apply_stage3_decisions,
     _conditional_triggering_report,
     _control_arm_report,
+    _pipeline_report,
 )
 
 
@@ -167,6 +168,82 @@ def test_control_arm_full_capacity_flags_everyone(subgroups_20):  # pylint: disa
     report = _control_arm_report(y, s1_scores, 1.0, subgroups_20)
 
     assert report["confirmed_rate"] == pytest.approx(1.0)
+
+
+# ── precision/recall CI wiring (audit finding 2026-09-18 2.2) ────────────────
+# Fast, synthetic-data tests -- the real ~104k-admission population is slow
+# (bootstrap.py's per-group resampling isn't vectorized; confirmed taking
+# 25+ minutes of real CPU time in a live sanity check, not fixed this
+# session). These exist so the CI wiring's *correctness* doesn't depend on
+# ever running that slow real-data path -- previously nothing exercised
+# `groups=` at all, real or synthetic.
+
+def test_pipeline_report_without_groups_has_no_ci(subgroups_20):  # pylint: disable=redefined-outer-name
+    """groups=None (the default) must skip CI computation -- backward
+    compatible with the notes-cohort/conditional-triggering call sites that
+    don't pass it."""
+    rng = np.random.default_rng(3)
+    y = rng.integers(0, 2, 20)
+    pred = rng.integers(0, 2, 20)
+
+    report = _pipeline_report(y, pred, subgroups_20)
+
+    assert "precision_ci" not in report
+    assert "recall_ci" not in report
+
+
+def test_pipeline_report_with_groups_has_sane_ci(subgroups_20):  # pylint: disable=redefined-outer-name
+    """groups= must attach precision_ci/recall_ci whose point_estimate
+    matches the report's own precision/recall, with ci_lower <= point <=
+    ci_upper."""
+    rng = np.random.default_rng(4)
+    y = rng.integers(0, 2, 20)
+    pred = rng.integers(0, 2, 20)
+    groups = np.arange(20)  # one admission per patient -- no clustering
+
+    report = _pipeline_report(y, pred, subgroups_20, groups=groups)
+
+    for metric, ci_key in (("precision", "precision_ci"), ("recall", "recall_ci")):
+        assert ci_key in report
+        ci = report[ci_key]
+        assert ci["point_estimate"] == pytest.approx(report[metric])
+        assert ci["ci_lower"] <= ci["point_estimate"] <= ci["ci_upper"]
+
+
+def test_pipeline_report_ci_single_cluster_has_zero_width(subgroups_20):  # pylint: disable=redefined-outer-name
+    """If every admission belongs to the same one patient, every bootstrap
+    resample is identical to the original data (only one group exists to
+    sample from, with replacement) -- a deterministic property, and a much
+    more robust way to confirm groups= actually drives the resampling than
+    comparing CI widths across random data (a width-comparison version of
+    this test was tried first and dropped: too degenerate to hold reliably
+    at just 2 clusters)."""
+    rng = np.random.default_rng(5)
+    y = rng.integers(0, 2, 20)
+    pred = rng.integers(0, 2, 20)
+    groups = np.zeros(20, dtype=int)  # all 20 admissions belong to one patient
+
+    report = _pipeline_report(y, pred, subgroups_20, groups=groups)
+
+    assert report["precision_ci"]["ci_lower"] == pytest.approx(
+        report["precision_ci"]["ci_upper"]
+    )
+    assert report["recall_ci"]["ci_lower"] == pytest.approx(report["recall_ci"]["ci_upper"])
+
+
+def test_control_arm_report_with_groups_has_ci(subgroups_20):  # pylint: disable=redefined-outer-name
+    """_control_arm_report must thread groups= through to its internal
+    _pipeline_report call, same contract as testing _pipeline_report
+    directly above."""
+    rng = np.random.default_rng(6)
+    y = rng.integers(0, 2, 20)
+    s1_scores = rng.uniform(0.0, 1.0, 20)
+    groups = np.arange(20)
+
+    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20, groups=groups)
+
+    assert "precision_ci" in report
+    assert "recall_ci" in report
 
 
 # ── _conditional_triggering_report ──────────────────────────────────────────
