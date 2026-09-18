@@ -16,6 +16,7 @@ from src.stage3.explain import (
     DISCORDANCE_MODES,
     MITIGATING_GROUNDS,
     PLANNED_RETURN_ANSWERS,
+    _detect_truncated,
     _parse_response,
     build_prompt,
     compute_decision_rule,
@@ -543,3 +544,47 @@ def test_verify_quote_strips_whitespace():
     """Leading/trailing whitespace on the quote must not cause a false negative."""
     note = "Patient discharged home. Strong family support documented."
     assert verify_quote("  Strong family support documented.  ", note) is True
+
+
+# ── _detect_truncated ────────────────────────────────────────────────────────
+# The one genuinely new piece of logic from the 2026-09-15 batching rewrite
+# (audit finding 2026-09-18 2.3): call_llm_batch's own tests mock
+# call_llm_batch entirely, so this is the only place this logic is
+# exercised. No real model/tokenizer/GPU needed -- np.array rows support
+# .tolist() the same way a real torch tensor row does.
+
+EOS_ID = 999
+
+
+def test_detect_truncated_false_when_eos_present():
+    """A row that contains the EOS token finished naturally -- not truncated."""
+    rows = np.array([[1, 2, EOS_ID, 0], [5, 6, 7, EOS_ID]])
+    assert _detect_truncated(rows, EOS_ID) == [False, False]
+
+
+def test_detect_truncated_true_when_eos_absent():
+    """A row that never produced EOS ran the full token budget -- truncated."""
+    rows = np.array([[1, 2, 3, 4], [5, 6, 7, 8]])
+    assert _detect_truncated(rows, EOS_ID) == [True, True]
+
+
+def test_detect_truncated_mixed_batch():
+    """Truncation is per-sequence, not batch-wide -- one row hitting the cap
+    must not mark a different, cleanly-finished row as truncated too (the
+    exact bug class this function exists to avoid: with left-padding,
+    every row reports the same generated *length*, so length alone can't
+    distinguish them)."""
+    rows = np.array([[1, 2, EOS_ID, 0], [5, 6, 7, 8]])
+    assert _detect_truncated(rows, EOS_ID) == [False, True]
+
+
+def test_detect_truncated_no_eos_id_returns_all_false():
+    """If the tokenizer has no EOS token id, nothing can be flagged truncated
+    rather than guessing -- avoids a crash and a misleading signal."""
+    rows = np.array([[1, 2, 3], [4, 5, 6]])
+    assert _detect_truncated(rows, None) == [False, False]
+
+
+def test_detect_truncated_empty_batch():
+    """Zero rows must return an empty list, not error."""
+    assert _detect_truncated(np.empty((0, 4), dtype=int), EOS_ID) == []

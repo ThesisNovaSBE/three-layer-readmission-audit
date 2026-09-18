@@ -1,6 +1,8 @@
 # Architecture — Current State
 
-**Last updated:** 2026-08-28 (session 19). This is the single current source of
+**Last updated:** 2026-09-13 (session 23; §4-§6 carry the most recent
+content — this banner previously understated how current the body was).
+This is the single current source of
 truth for the pipeline design. It supersedes `docs/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/SANITY_CHECK_2026-07-06.md` — those are
 kept for history (each now has a banner pointing here) but describe designs

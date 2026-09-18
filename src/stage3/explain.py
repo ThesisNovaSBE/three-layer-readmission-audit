@@ -690,6 +690,33 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
+def _detect_truncated(generated_ids, eos_id: int | None) -> list[bool]:
+    """Per-sequence truncation flag: True if a generated row never produced
+    the EOS token (i.e. generation was cut off by max_new_tokens, not
+    stopped naturally).
+
+    Extracted as a pure function (2026-09-18, audit finding 2.3) so this
+    logic -- the one genuinely new, previously-untested piece of the
+    2026-09-15 batching rewrite -- is directly unit-testable with
+    hand-built token-ID tensors, without needing a real model, tokenizer,
+    or GPU. Only requires ``generated_ids`` support row iteration + a
+    ``.tolist()`` method per row (true for both real torch tensor slices
+    and the small torch.tensor(...) fixtures tests construct directly).
+
+    Args:
+        generated_ids: 2D tensor/array, one row per sequence in the batch,
+                        already sliced to exclude the prompt (see
+                        call_llm_batch).
+        eos_id:         the tokenizer's EOS token id, or None if unknown.
+
+    Returns:
+        One bool per row, True meaning "likely truncated by the token cap".
+    """
+    if eos_id is None:
+        return [False for _ in generated_ids]
+    return [eos_id not in row.tolist() for row in generated_ids]
+
+
 def _finalize_annotation(
     raw: str, note_text: str, *, likely_truncated: bool
 ) -> dict[str, Any]:
@@ -855,11 +882,7 @@ def call_llm_batch(
         prompt_len = inputs["input_ids"].shape[1]
         generated_ids = output_ids[:, prompt_len:]
         raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        eos_id = tokenizer.eos_token_id
-        truncated_flags = [
-            (eos_id not in row.tolist()) if eos_id is not None else False
-            for row in generated_ids
-        ]
+        truncated_flags = _detect_truncated(generated_ids, tokenizer.eos_token_id)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return [
             {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
