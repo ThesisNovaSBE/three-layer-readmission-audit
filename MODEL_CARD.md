@@ -224,8 +224,10 @@ model's output (as opposed to predictor, feature extractor, or explainer of
 its own prediction). `src/stage3/batch.py:run_batch_audit` produces Stage 3
 decisions across every Stage 1-flagged, note-covered admission — needed to
 evaluate RQ2 (net reclassification vs. structured triage) and characterise
-disagreement at scale — but has not yet been *run* at full scale, pending
-the Stage 1/Stage 2 retrain; see `docs/ARCHITECTURE.md` §4.
+disagreement at scale — but has not yet been *run* at full scale. The
+Stage 1/Stage 2 retrain that previously blocked this is complete; the
+current blocker is the Stage 3 batch run itself (serving-mechanism
+stabilization, see `sessions/`) — see `docs/ARCHITECTURE.md` §4.
 
 ## Limitations
 
@@ -237,4 +239,4 @@ the Stage 1/Stage 2 retrain; see `docs/ARCHITECTURE.md` §4.
 
 - MIMIC-IV data is de-identified but originates from real patient encounters
 - All data handling follows the PhysioNet Data Use Agreement
-- Readmission prediction models may encode demographic biases present in the training data — fairness analysis is planned
+- Readmission prediction models may encode demographic biases present in the training data — per-age-band fairness analysis has been run (see Stage 1's subgroup AUROC/recall breakdown above and Stage 2's age-group oversampling); the documented "70+" recall gap is a real, disclosed limitation, not an unstarted analysis

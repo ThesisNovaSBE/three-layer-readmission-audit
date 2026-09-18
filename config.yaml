@@ -209,7 +209,16 @@ stage2:
 # every switch. Compute nodes have no internet -- model must be
 # pre-downloaded on the login node first, see download_stage3_model.sh.
 stage3:
-  model_name: "models/medgemma-27b-text-it"
+  # Absolute path on KISSKI project storage (2026-09-18), not
+  # `models/medgemma-27b-text-it` under the repo -- moved off the user's
+  # personal HOME quota (51GB alone put HOME at 177% of its 60GB soft
+  # limit, with a 2-week grace period after which GWDG restricts writes
+  # the same as hitting the 120GB hard limit, confirmed via GWDG's own
+  # quota docs). Project storage (/mnt/vast-kisski, 5TB, <1% used as of
+  # this move) has no such personal quota. Cluster/user-specific path,
+  # consistent with this project's existing KISSKI-specific paths
+  # elsewhere (e.g. the MIMIC-IV-Note location scripts reference).
+  model_name: "/projects/extern/kisski/kisski-nova-rpcl/dir.project/thesis-models/medgemma-27b-text-it"
   # Secondary, scale-robustness arm (2026-08-27): re-run the same prompt
   # through a larger model to test whether the auditor's value depends on
   # model scale, turning the field's known "small local models may lack

@@ -9,14 +9,26 @@ pyyaml>=6.0
 python-dotenv>=1.0
 
 # Stage 2 — Clinical-Longformer fine-tuning
-transformers>=4.36
+# transformers: floor 4.36 for Stage 2's Trainer (needs accelerate>=1.1.0,
+# confirmed 2026-08-28 -- a fresh install below this floor resolves an old
+# 5.x-incompatible release and raises ImportError at Trainer construction;
+# src/stage2/train.py's _eval_strategy_kwarg() separately handles
+# transformers renaming evaluation_strategy -> eval_strategy across that
+# same version jump, so Stage 2 itself tolerates 5.x fine).
+# Ceiling <5.0 is the binding constraint now, from Stage 3: verified
+# 2026-09-17 that lm-format-enforcer's transformers integration
+# (lmformatenforcer/integrations/transformers.py) breaks under 5.x --
+# `from transformers.tokenization_utils import PreTrainedTokenizerBase`
+# moved -- confirmed working only under the cluster's exact
+# transformers==4.57.6. This one version constraint covers the whole repo
+# (only one transformers can be installed at a time); without this ceiling
+# a bare `pip install -r requirements.txt` silently resolves a version
+# that breaks Stage 3's guided decoding -- this already happened once,
+# unpinned, costing real debugging time (see sessions/2026-09-15 and
+# 2026-09-17 entries). If the exact cluster version ever needs updating,
+# re-verify this import chain first, then update the ceiling deliberately.
+transformers>=4.36,<5.0
 torch>=2.1
-# 1.1.0+ required by transformers 5.x's Trainer (confirmed 2026-08-28: a
-# fresh `pip install -r requirements.txt` today resolves transformers>=4.36
-# to the current 5.x release, which raises ImportError at Trainer
-# construction under the old 0.27 floor). src/stage2/train.py's
-# _eval_strategy_kwarg() separately handles transformers renaming
-# evaluation_strategy -> eval_strategy across this same version jump.
 accelerate>=1.1.0      # required by HuggingFace Trainer
 
 # Stage 3 — local LLM independent audit of Stage 1's flagged cases

@@ -52,6 +52,7 @@ from sklearn.metrics import roc_auc_score
 from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix, split_xy
+from src.model.bootstrap import bootstrap_ci
 from src.model.calibration import apply_calibration
 from src.model.metrics import auprc as compute_auprc
 from src.model.metrics import select_threshold_for_capacity
@@ -74,6 +75,36 @@ def _precision_recall_f(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         "f1": round(f1, 5), "f2": round(f2, 5),
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
     }
+
+
+def _precision_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """precision, as a bare float -- bootstrap_ci's metric_fn contract."""
+    return _precision_recall_f(y_true, y_pred)["precision"]
+
+
+def _recall_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """recall, as a bare float -- bootstrap_ci's metric_fn contract."""
+    return _precision_recall_f(y_true, y_pred)["recall"]
+
+
+def _add_precision_recall_ci(
+    report: dict, y_true: np.ndarray, pred: np.ndarray, groups: np.ndarray
+) -> dict:
+    """Attach patient-clustered bootstrap CIs for precision/recall to a
+    report dict in place, returning it.
+
+    Added 2026-09-18: the RQ2 headline comparison (pipeline.full_cohort vs.
+    pipeline.control_arm_stage1_matched) previously reported bare point
+    estimates only -- unlike RQ1's compare_layers.py, which correctly uses
+    a paired bootstrap for the AUROC difference. Without this it was
+    impossible to tell whether e.g. 0.437 vs 0.431 precision was a real
+    difference or noise around two close numbers. Patient-clustered
+    (``subject_id``, via ``groups``) for the same reason RQ1's resampling
+    is patient-level, not admission-level -- see src/model/bootstrap.py.
+    """
+    report["precision_ci"] = bootstrap_ci(y_true, pred, _precision_metric, groups=groups)
+    report["recall_ci"] = bootstrap_ci(y_true, pred, _recall_metric, groups=groups)
+    return report
 
 
 def _band_breakdown(
@@ -142,8 +173,17 @@ def _pipeline_report(
     y_true: np.ndarray,
     pipeline_pred: np.ndarray,
     subgroups: pd.DataFrame,
+    groups: np.ndarray | None = None,
 ) -> dict:
-    """Pipeline-level evaluation treating Stage 2 confirmed as the final label."""
+    """Pipeline-level evaluation treating Stage 2 confirmed as the final label.
+
+    ``groups`` (subject_id, optional): when given, attaches patient-
+    clustered bootstrap CIs for precision/recall (see
+    _add_precision_recall_ci). Optional and defaults to ``None`` (no CIs)
+    so existing callers that don't need this -- the notes-cohort and
+    conditional-triggering post-hoc reports -- are unaffected; only the
+    two RQ2 headline call sites (full_cohort, control_arm) pass it.
+    """
     report: dict = {
         "n": int(len(y_true)),
         "pos_rate": float(y_true.mean()),
@@ -151,6 +191,8 @@ def _pipeline_report(
     }
     report.update(_precision_recall_f(y_true, pipeline_pred))
     report["by_age_band"] = _band_breakdown(y_true, None, pipeline_pred, subgroups)
+    if groups is not None:
+        _add_precision_recall_ci(report, y_true, pipeline_pred, groups)
     return report
 
 
@@ -159,6 +201,7 @@ def _control_arm_report(
     s1_scores: np.ndarray,
     target_alert_rate: float,
     subgroups: pd.DataFrame,
+    groups: np.ndarray | None = None,
 ) -> dict:
     """Stage 1 alone, thresholded to match the full system's alert volume.
 
@@ -176,6 +219,8 @@ def _control_arm_report(
         target_alert_rate:  the full system's final alert rate to match
                              (``pipeline.full_cohort.confirmed_rate``).
         subgroups:           age-band subgroup dataframe, aligned to y_true.
+        groups:              optional subject_id array -- see
+                             _pipeline_report's groups docstring.
 
     Returns:
         A `_pipeline_report`-shaped dict, plus ``threshold`` and
@@ -184,7 +229,7 @@ def _control_arm_report(
     """
     threshold = select_threshold_for_capacity(s1_scores, max(target_alert_rate, 1e-6))
     pred = (s1_scores >= threshold).astype(int)
-    report = _pipeline_report(y_true, pred, subgroups)
+    report = _pipeline_report(y_true, pred, subgroups, groups=groups)
     report["threshold"] = float(threshold)
     report["target_alert_rate"] = float(target_alert_rate)
     return report
@@ -192,20 +237,25 @@ def _control_arm_report(
 
 def _load_test_partition(
     artifact: dict, cfg: AppConfig
-) -> tuple[object, np.ndarray, pd.DataFrame, np.ndarray]:
-    """Load Stage 1 test partition features, labels, subgroups and hadm_ids.
+) -> tuple[object, np.ndarray, pd.DataFrame, np.ndarray, np.ndarray]:
+    """Load Stage 1 test partition features, labels, subgroups, hadm_ids,
+    and subject_ids (for patient-clustered bootstrap resampling -- see
+    src/model/bootstrap.py; previously discarded here, so the RQ2
+    pipeline-vs-control-arm comparison had no CIs at all, unlike RQ1's
+    compare_layers.py which does this correctly).
 
     Returns:
-        (x_test, y_test, sub_test, hadm_test)
+        (x_test, y_test, sub_test, hadm_test, groups_test)
     """
     matrix = load_feature_matrix(cfg, artifact["mode"])
-    features, y, _, subgroups, _ = split_xy(matrix)
+    features, y, groups, subgroups, _ = split_xy(matrix)
     idx = artifact["test_idx"]
     x_test = features.iloc[idx][artifact["feature_cols"]]
     y_test = y[idx]
     sub_test = subgroups.iloc[idx].reset_index(drop=True)
     hadm_test = matrix.iloc[idx]["hadm_id"].values
-    return x_test, y_test, sub_test, hadm_test
+    groups_test = groups[idx]
+    return x_test, y_test, sub_test, hadm_test, groups_test
 
 
 def _eval_stage2(
@@ -409,6 +459,19 @@ def _conditional_triggering_report(
     }
 
 
+def _print_pipeline_line(prefix: str, report: dict) -> None:
+    """Print a pipeline/control-arm report line, with precision/recall CIs
+    if the report carries them (see _add_precision_recall_ci). ``prefix``
+    carries the report-specific context (n, cohort description) since
+    full_cohort/control_arm each need different framing text.
+    """
+    p_ci, r_ci = report["precision_ci"], report["recall_ci"]
+    print(f"{prefix}precision={report['precision']:.3f} "
+          f"[{p_ci['ci_lower']:.3f}, {p_ci['ci_upper']:.3f}]  "
+          f"recall={report['recall']:.3f} [{r_ci['ci_lower']:.3f}, {r_ci['ci_upper']:.3f}]  "
+          f"F1={report['f1']:.3f}  F2={report['f2']:.3f}")
+
+
 # ── main evaluation ───────────────────────────────────────────────────────────
 
 def evaluate_pipeline(cfg: AppConfig) -> dict:
@@ -423,7 +486,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     model_dir = get_model_dir()
     artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
-    x_test, y_test, sub_test, hadm_test = _load_test_partition(artifact, cfg)
+    x_test, y_test, sub_test, hadm_test, groups_test = _load_test_partition(artifact, cfg)
     s1_scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_test)[:, 1])
     s1_report = _stage1_report(y_test, s1_scores, artifact["threshold"], sub_test)
     print(f"\n[pipeline_eval] Stage 1 (test n={s1_report['n']:,}): "
@@ -440,11 +503,12 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     # Full cohort (C9, primary): every test admission, note-less flagged
     # patients fall back to Stage 1's own flag rather than being silently
     # scored negative.
-    full_report_ = _pipeline_report(y_test, pipeline_pred_full, sub_test)
-    print(f"[pipeline_eval] Pipeline, full cohort (n={full_report_['n']:,}, C9 fallback applied): "
-          f"precision={full_report_['precision']:.3f}  "
-          f"recall={full_report_['recall']:.3f}  "
-          f"F1={full_report_['f1']:.3f}  F2={full_report_['f2']:.3f}")
+    full_report_ = _pipeline_report(y_test, pipeline_pred_full, sub_test, groups=groups_test)
+    _print_pipeline_line(
+        f"[pipeline_eval] Pipeline, full cohort (n={full_report_['n']:,}, "
+        "C9 fallback applied): ",
+        full_report_,
+    )
 
     # Notes cohort (secondary): restricted to admissions Stage 2 actually saw
     # (not flagged, or flagged with a note) — matches how "+21% precision"
@@ -465,13 +529,13 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     # would tightening Stage 1's threshold alone have caught as much at the
     # same alert budget?"
     control_report = _control_arm_report(
-        y_test, s1_scores, full_report_["confirmed_rate"], sub_test
+        y_test, s1_scores, full_report_["confirmed_rate"], sub_test, groups=groups_test
     )
-    print(f"[pipeline_eval] Control arm (Stage 1 @ matched alert rate="
-          f"{control_report['target_alert_rate']:.1%}, thr={control_report['threshold']:.4f}): "
-          f"precision={control_report['precision']:.3f}  "
-          f"recall={control_report['recall']:.3f}  "
-          f"F1={control_report['f1']:.3f}  F2={control_report['f2']:.3f}")
+    _print_pipeline_line(
+        "[pipeline_eval] Control arm (Stage 1 @ matched alert rate="
+        f"{control_report['target_alert_rate']:.1%}, thr={control_report['threshold']:.4f}): ",
+        control_report,
+    )
 
     # Conditional-triggering post-hoc analysis (session 19): what discordant-
     # only Stage 3 triggering would have cost/saved, computed from the real
