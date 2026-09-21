@@ -18,6 +18,7 @@ from src.stage3.explain import (
     PLANNED_RETURN_ANSWERS,
     _detect_truncated,
     _parse_response,
+    _trim_incomplete_trailing_sentence,
     build_prompt,
     compute_decision_rule,
     compute_discordance,
@@ -546,6 +547,33 @@ def test_verify_quote_strips_whitespace():
     assert verify_quote("  Strong family support documented.  ", note) is True
 
 
+def test_verify_quote_true_across_mimic_hard_wrap_newline():
+    """A quote spanning a MIMIC-style hard-wrapped line break in the note
+    must still verify as True -- confirmed 2026-09-21 against real notes
+    from a 50-patient validation run: all_quotes_verified was 0% across
+    every patient, and 87% of individual quote failures were exactly this
+    (a faithful quote scored identically to a fabricated one), not
+    hallucination. MIMIC notes hard-wrap at a fixed column width with
+    literal newlines mid-sentence; the model reproduces quotes as flowing
+    text, which a naive exact-substring check incorrectly penalizes."""
+    note = (
+        "Discharge Instructions:\nDear Ms ___, It was a pleasure taking "
+        "care of you during \nyour stay at ___. You were \nadmitted for "
+        "malaise in the setting of neutropenia."
+    )
+    quote = "It was a pleasure taking care of you during your stay at ___."
+    assert verify_quote(quote, note) is True
+
+
+def test_verify_quote_still_false_for_genuine_fabrication_despite_normalization():
+    """Whitespace normalization must not accidentally make hallucinated
+    content verify as True -- the anti-hallucination guarantee itself must
+    survive this fix, not just the false-negative rate."""
+    note = "Discharge Instructions:\nPatient tolerated the procedure well."
+    fabricated = "Patient experienced severe complications during the procedure."
+    assert verify_quote(fabricated, note) is False
+
+
 # ── _detect_truncated ────────────────────────────────────────────────────────
 # The one genuinely new piece of logic from the 2026-09-15 batching rewrite
 # (audit finding 2026-09-18 2.3): call_llm_batch's own tests mock
@@ -588,3 +616,41 @@ def test_detect_truncated_no_eos_id_returns_all_false():
 def test_detect_truncated_empty_batch():
     """Zero rows must return an empty list, not error."""
     assert _detect_truncated(np.empty((0, 4), dtype=int), EOS_ID) == []
+
+
+# ── _trim_incomplete_trailing_sentence ────────────────────────────────────────
+# clinical_justification's maxLength=800 schema constraint (audit finding
+# 2026-09-21, from a real 50-patient validation run) cuts generation off at
+# exactly 800 chars regardless of word/sentence boundaries, producing
+# mid-word or garbled endings. This trims back to the last complete
+# sentence for display, rather than showing the raw cutoff.
+
+def test_trim_leaves_complete_sentence_unchanged():
+    """A justification that already ends cleanly must not be altered."""
+    text = "The patient is stable. Follow-up is arranged."
+    assert _trim_incomplete_trailing_sentence(text) == text
+
+
+def test_trim_cuts_back_to_last_sentence_boundary():
+    """A mid-word cutoff must be trimmed back to the last complete sentence."""
+    text = "The patient is stable. Follow-up is arranged with the renal faili"
+    assert _trim_incomplete_trailing_sentence(text) == "The patient is stable."
+
+
+def test_trim_handles_single_fragment_with_no_boundary():
+    """A single sentence with no boundary at all must be returned as-is --
+    something is better than nothing."""
+    text = "The patient has significant comorbidities including renal faili"
+    assert _trim_incomplete_trailing_sentence(text) == text
+
+
+def test_trim_strips_trailing_whitespace():
+    """Trailing whitespace after a complete sentence must not itself count
+    as 'incomplete'."""
+    text = "The patient is stable.   "
+    assert _trim_incomplete_trailing_sentence(text) == "The patient is stable."
+
+
+def test_trim_handles_empty_string():
+    """Empty input must not error."""
+    assert _trim_incomplete_trailing_sentence("") == ""
