@@ -57,6 +57,7 @@ Three things are deliberately NOT delegated to the LLM:
 
 from __future__ import annotations
 
+import re
 import textwrap
 from typing import TYPE_CHECKING, Any
 
@@ -112,9 +113,18 @@ _MITIGATING_DESCRIPTIONS: dict[str, str] = {
                           "readmission isn't the relevant outcome",
     "planned_return": "a scheduled return is documented (chemo cycle, staged "
                        "procedure, planned dialysis admission)",
-    "strong_discharge_support": "follow-up appointment arranged and "
-                                 "caregiver/support present and clinically "
-                                 "stable at discharge",
+    "strong_discharge_support": "ALL THREE, not just one: (1) a SPECIFIC "
+                                 "follow-up appointment or plan is documented, "
+                                 "(2) a named caregiver or support person is "
+                                 "documented, (3) the patient is explicitly "
+                                 "noted as clinically stable. Generic closing "
+                                 "statements (\"we wish you the best\"), routine "
+                                 "boilerplate instructions to \"follow up with "
+                                 "your doctor\" with no specific plan, or a bare "
+                                 "discharge-disposition field alone do NOT "
+                                 "qualify — cite this ground only when the note "
+                                 "gives concrete evidence for the specific "
+                                 "condition(s) it actually supports",
     "structured_driver_contradicted": "the note explicitly contradicts what "
                                        "drove the structured model's alert",
 }
@@ -251,6 +261,11 @@ _USER_TEMPLATE = textwrap.dedent("""
     following grounds, if any, are documented in the note. Only cite a
     ground if the note actually documents it — do not invent one to justify
     a decision you have already reached. Extract first, decide after.
+    Generic closing pleasantries ("it was a pleasure caring for you") and
+    routine, non-specific instructions ("follow up with your doctor") are
+    NOT evidence for any ground on their own — a ground must be satisfied
+    by concrete, specific content, not boilerplate language present in
+    nearly every discharge note.
 
     Mitigating grounds (support overriding/cancelling the alert):
     {mitigating_block}
@@ -458,18 +473,41 @@ def _stage2_evidence_block(
         evidence below.""")
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Collapse all whitespace runs (including literal newlines) to a
+    single space.
+
+    MIMIC-IV discharge notes hard-wrap at a fixed column width with literal
+    ``\\n`` characters mid-sentence -- confirmed 2026-09-21 against real
+    notes from a 50-patient validation run: ``all_quotes_verified`` was 0%
+    across every patient, and 140/161 (87%) of the individual quote
+    failures were purely this formatting artifact, not hallucination (e.g.
+    the model quoting "...to follow up with your primary oncologist." as
+    flowing text when the raw note has "...to follow up with\\nyour primary
+    oncologist."). Without this, a faithful quote and a fabricated one were
+    scored identically (both "unverified"), defeating the whole point of
+    quote verification as an anti-hallucination check.
+    """
+    return re.sub(r"\s+", " ", text.strip())
+
+
 def verify_quote(quote: str, note_text: str) -> bool:
-    """Return whether ``quote`` appears verbatim in ``note_text``.
+    """Return whether ``quote`` appears verbatim in ``note_text``, modulo
+    whitespace formatting (see :func:`_normalize_whitespace`).
 
     Computed in code, not asked of the LLM — this is what turns "the model
     says it quoted the note" into something automatically checkable, and is
     the mechanism that makes human spot-checking tractable instead of
     impossible: a reviewer only needs to check the (hopefully small) subset
     where a quote is unverified, not re-read every note from scratch.
+    Normalizing whitespace (not just stripping leading/trailing) matters
+    specifically because MIMIC notes hard-wrap mid-sentence -- content
+    matching is unaffected, only incidental line-wrap formatting is
+    ignored.
     """
     if not quote.strip():
         return False
-    return quote.strip() in note_text
+    return _normalize_whitespace(quote) in _normalize_whitespace(note_text)
 
 
 def compute_decision_rule(
@@ -717,6 +755,32 @@ def _detect_truncated(generated_ids, eos_id: int | None) -> list[bool]:
     return [eos_id not in row.tolist() for row in generated_ids]
 
 
+def _trim_incomplete_trailing_sentence(text: str) -> str:
+    """If ``text`` doesn't end with sentence-ending punctuation, trim back
+    to the end of the last complete sentence.
+
+    ``clinical_justification``'s ``maxLength=800`` JSON-schema constraint
+    (see ``_LLMOutput``) cuts generation off at exactly 800 characters
+    regardless of word or sentence boundaries -- confirmed 2026-09-21
+    against real output: justifications routinely ended mid-word (e.g.
+    "...renal faili", "...encephal") or, once, with a stray non-ASCII
+    character right at the cut point, an artifact of truncating mid-token.
+    This doesn't happen at generation time (the schema constraint already
+    fired by then) -- it's a display/reporting cleanup, trading a
+    dropped trailing sentence fragment for a justification that always
+    reads as complete prose. Falls back to the original text if no
+    sentence boundary is found (a single very long fragment) -- something
+    is better than nothing.
+    """
+    stripped = text.rstrip()
+    if not stripped or stripped[-1] in ".!?":
+        return stripped
+    last_boundary = max(stripped.rfind(". "), stripped.rfind("! "), stripped.rfind("? "))
+    if last_boundary == -1:
+        return stripped
+    return stripped[: last_boundary + 1]
+
+
 def _finalize_annotation(
     raw: str, note_text: str, *, likely_truncated: bool
 ) -> dict[str, Any]:
@@ -758,6 +822,9 @@ def _finalize_annotation(
     )
     annotation["decision_rule"] = compute_decision_rule(
         annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
+    )
+    annotation["clinical_justification"] = _trim_incomplete_trailing_sentence(
+        annotation["clinical_justification"]
     )
     return annotation
 
