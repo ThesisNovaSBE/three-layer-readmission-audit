@@ -44,7 +44,11 @@ class ExplanationResult(BaseModel):
     - ``decision_rule`` is the same three-way decision recomputed
       deterministically in code from the grounds the model extracted (see
       :func:`src.stage3.explain.compute_decision_rule`) — not asked of the
-      model. Reported alongside ``decision_model``, never in place of it;
+      model. Critically, it is computed from quote-VERIFIED grounds only
+      (see :func:`src.stage3.explain._finalize_annotation`) — a ground with
+      a fabricated (unverifiable) quote cannot drive it, so it can't be
+      talked into an override/uphold by evidence that didn't actually check
+      out. Reported alongside ``decision_model``, never in place of it;
       their agreement rate is a reportable consistency metric for small
       local models as judges, and ``decision_rule`` is a fully transparent
       fallback if ``decision_model`` proves unreliable.

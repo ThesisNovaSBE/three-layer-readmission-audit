@@ -685,3 +685,91 @@ def test_finalize_annotation_omits_discharge_support_when_incomplete():
     annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
     assert annotation["mitigating_grounds"] == []
     assert annotation["decision_rule"] == "uphold"
+
+
+# ── decision_rule must only be driven by quote-verified evidence ────────────
+# The whole point of decision_rule is a cross-check the model can't
+# fabricate its way past (docs: "a fully transparent fallback if
+# decision_model proves unreliable"). Before this fix, compute_decision_rule
+# was handed the RAW mitigating/aggravating lists regardless of
+# quote_verified -- a hallucinated ground (a cited quote that isn't actually
+# in the note) could still flip decision_rule to override, or force it to
+# uphold, defeating that guarantee entirely. _finalize_annotation must
+# filter to verified-only grounds before calling compute_decision_rule.
+
+def test_finalize_annotation_decision_rule_ignores_unverified_mitigating_ground():
+    """A mitigating ground with a fabricated (non-verbatim) quote must be
+    reported (for transparency) but must NOT be able to drive decision_rule
+    to override -- only verified evidence may do that."""
+    raw = _good_json(
+        decision="override",
+        mitigating=[
+            {"ground": "palliative_intent", "quote": "This sentence is not in the note at all."}
+        ],
+        aggravating=[],
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["mitigating_grounds"][0]["quote_verified"] is False
+    assert annotation["decision_rule"] == "uphold"
+
+
+def test_finalize_annotation_decision_rule_ignores_unverified_aggravating_ground():
+    """An aggravating ground with a fabricated quote must not be able to
+    force decision_rule to uphold over otherwise-genuine, verified
+    mitigating evidence."""
+    raw = _good_json(
+        decision="uphold",
+        mitigating=[],
+        aggravating=[
+            {"ground": "cognitive_impairment", "quote": "This is not actually in the note."}
+        ],
+        followup_plan_quote=_FOLLOWUP_QUOTE,
+        named_caregiver_quote=_CAREGIVER_QUOTE,
+        clinically_stable_quote=_STABILITY_QUOTE,
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["aggravating_grounds"][0]["quote_verified"] is False
+    assert annotation["decision_rule"] == "override"
+
+
+def test_finalize_annotation_all_quotes_verified_still_reflects_full_list():
+    """all_quotes_verified must remain a transparency metric over EVERY
+    cited ground (verified or not) -- it must go False even when the
+    unverified ground didn't end up mattering to decision_rule, so a
+    reviewer can still find and inspect it."""
+    raw = _good_json(
+        decision="uphold",
+        mitigating=[
+            {"ground": "palliative_intent", "quote": "This sentence is not in the note at all."}
+        ],
+        aggravating=[],
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["all_quotes_verified"] is False
+    assert annotation["decision_rule"] == "uphold"
+
+
+# ── duplicate ground citation is deduplicated, not double-counted ──────────
+
+def test_parse_response_dedupes_ground_cited_twice():
+    """A ground cited twice with different quotes must be deduplicated
+    (keeping the first occurrence), not fail validation nor double-count --
+    confirmed a real production pattern (cognitive_impairment cited twice
+    for the same patient with two different quotes)."""
+    raw = json.dumps({
+        "mitigating_grounds": [],
+        "aggravating_grounds": [
+            {"ground": "cognitive_impairment", "quote": "First confusion quote."},
+            {"ground": "cognitive_impairment", "quote": "Second confusion quote."},
+        ],
+        "followup_plan_quote": "",
+        "named_caregiver_quote": "",
+        "clinically_stable_quote": "",
+        "planned_return": "no",
+        "clinical_justification": "whatever",
+        "decision": "uphold",
+    })
+    result = _parse_response(raw)
+    assert result["annotation_failed"] is False
+    assert len(result["aggravating_grounds"]) == 1
+    assert result["aggravating_grounds"][0]["quote"] == "First confusion quote."
