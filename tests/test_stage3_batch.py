@@ -281,6 +281,43 @@ def test_resume_skips_already_written_admissions(tmp_path, results_df):  # pylin
     assert len(written) == 4
 
 
+def test_setup_batch_skips_preload_when_nothing_pending(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """When --resume finds everything already done, _preload_notes must
+    never be called at all -- confirmed real 2026-09-27: the underlying
+    load_notes() raises ValueError ("No discharge notes found after
+    filtering") on an empty hadm_ids set instead of returning nothing, so
+    a --resume run landing on an already-fully-done batch would otherwise
+    crash instead of exiting cleanly. A plausible way for one of the full
+    run's several job segments to end."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out)
+
+    def preload_notes_se(*_a, **_kw):
+        raise AssertionError("_preload_notes must not be called when pending is empty")
+
+    with patch("src.stage3.batch._load_artifact", return_value={}), \
+            patch("src.stage3.batch._load_results", return_value=results_df), \
+            patch("src.stage3.batch.load_feature_matrix", return_value=pd.DataFrame()), \
+            patch("src.stage3.batch._preload_notes", side_effect=preload_notes_se), \
+            patch("src.stage3.batch._prepare_patient", side_effect=prepare_se), \
+            patch("src.stage3.batch.call_llm_batch", side_effect=_ok_call_llm_batch), \
+            patch("src.stage3.batch._assemble_result", side_effect=_ok_assemble):
+        run_batch_audit(cfg=_cfg(), out_path=out, resume=True)
+
+    written = pd.read_csv(out)
+    assert len(written) == 4
+
+
 def test_limit_restricts_target_count(tmp_path, results_df):  # pylint: disable=redefined-outer-name
     """--limit must restrict how many admissions are audited."""
     out = tmp_path / "out.csv"
