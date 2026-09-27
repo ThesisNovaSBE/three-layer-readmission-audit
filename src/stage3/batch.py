@@ -64,7 +64,7 @@ from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
 from src.stage3.discordance import sweep_discordance_thresholds
 from src.stage3.explain import call_llm_batch
-from src.stage3.pipeline import _assemble_result, _prepare_patient, explain_patient
+from src.stage3.pipeline import _assemble_result, _lookup_patient, _prepare_patient, explain_patient
 
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
@@ -134,6 +134,51 @@ def _preload_notes(
     return dict(zip(notes_df["hadm_id"], notes_df["text"]))
 
 
+def _prep_failure_row(
+    hadm_id: int, results_df: pd.DataFrame, exc: Exception, model_name: str
+) -> dict:
+    """Build a complete, annotation_failed CSV row for an admission that
+    failed during evidence preparation (missing note, malformed feature
+    row, etc.) -- before this, such an admission was only printed to the
+    job log and never written to the output CSV. Across a multi-day run
+    needing many chained --resume job resubmissions, that meant a
+    chronically-failing admission would be retried on EVERY resubmission
+    forever, its only record being a print() line scattered across whichever
+    job's log happened to hit it -- there was no single place to reconcile
+    "every target hadm_id got exactly one row" against, and finishing the
+    real run would leave a silent, unaccounted-for gap between the target
+    count and the output row count. Now every target hadm_id gets exactly
+    one row, always: ok, LLM-annotation_failed, or prep-annotation_failed.
+
+    Falls back to hadm_id-only placeholders if even the basic results_df
+    lookup fails -- this function must never itself raise, or a broken
+    lookup would silently drop the very row it exists to guarantee.
+    """
+    try:
+        patient = _lookup_patient(hadm_id, results_df)
+        stage1_score = patient["stage1_score"]
+        stage1_threshold = patient["stage1_threshold"]
+        stage2_score = patient["stage2_score"]
+        stage2_confirmed = patient["stage2_confirmed"]
+    except Exception:  # pylint: disable=broad-exception-caught
+        stage1_score = stage1_threshold = stage2_score = 0.0
+        stage2_confirmed = False
+    return {
+        "hadm_id": hadm_id,
+        "stage1_score": stage1_score,
+        "stage1_threshold": stage1_threshold,
+        "stage2_score": stage2_score,
+        "stage2_confirmed": stage2_confirmed,
+        "r1": 0.0, "r2": 0.0, "displacement": 0.0, "discordance_mode": "CONCORDANT",
+        "mitigating_grounds": "[]", "aggravating_grounds": "[]",
+        "all_quotes_verified": None, "planned_return": None,
+        "clinical_justification": f"[PREP FAILED: {exc}]",
+        "decision_model": None, "decision_rule": None,
+        "note_truncated": False, "model_name": model_name,
+        "annotation_failed": True,
+    }
+
+
 def _process_chunk(
     chunk: list[int],
     cfg: AppConfig,
@@ -164,8 +209,11 @@ def _process_chunk(
             )))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # One bad admission (missing note, malformed feature row) must
-            # not kill the whole batch.
+            # not kill the whole batch -- and must still get a row (see
+            # _prep_failure_row) so --resume doesn't retry it forever.
             print(f"[stage3/batch] [prep] hadm_id={hadm_id} FAILED: {exc}")
+            writer.writerow(_prep_failure_row(hadm_id, results_df, exc, cfg.stage3.model_name))
+            fh.flush()
             n_failed += 1
 
     if not prepared:
