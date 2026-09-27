@@ -39,7 +39,8 @@ Three things are deliberately NOT delegated to the LLM:
 
 1. **Discordance mode.** Computed quantitatively from percentile-rank
    displacement of stage1_score vs. stage2_score within the flagged+noted
-   cohort (see :func:`compute_discordance`), not asked of the model. Percentile
+   cohort (see :func:`src.stage3.discordance.compute_discordance`), not
+   asked of the model. Percentile
    rank is used instead of a raw-probability difference because Stage 1 and
    Stage 2 are different model families and are not guaranteed to be equally
    well-calibrated even after isotonic calibration — rank displacement is
@@ -53,6 +54,17 @@ Three things are deliberately NOT delegated to the LLM:
 3. **Whether the auditor's own decision is reproducible.** Sampling
    temperature is pinned at 0 (``cfg.stage3.temperature``) for every
    evaluation run.
+4. **Whether discharge support is "strong enough" to count as a mitigating
+   ground.** Added 2026-09-27 after a 50-patient validation run found the
+   model citing ``strong_discharge_support`` on 47/50 patients (94%) on a
+   single weak piece of evidence, despite an explicit "ALL THREE, not just
+   one" prose requirement already in the prompt. The model now extracts
+   three atomic quotes independently (``followup_plan_quote``,
+   ``named_caregiver_quote``, ``clinically_stable_quote``); code
+   (:func:`_extract_discharge_support_ground`) credits the combined ground
+   only when all three are present and individually verified. Same
+   rationale as item 2 above: a compound judgment the model demonstrably
+   can't reliably apply itself is computed deterministically instead.
 """
 
 from __future__ import annotations
@@ -61,7 +73,6 @@ import re
 import textwrap
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
@@ -80,12 +91,6 @@ if TYPE_CHECKING:
 
 DECISIONS: tuple[str, ...] = ("uphold", "override", "insufficient_evidence")
 
-DISCORDANCE_MODES: tuple[str, ...] = (
-    "CONCORDANT",      # Stage 1 and Stage 2 rank this patient similarly
-    "NOTE_MITIGATES",  # Stage 2 ranks the patient markedly lower risk than Stage 1
-    "NOTE_AMPLIFIES",  # Stage 2 ranks the patient markedly higher risk than Stage 1
-)
-
 # Two-sided grounds taxonomy (session 19), replacing the single free-choice
 # primary_clinical_domain. Each ground the model cites must carry its own
 # verbatim quote (validated in _parse_response, verified against the note in
@@ -95,8 +100,25 @@ DISCORDANCE_MODES: tuple[str, ...] = (
 MITIGATING_GROUNDS: tuple[str, ...] = (
     "palliative_intent",
     "planned_return",
-    "strong_discharge_support",
     "structured_driver_contradicted",
+)
+
+# strong_discharge_support: NOT directly citable by the model -- computed
+# in code from three atomic quotes instead (module docstring item 4). Kept
+# as a constant so the code-synthesized ground reports under the same name
+# in mitigating_grounds/decision_rule/CSV output as before.
+_STRONG_DISCHARGE_SUPPORT = "strong_discharge_support"
+
+# The three atomic evidence items for strong_discharge_support, rendered
+# into the prompt via _discharge_support_block(); order matches the three
+# quote-or-"" fields on _LLMOutput (followup_plan_quote,
+# named_caregiver_quote, clinically_stable_quote).
+_DISCHARGE_SUPPORT_EVIDENCE: tuple[str, ...] = (
+    "a SPECIFIC follow-up appointment or plan is documented (not a generic "
+    "\"follow up with your doctor\" instruction, and not a bare "
+    "discharge-disposition field alone)",
+    "a named caregiver or support person is documented",
+    "the patient is explicitly noted as clinically stable at discharge",
 )
 
 AGGRAVATING_GROUNDS: tuple[str, ...] = (
@@ -113,18 +135,6 @@ _MITIGATING_DESCRIPTIONS: dict[str, str] = {
                           "readmission isn't the relevant outcome",
     "planned_return": "a scheduled return is documented (chemo cycle, staged "
                        "procedure, planned dialysis admission)",
-    "strong_discharge_support": "ALL THREE, not just one: (1) a SPECIFIC "
-                                 "follow-up appointment or plan is documented, "
-                                 "(2) a named caregiver or support person is "
-                                 "documented, (3) the patient is explicitly "
-                                 "noted as clinically stable. Generic closing "
-                                 "statements (\"we wish you the best\"), routine "
-                                 "boilerplate instructions to \"follow up with "
-                                 "your doctor\" with no specific plan, or a bare "
-                                 "discharge-disposition field alone do NOT "
-                                 "qualify — cite this ground only when the note "
-                                 "gives concrete evidence for the specific "
-                                 "condition(s) it actually supports",
     "structured_driver_contradicted": "the note explicitly contradicts what "
                                        "drove the structured model's alert",
 }
@@ -207,6 +217,13 @@ class _LLMOutput(BaseModel):
     # top_attention_sentences).
     mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
+    # Three atomic discharge-support signals (module docstring item 4),
+    # each its own quote-or-"" field so they don't compete with
+    # palliative_intent/planned_return/structured_driver_contradicted for
+    # one of mitigating_grounds' only 3 array slots.
+    followup_plan_quote: str = Field(default="")
+    named_caregiver_quote: str = Field(default="")
+    clinically_stable_quote: str = Field(default="")
     planned_return: str
     # max_length=800 chars (2026-09-17): same fix, next field. Capping
     # grounds alone didn't fix truncation -- overflow just moved here. The
@@ -273,7 +290,13 @@ _USER_TEMPLATE = textwrap.dedent("""
     Aggravating grounds (support upholding the alert):
     {aggravating_block}
 
-    Return ONLY a JSON object with exactly these five fields:
+    Discharge support evidence — answer each of these three independently.
+    Do NOT decide for yourself whether they add up to "strong support"; that
+    is computed separately from your three answers. For each, return the
+    exact verbatim sentence if the note documents it, or "" if it does not:
+    {discharge_support_block}
+
+    Return ONLY a JSON object with exactly these eight fields:
 
     "mitigating_grounds": list of objects {{"ground": <one of the mitigating
       grounds above>, "quote": <exact verbatim sentence from the note>}}.
@@ -285,6 +308,15 @@ _USER_TEMPLATE = textwrap.dedent("""
     "aggravating_grounds": same shape, drawn from the aggravating grounds
       above. Empty list if none apply. Same limit: AT MOST 3 entries, most
       decisive only.
+
+    "followup_plan_quote": verbatim quote for discharge support evidence
+      item 1 above, or "" if not documented.
+
+    "named_caregiver_quote": verbatim quote for discharge support evidence
+      item 2 above, or "" if not documented.
+
+    "clinically_stable_quote": verbatim quote for discharge support evidence
+      item 3 above, or "" if not documented.
 
     "planned_return": does the note mention a planned return — a scheduled
       chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
@@ -304,92 +336,6 @@ _USER_TEMPLATE = textwrap.dedent("""
       insufficient_evidence  — the note is too short or uninformative to
                                 assess either way
 """).strip()
-
-
-# ── Discordance (quantitative, not LLM-determined) ──────────────────────────────
-
-def _percentile_rank(value: float, population: np.ndarray) -> float:
-    """Return the percentile rank of ``value`` within ``population`` (0-100)."""
-    population = np.asarray(population, dtype=float)
-    if population.size == 0:
-        return 50.0
-    return float((population <= value).mean() * 100.0)
-
-
-def compute_discordance(
-    stage1_score: float,
-    stage2_score: float,
-    cohort_stage1_scores: np.ndarray,
-    cohort_stage2_scores: np.ndarray,
-    displacement_pp: float = 20.0,
-) -> dict[str, float | str]:
-    """Return percentile-rank displacement and discordance mode for one patient.
-
-    Displacement is invariant to any residual, unequal miscalibration between
-    Stage 1 (XGBoost) and Stage 2 (Clinical-Longformer) — two different model
-    families are not guaranteed to share the same calibration error even after
-    isotonic calibration, so a raw ``stage2_score - stage1_score`` difference
-    is not a reliable measure of disagreement. Rank displacement only requires
-    that each score is a meaningful risk ordering within its own cohort.
-
-    Args:
-        stage1_score:          this patient's Stage 1 probability.
-        stage2_score:          this patient's Stage 2 probability.
-        cohort_stage1_scores:  Stage 1 scores for the flagged+noted cohort.
-        cohort_stage2_scores:  Stage 2 scores for the same cohort.
-        displacement_pp:       |displacement| >= this (percentile points)
-                                is classified as discordant.
-
-    Returns:
-        Dict with ``r1``, ``r2``, ``displacement``, ``mode``.
-    """
-    r1 = _percentile_rank(stage1_score, cohort_stage1_scores)
-    r2 = _percentile_rank(stage2_score, cohort_stage2_scores)
-    displacement = r2 - r1
-    if displacement <= -displacement_pp:
-        mode = "NOTE_MITIGATES"
-    elif displacement >= displacement_pp:
-        mode = "NOTE_AMPLIFIES"
-    else:
-        mode = "CONCORDANT"
-    return {"r1": r1, "r2": r2, "displacement": displacement, "mode": mode}
-
-
-def sweep_discordance_thresholds(
-    displacements: np.ndarray, thresholds_pp: list[float] | None = None
-) -> dict[str, dict[str, float]]:
-    """Report the discordance mode distribution across a range of thresholds.
-
-    ``stage3.discordance_displacement_pp`` (20, provisional) has never been
-    validated empirically — this answers how sensitive the reported mode
-    distribution is to that choice, per docs/ARCHITECTURE.md. Only the mode
-    classification depends on the threshold; ``displacement`` values
-    (already computed per-patient by :func:`compute_discordance`) don't need
-    recomputing — pass the ``displacement`` column of a batch audit result.
-
-    Args:
-        displacements: array of ``r2 - r1`` values, one per audited patient.
-        thresholds_pp: displacement-point thresholds to sweep. Defaults to
-                       ``[10, 15, 20, 25, 30]``.
-
-    Returns:
-        Dict keyed by threshold (as a string) to a dict of
-        mode -> fraction of patients classified into that mode.
-    """
-    thresholds_pp = thresholds_pp or [10.0, 15.0, 20.0, 25.0, 30.0]
-    displacements = np.asarray(displacements, dtype=float)
-    n = len(displacements)
-    out: dict[str, dict[str, float]] = {}
-    for thr in thresholds_pp:
-        mitigates = int((displacements <= -thr).sum())
-        amplifies = int((displacements >= thr).sum())
-        concordant = n - mitigates - amplifies
-        out[str(thr)] = {
-            "NOTE_MITIGATES": mitigates / n if n else 0.0,
-            "NOTE_AMPLIFIES": amplifies / n if n else 0.0,
-            "CONCORDANT": concordant / n if n else 0.0,
-        }
-    return out
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -435,6 +381,14 @@ def _attention_block(attention_sentences: list[str]) -> str:
 def _grounds_block(grounds: tuple[str, ...], descriptions: dict[str, str]) -> str:
     """Render a grounds taxonomy as a labelled list for the prompt."""
     return "\n".join(f"  - {g}: {descriptions[g]}" for g in grounds)
+
+
+def _discharge_support_block() -> str:
+    """Render the three atomic discharge-support evidence items as a
+    numbered list for the prompt -- see _DISCHARGE_SUPPORT_EVIDENCE."""
+    return "\n".join(
+        f"  {i}. {desc}" for i, desc in enumerate(_DISCHARGE_SUPPORT_EVIDENCE, start=1)
+    )
 
 
 def _stage2_evidence_block(
@@ -609,6 +563,12 @@ def _parse_response(raw: str) -> dict[str, Any]:
     return {
         "mitigating_grounds": mitigating,
         "aggravating_grounds": aggravating,
+        # Raw, unvalidated discharge-support evidence -- consumed and
+        # popped by _finalize_annotation (needs note_text, which this
+        # function doesn't have) to compute strong_discharge_support.
+        "followup_plan_quote": parsed.followup_plan_quote,
+        "named_caregiver_quote": parsed.named_caregiver_quote,
+        "clinically_stable_quote": parsed.clinically_stable_quote,
         "planned_return": valid_planned_return,
         "clinical_justification": parsed.clinical_justification,
         "decision_model": valid_decision,
@@ -665,6 +625,7 @@ def build_prompt(
         attention_block=_attention_block(attention_sentences or []),
         mitigating_block=_grounds_block(MITIGATING_GROUNDS, _MITIGATING_DESCRIPTIONS),
         aggravating_block=_grounds_block(AGGRAVATING_GROUNDS, _AGGRAVATING_DESCRIPTIONS),
+        discharge_support_block=_discharge_support_block(),
         decisions=str(DECISIONS),
         planned_return_options=str(PLANNED_RETURN_ANSWERS),
     )
@@ -781,6 +742,28 @@ def _trim_incomplete_trailing_sentence(text: str) -> str:
     return stripped[: last_boundary + 1]
 
 
+def _extract_discharge_support_ground(
+    followup_quote: str, caregiver_quote: str, stability_quote: str, note_text: str
+) -> dict[str, Any] | None:
+    """Combine the three independently-extracted discharge-support quotes
+    into a single ``strong_discharge_support`` ground, credited only when
+    ALL THREE are present and individually verified against the note.
+
+    See the module docstring's item 4 for why this AND is computed here
+    instead of asked of the model as a single judgment.
+    """
+    quotes = [followup_quote.strip(), caregiver_quote.strip(), stability_quote.strip()]
+    if not all(quotes):
+        return None
+    if not all(verify_quote(q, note_text) for q in quotes):
+        return None
+    return {
+        "ground": _STRONG_DISCHARGE_SUPPORT,
+        "quote": " | ".join(quotes),
+        "quote_verified": True,
+    }
+
+
 def _finalize_annotation(
     raw: str, note_text: str, *, likely_truncated: bool
 ) -> dict[str, Any]:
@@ -791,6 +774,9 @@ def _finalize_annotation(
     ``note_text``, so this can't be hoisted above the per-item loop.
     """
     annotation = _parse_response(raw)
+    followup_quote = annotation.pop("followup_plan_quote", "")
+    caregiver_quote = annotation.pop("named_caregiver_quote", "")
+    stability_quote = annotation.pop("clinically_stable_quote", "")
     if annotation["annotation_failed"]:
         # Hitting the token cap is the most actionable failure mode to
         # distinguish at a glance (raise _MAX_NEW_TOKENS) versus a genuine
@@ -811,6 +797,11 @@ def _finalize_annotation(
         {**g, "quote_verified": verify_quote(g["quote"], note_text)}
         for g in annotation["mitigating_grounds"]
     ]
+    discharge_support = _extract_discharge_support_ground(
+        followup_quote, caregiver_quote, stability_quote, note_text
+    )
+    if discharge_support is not None:
+        mitigating.append(discharge_support)
     aggravating = [
         {**g, "quote_verified": verify_quote(g["quote"], note_text)}
         for g in annotation["aggravating_grounds"]

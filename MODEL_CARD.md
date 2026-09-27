@@ -208,10 +208,25 @@ narrate or classify a decision Stage 2 already made.
 **Grounds taxonomy** (fixed list; a ground outside it, or with an empty
 quote, is a parse failure, not a new category):
 - *Mitigating:* `palliative_intent` · `planned_return` ·
-  `strong_discharge_support` · `structured_driver_contradicted`
+  `structured_driver_contradicted`
 - *Aggravating:* `lives_alone_no_support` · `no_followup_arranged` ·
   `functional_dependence` · `cognitive_impairment` · `nonadherence_risk` ·
   `unstable_at_discharge`
+
+**`strong_discharge_support`** (2026-09-27) is a fourth mitigating ground,
+but is NOT directly citable by the model like the others above — a
+50-patient validation run found the model citing it on 47/50 patients
+(94%) on weak single-criterion evidence (including once on the bare
+`Discharge Disposition: Extended Care` field, a pattern an explicit
+negative example in the prompt already excluded), i.e. a prose "ALL THREE,
+not just one" instruction didn't reliably stop the model treating one weak
+signal as sufficient. Instead the model extracts three atomic quotes
+independently (`followup_plan_quote`, `named_caregiver_quote`,
+`clinically_stable_quote`), and code (`_extract_discharge_support_ground`)
+credits `strong_discharge_support` only when all three are present and
+individually verified against the note — the same fix pattern as
+`decision_rule`: never trust the model with compound AND logic it can get
+wrong.
 
 **Discordance mode** is computed from percentile-rank displacement of
 stage1_score vs. stage2_score within the flagged+noted cohort — not raw

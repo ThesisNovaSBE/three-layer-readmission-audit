@@ -62,7 +62,8 @@ from src.config import get_model_dir, load_config
 from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
-from src.stage3.explain import call_llm_batch, sweep_discordance_thresholds
+from src.stage3.discordance import sweep_discordance_thresholds
+from src.stage3.explain import call_llm_batch
 from src.stage3.pipeline import _assemble_result, _prepare_patient, explain_patient
 
 _OUTPUT_FIELDS = [
