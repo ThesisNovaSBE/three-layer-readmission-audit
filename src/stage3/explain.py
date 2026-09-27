@@ -55,15 +55,15 @@ Four things are deliberately NOT delegated to the LLM:
 3. **Whether the auditor's own decision is reproducible.** Sampling
    temperature is pinned at 0 (``cfg.stage3.temperature``) for every run.
 4. **Whether discharge support is "strong enough" to be a mitigating
-   ground.** A 50-patient validation run found the model citing
-   ``strong_discharge_support`` on 47/50 patients (94%) on a single weak
-   piece of evidence despite an explicit "ALL THREE, not just one" prose
-   requirement. The model now extracts three atomic quotes independently
-   (``followup_plan_quote``, ``named_caregiver_quote``,
-   ``clinically_stable_quote``); :func:`_extract_discharge_support_ground`
-   credits the combined ground only when all three are present and
-   verified — same rationale as item 2: a compound judgment the model
-   demonstrably can't reliably apply itself is computed deterministically.
+   ground.** A 50-patient run found the model citing
+   ``strong_discharge_support`` on 47/50 patients (94%) on one weak piece
+   of evidence despite an explicit "ALL THREE, not just one" prose
+   requirement. Now three atomic quotes (``followup_plan_quote``,
+   ``named_caregiver_quote``, ``clinically_stable_quote``) extracted
+   independently; :func:`_extract_discharge_support_ground` credits the
+   combined ground only when all three are present and verified — same
+   rationale as item 2: a compound judgment the model can't reliably apply
+   itself, computed deterministically instead.
 """
 
 from __future__ import annotations
@@ -216,13 +216,17 @@ class _LLMOutput(BaseModel):
     # top_attention_sentences).
     mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
     aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
-    # Three atomic discharge-support signals (module docstring item 4),
-    # each its own quote-or-"" field so they don't compete with
-    # palliative_intent/planned_return/structured_driver_contradicted for
-    # one of mitigating_grounds' only 3 array slots.
-    followup_plan_quote: str = Field(default="")
-    named_caregiver_quote: str = Field(default="")
-    clinically_stable_quote: str = Field(default="")
+    # Three atomic discharge-support signals (module docstring item 4), each
+    # its own quote-or-"" field so they don't compete with palliative_
+    # intent/planned_return/structured_driver_contradicted for one of
+    # mitigating_grounds' 3 array slots. max_length=400 (2026-09-27): same
+    # failure class as clinical_justification (session 17/18) -- unbounded,
+    # a real run showed clinically_stable_quote loop on a repeated phrase
+    # until it burned the whole 4096-token budget and never reached
+    # `decision` (4/50 patients, all this exact pattern).
+    followup_plan_quote: str = Field(default="", max_length=400)
+    named_caregiver_quote: str = Field(default="", max_length=400)
+    clinically_stable_quote: str = Field(default="", max_length=400)
     planned_return: str
     # max_length=800 chars (2026-09-17): same fix, next field. Capping
     # grounds alone didn't fix truncation -- overflow just moved here. The
@@ -281,7 +285,10 @@ _USER_TEMPLATE = textwrap.dedent("""
     routine, non-specific instructions ("follow up with your doctor") are
     NOT evidence for any ground on their own — a ground must be satisfied
     by concrete, specific content, not boilerplate language present in
-    nearly every discharge note.
+    nearly every discharge note. The quote cited for a ground must itself
+    be ABOUT that ground's meaning, not just real text near relevant
+    content — a sentence about disease progression does not support
+    "planned_return" merely because it sits near a follow-up mention.
 
     Mitigating grounds (support overriding/cancelling the alert):
     {mitigating_block}
@@ -852,30 +859,24 @@ def call_llm_batch(
     the full ~9,800-admission batch. HF's ``generate()`` supports padding
     multiple prompts into one forward-pass batch directly; lm-format-
     enforcer's guided decoding supports this too via HF's per-sequence
-    ``prefix_allowed_tokens_fn(batch_id, input_ids)`` signature -- one
-    parser instance is shared correctly across the whole batch since every
-    patient uses the same ``_LLMOutput`` schema. Left-padding is required
-    for decoder-only batched generation (right-padding would misalign
-    where each sequence's real next-token position is).
+    ``prefix_allowed_tokens_fn(batch_id, input_ids)`` signature -- one parser
+    instance is shared correctly across the batch since every patient uses
+    the same ``_LLMOutput`` schema. Left-padding is required for decoder-only
+    batched generation (right-padding would misalign next-token positions).
 
     Uses schema-constrained decoding via ``lm-format-enforcer``'s
     ``prefix_allowed_tokens_fn`` hook into HF ``generate()`` — this is what
     nearly eliminates malformed-JSON parse failures, per the colleague
-    review that motivated this design. Mechanism history: Ollama's
-    ``format=<JSON schema>`` (session 15) -> vLLM's ``GuidedDecodingParams``
-    (2026-09-10, for cluster batch throughput) -> plain HF ``generate()`` +
-    lm-format-enforcer (2026-09-15, after KISSKI's CUDA 12.8 driver ceiling
-    proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels
-    regardless of vLLM/torch version -- see sessions/ for the full
-    diagnosis). The schema-constrained-JSON guarantee is preserved across
-    every switch; only the serving mechanism has changed.
+    review that motivated this design. Mechanism history (Ollama's
+    ``format=`` -> vLLM's ``GuidedDecodingParams`` -> this) is in
+    sessions/; the schema-constrained-JSON guarantee is preserved across
+    every switch, only the serving mechanism has changed.
 
-    Generalised so the same prompts can be run through a different model —
-    e.g. ``cfg.stage3.robustness_model`` — as a robustness check on whether
-    the auditor's value depends on model scale, without duplicating the
-    prompt/parsing logic. All models here are assumed locally-served, fully
-    offline; routing to a cloud API is a separate, currently unmade
-    decision — see docs/ARCHITECTURE.md.
+    Generalised so the same prompts can run through a different model (e.g.
+    ``cfg.stage3.robustness_model``) as a scale-robustness check, without
+    duplicating prompt/parsing logic. All models here are locally-served,
+    fully offline; a cloud API is a separate, unmade decision (see
+    docs/ARCHITECTURE.md).
 
     Args:
         prompts:    prompts built by :func:`build_prompt`, one per patient.
