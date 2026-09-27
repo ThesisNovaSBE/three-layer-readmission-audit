@@ -282,9 +282,20 @@ def _setup_batch(
         f"{len(done):,} already done, {len(pending):,} pending"
     )
 
-    print(f"[stage3/batch] Pre-loading notes for {len(pending):,} admissions "
-          "(single pass, not one scan per admission) ...")
-    notes_lookup = _preload_notes(cfg, pending, results_df)
+    # Confirmed real 2026-09-27: load_notes() raises ValueError ("No
+    # discharge notes found after filtering") when handed an empty hadm_ids
+    # set, rather than just returning nothing -- a real edge case, not
+    # theoretical, hit by a --resume run where everything targeted was
+    # already done. Must not crash: this exact state (a resubmission
+    # landing on an already-fully-done batch) is a plausible way for one of
+    # the full run's several segments to end.
+    if not pending:
+        print("[stage3/batch] Nothing pending -- skipping note preload.")
+        notes_lookup: dict[int, str] = {}
+    else:
+        print(f"[stage3/batch] Pre-loading notes for {len(pending):,} admissions "
+              "(single pass, not one scan per admission) ...")
+        notes_lookup = _preload_notes(cfg, pending, results_df)
 
     return _BatchSetup(
         artifact=artifact, results_df=results_df, feature_matrix=feature_matrix,
