@@ -198,7 +198,7 @@ narrate or classify a decision Stage 2 already made.
 |-------|-------------|
 | `mitigating_grounds`, `aggravating_grounds` | Two-sided grounds the model extracted from the note, each with its own verified quote |
 | `decision_model` | `uphold` / `override` / `insufficient_evidence` — the model's own judgment |
-| `decision_rule` | The same three-way decision, recomputed deterministically in code from the extracted grounds — a consistency check, not a second model opinion |
+| `decision_rule` | The same three-way decision, recomputed deterministically in code from the extracted grounds *restricted to quote-verified entries only* — a consistency check, not a second model opinion, and not driven by evidence that didn't check out |
 | `all_quotes_verified` | True only if every extracted ground's quote was found verbatim in the note |
 | `planned_return` | Independent yes/no/not_stated field on whether the note documents a scheduled return |
 | `clinical_justification` | 2-4 sentence justification citing note content |

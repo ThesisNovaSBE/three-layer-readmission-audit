@@ -35,36 +35,35 @@ deterministic, human-checkable cross-check computed from the same
 extraction. Their agreement rate is a reportable consistency metric; their
 disagreement is itself a finding about small local models as judges.
 
-Three things are deliberately NOT delegated to the LLM:
+Four things are deliberately NOT delegated to the LLM:
 
 1. **Discordance mode.** Computed quantitatively from percentile-rank
    displacement of stage1_score vs. stage2_score within the flagged+noted
-   cohort (see :func:`src.stage3.discordance.compute_discordance`), not
-   asked of the model. Percentile
-   rank is used instead of a raw-probability difference because Stage 1 and
-   Stage 2 are different model families and are not guaranteed to be equally
-   well-calibrated even after isotonic calibration — rank displacement is
+   cohort (:func:`src.stage3.discordance.compute_discordance`), not asked
+   of the model. Percentile rank, not raw-probability difference, because
+   Stage 1 and Stage 2 are different model families not guaranteed to share
+   calibration error even after isotonic calibration — rank displacement is
    invariant to that risk. Stage 1 uses ~40 structured features; Stage 2 (a
-   plain, note-only Clinical-Longformer) uses none. The two models are
-   informationally independent by construction.
+   plain, note-only Clinical-Longformer) uses none — informationally
+   independent by construction.
 2. **``decision_rule``.** Deterministically recomputed in code from the
-   grounds the model itself extracted (see :func:`compute_decision_rule`) —
-   not a second opinion asked of the model, a check on whether the model's
-   own stated decision actually follows its own stated rubric.
+   model's own extracted grounds, filtered to quote-verified entries only
+   (see :func:`compute_decision_rule`, :func:`_finalize_annotation`) — not
+   a second opinion asked of the model, a check on whether the model's own
+   stated decision actually follows its own stated rubric using evidence
+   that actually checks out.
 3. **Whether the auditor's own decision is reproducible.** Sampling
-   temperature is pinned at 0 (``cfg.stage3.temperature``) for every
-   evaluation run.
-4. **Whether discharge support is "strong enough" to count as a mitigating
-   ground.** Added 2026-09-27 after a 50-patient validation run found the
-   model citing ``strong_discharge_support`` on 47/50 patients (94%) on a
-   single weak piece of evidence, despite an explicit "ALL THREE, not just
-   one" prose requirement already in the prompt. The model now extracts
-   three atomic quotes independently (``followup_plan_quote``,
-   ``named_caregiver_quote``, ``clinically_stable_quote``); code
-   (:func:`_extract_discharge_support_ground`) credits the combined ground
-   only when all three are present and individually verified. Same
-   rationale as item 2 above: a compound judgment the model demonstrably
-   can't reliably apply itself is computed deterministically instead.
+   temperature is pinned at 0 (``cfg.stage3.temperature``) for every run.
+4. **Whether discharge support is "strong enough" to be a mitigating
+   ground.** A 50-patient validation run found the model citing
+   ``strong_discharge_support`` on 47/50 patients (94%) on a single weak
+   piece of evidence despite an explicit "ALL THREE, not just one" prose
+   requirement. The model now extracts three atomic quotes independently
+   (``followup_plan_quote``, ``named_caregiver_quote``,
+   ``clinically_stable_quote``); :func:`_extract_discharge_support_ground`
+   credits the combined ground only when all three are present and
+   verified — same rationale as item 2: a compound judgment the model
+   demonstrably can't reliably apply itself is computed deterministically.
 """
 
 from __future__ import annotations
@@ -477,6 +476,12 @@ def compute_decision_rule(
     schema, not a replacement for the model's free judgment). Not asked of
     the model.
 
+    CALLER CONTRACT: grounds passed in must already be filtered to
+    quote-verified entries only (see :func:`_finalize_annotation`) — this
+    function trusts its input and will override on a fabricated ground if
+    handed one unfiltered. The trustworthy-cross-check guarantee lives in
+    the caller's filtering, not here.
+
     ``insufficient_evidence`` here is a code-side judgment about the note's
     length, not a claim the LLM makes about itself — a note this short
     cannot ground either a mitigating or an aggravating finding regardless
@@ -509,11 +514,21 @@ def _validate_grounds(
     Fixed list only — a ground outside ``allowed``, or one with an empty
     quote, fails the whole response (don't let the model invent categories
     or cite a ground without evidence).
+
+    A ground cited more than once (a real observed pattern, despite the
+    prompt asking for one quote per ground) is deduplicated to its first
+    occurrence, not failed like an unknown ground -- both quotes may still
+    be genuine, just redundantly labeled, and letting it through unchanged
+    would double-count that ground in ground-frequency statistics.
     """
     out: list[dict[str, str]] = []
+    seen: set[str] = set()
     for hit in raw_grounds:
         if hit.ground not in allowed or not hit.quote.strip():
             return None
+        if hit.ground in seen:
+            continue
+        seen.add(hit.ground)
         out.append({"ground": hit.ground, "quote": hit.quote})
     return out
 
@@ -811,8 +826,11 @@ def _finalize_annotation(
     annotation["all_quotes_verified"] = all(
         g["quote_verified"] for g in mitigating + aggravating
     )
+    # decision_rule: verified evidence only -- see its CALLER CONTRACT.
+    verified_mitigating = [g for g in mitigating if g["quote_verified"]]
+    verified_aggravating = [g for g in aggravating if g["quote_verified"]]
     annotation["decision_rule"] = compute_decision_rule(
-        annotation["mitigating_grounds"], annotation["aggravating_grounds"], note_text
+        verified_mitigating, verified_aggravating, note_text
     )
     annotation["clinical_justification"] = _trim_incomplete_trailing_sentence(
         annotation["clinical_justification"]
