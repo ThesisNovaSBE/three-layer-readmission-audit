@@ -1,6 +1,7 @@
-"""Tests for Stage 3 prompt construction, discordance, and response parsing.
+"""Tests for Stage 3 prompt construction and response parsing.
 
 No Ollama needed — these test pure prompt-building and parsing logic.
+Discordance computation has its own test_stage3_discordance.py.
 """
 
 from __future__ import annotations
@@ -8,21 +9,20 @@ from __future__ import annotations
 import json
 
 import numpy as np
-import pytest
 
 from src.stage3.explain import (
     AGGRAVATING_GROUNDS,
     DECISIONS,
-    DISCORDANCE_MODES,
     MITIGATING_GROUNDS,
     PLANNED_RETURN_ANSWERS,
     _detect_truncated,
+    _extract_discharge_support_ground,
+    _finalize_annotation,
     _parse_response,
+    _trim_incomplete_trailing_sentence,
     build_prompt,
     compute_decision_rule,
-    compute_discordance,
     is_note_truncated,
-    sweep_discordance_thresholds,
     verify_quote,
 )
 
@@ -34,19 +34,16 @@ def test_decisions_tuple():
     assert set(DECISIONS) == {"uphold", "override", "insufficient_evidence"}
 
 
-def test_modes_tuple_nonempty():
-    """DISCORDANCE_MODES must contain all three expected mode strings."""
-    assert len(DISCORDANCE_MODES) == 3
-    assert "CONCORDANT" in DISCORDANCE_MODES
-    assert "NOTE_MITIGATES" in DISCORDANCE_MODES
-    assert "NOTE_AMPLIFIES" in DISCORDANCE_MODES
-
-
 def test_mitigating_grounds_nonempty():
-    """MITIGATING_GROUNDS must contain the four documented grounds."""
-    assert len(MITIGATING_GROUNDS) == 4
+    """MITIGATING_GROUNDS must contain the three model-citable grounds.
+
+    strong_discharge_support is deliberately NOT here (2026-09-27) -- it is
+    synthesized in code from three independently-extracted quotes instead
+    of being directly citable, see _extract_discharge_support_ground."""
+    assert len(MITIGATING_GROUNDS) == 3
     assert "palliative_intent" in MITIGATING_GROUNDS
     assert "planned_return" in MITIGATING_GROUNDS
+    assert "strong_discharge_support" not in MITIGATING_GROUNDS
 
 
 def test_aggravating_grounds_nonempty():
@@ -59,104 +56,6 @@ def test_aggravating_grounds_nonempty():
 def test_grounds_taxonomies_disjoint():
     """No ground name may appear in both the mitigating and aggravating lists."""
     assert set(MITIGATING_GROUNDS).isdisjoint(set(AGGRAVATING_GROUNDS))
-
-
-# ── compute_discordance ─────────────────────────────────────────────────────────
-
-def test_discordance_concordant_when_ranks_match():
-    """Equal percentile ranks must be CONCORDANT."""
-    cohort = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
-    result = compute_discordance(0.3, 0.3, cohort, cohort, displacement_pp=20.0)
-    assert result["mode"] == "CONCORDANT"
-    assert result["displacement"] == 0.0
-
-
-def test_discordance_note_mitigates_when_stage2_ranks_lower():
-    """Stage 2 ranking the patient much lower than Stage 1 must be NOTE_MITIGATES."""
-    cohort_s1 = np.array([0.1, 0.2, 0.3, 0.4, 0.9])  # 0.9 -> high rank
-    cohort_s2 = np.array([0.1, 0.2, 0.3, 0.4, 0.15])  # 0.15 -> low rank
-    result = compute_discordance(0.9, 0.15, cohort_s1, cohort_s2, displacement_pp=20.0)
-    assert result["mode"] == "NOTE_MITIGATES"
-    assert result["displacement"] < 0
-
-
-def test_discordance_note_amplifies_when_stage2_ranks_higher():
-    """Stage 2 ranking the patient much higher than Stage 1 must be NOTE_AMPLIFIES."""
-    cohort_s1 = np.array([0.1, 0.2, 0.3, 0.4, 0.15])  # 0.15 -> low rank
-    cohort_s2 = np.array([0.1, 0.2, 0.3, 0.4, 0.9])  # 0.9 -> high rank
-    result = compute_discordance(0.15, 0.9, cohort_s1, cohort_s2, displacement_pp=20.0)
-    assert result["mode"] == "NOTE_AMPLIFIES"
-    assert result["displacement"] > 0
-
-
-def test_discordance_invariant_to_monotonic_rescaling():
-    """Rank displacement must be unchanged by a monotonic rescaling of one score.
-
-    This is the property raw-probability subtraction does not have: it makes
-    the measure robust to Stage 1 and Stage 2 being unequally calibrated.
-    """
-    cohort_s1 = np.array([0.05, 0.20, 0.35, 0.50, 0.65, 0.80])
-    cohort_s2 = np.array([0.10, 0.25, 0.40, 0.55, 0.70, 0.85])
-    base = compute_discordance(0.50, 0.55, cohort_s1, cohort_s2)
-
-    # Monotonic rescale of stage2's cohort and query value (e.g. a different
-    # calibration curve) — ranks, and therefore displacement, must be identical.
-    rescaled_cohort_s2 = cohort_s2**2
-    rescaled = compute_discordance(0.50, 0.55**2, cohort_s1, rescaled_cohort_s2)
-    assert rescaled["displacement"] == base["displacement"]
-    assert rescaled["mode"] == base["mode"]
-
-
-def test_discordance_empty_cohort_defaults_to_50th_percentile():
-    """An empty cohort must not raise — falls back to the 50th percentile."""
-    result = compute_discordance(0.5, 0.5, np.array([]), np.array([]))
-    assert result["r1"] == 50.0
-    assert result["r2"] == 50.0
-
-
-# ── sweep_discordance_thresholds ─────────────────────────────────────────────
-
-def test_sweep_default_thresholds():
-    """Default sweep must cover the standard 10/15/20/25/30 pp range."""
-    displacements = np.array([-40.0, -10.0, 0.0, 15.0, 45.0])
-    sweep = sweep_discordance_thresholds(displacements)
-    assert set(sweep.keys()) == {"10.0", "15.0", "20.0", "25.0", "30.0"}
-
-
-def test_sweep_fractions_sum_to_one():
-    """At every threshold, the three mode fractions must sum to 1."""
-    rng = np.random.default_rng(0)
-    displacements = rng.uniform(-100, 100, 200)
-    sweep = sweep_discordance_thresholds(displacements)
-    for dist in sweep.values():
-        total = dist["NOTE_MITIGATES"] + dist["NOTE_AMPLIFIES"] + dist["CONCORDANT"]
-        assert total == pytest.approx(1.0)
-
-
-def test_sweep_narrower_threshold_flags_more_discordance():
-    """A narrower threshold must classify at least as many patients as discordant."""
-    displacements = np.array([-25.0, -18.0, -12.0, 5.0, 18.0, 25.0, 0.0])
-    sweep = sweep_discordance_thresholds(displacements, thresholds_pp=[10.0, 30.0])
-    discordant_10 = sweep["10.0"]["NOTE_MITIGATES"] + sweep["10.0"]["NOTE_AMPLIFIES"]
-    discordant_30 = sweep["30.0"]["NOTE_MITIGATES"] + sweep["30.0"]["NOTE_AMPLIFIES"]
-    assert discordant_10 >= discordant_30
-
-
-def test_sweep_matches_compute_discordance_at_same_threshold():
-    """The sweep's classification must agree with compute_discordance for a
-    single patient at the same threshold — same rule, independently reached."""
-    cohort = np.linspace(0.0, 1.0, 101)
-    result = compute_discordance(0.20, 0.90, cohort, cohort, displacement_pp=20.0)
-    sweep = sweep_discordance_thresholds(np.array([result["displacement"]]), [20.0])
-    dist = sweep["20.0"]
-    expected_mode = result["mode"]
-    assert dist[expected_mode] == pytest.approx(1.0)
-
-
-def test_sweep_empty_displacements_does_not_crash():
-    """An empty input must return zeroed fractions, not raise (division by zero)."""
-    sweep = sweep_discordance_thresholds(np.array([]), [20.0])
-    assert sweep["20.0"] == {"NOTE_MITIGATES": 0.0, "NOTE_AMPLIFIES": 0.0, "CONCORDANT": 0.0}
 
 
 # ── is_note_truncated ─────────────────────────────────────────────────────────
@@ -321,6 +220,9 @@ def _good_json(
     mitigating: list | None = None,
     aggravating: list | None = None,
     planned_return: str = "no",
+    followup_plan_quote: str = "",
+    named_caregiver_quote: str = "",
+    clinically_stable_quote: str = "",
 ) -> str:
     """Return a well-formed LLM JSON response string."""
     return json.dumps({
@@ -328,6 +230,9 @@ def _good_json(
         "aggravating_grounds": aggravating if aggravating is not None else [
             {"ground": "lives_alone_no_support", "quote": "Patient lives alone."}
         ],
+        "followup_plan_quote": followup_plan_quote,
+        "named_caregiver_quote": named_caregiver_quote,
+        "clinically_stable_quote": clinically_stable_quote,
         "planned_return": planned_return,
         "clinical_justification": justification,
         "decision": decision,
@@ -476,9 +381,43 @@ def test_parse_justification_preserved():
     """The justification string from the LLM must be preserved verbatim."""
     justification = "Patient has robust social support reducing readmission risk."
     result = _parse_response(_good_json("override", justification, mitigating=[
-        {"ground": "strong_discharge_support", "quote": "Family support confirmed at discharge."}
+        {"ground": "palliative_intent", "quote": "Comfort-focused care planned."}
     ], aggravating=[]))
     assert result["clinical_justification"] == justification
+
+
+def test_parse_response_passes_through_discharge_support_quotes():
+    """_parse_response must pass the three raw discharge-support quotes
+    through untouched -- they are validated/combined later by
+    _finalize_annotation, which has the note_text needed to verify them."""
+    result = _parse_response(_good_json(
+        followup_plan_quote="Follow up with Dr. Smith on Monday.",
+        named_caregiver_quote="Daughter Jane will assist with care at home.",
+        clinically_stable_quote="Patient is clinically stable at discharge.",
+    ))
+    assert result["followup_plan_quote"] == "Follow up with Dr. Smith on Monday."
+    assert result["named_caregiver_quote"] == "Daughter Jane will assist with care at home."
+    assert result["clinically_stable_quote"] == "Patient is clinically stable at discharge."
+
+
+def test_parse_strong_discharge_support_no_longer_a_valid_ground():
+    """strong_discharge_support is no longer directly citable (2026-09-27)
+    -- a response citing it in mitigating_grounds must fail, the same as
+    any other made-up ground."""
+    bad = json.dumps({
+        "mitigating_grounds": [
+            {"ground": "strong_discharge_support", "quote": "Discharge Disposition: Extended Care"}
+        ],
+        "aggravating_grounds": [],
+        "followup_plan_quote": "",
+        "named_caregiver_quote": "",
+        "clinically_stable_quote": "",
+        "planned_return": "no",
+        "clinical_justification": "whatever",
+        "decision": "override",
+    })
+    result = _parse_response(bad)
+    assert result["annotation_failed"] is True
 
 
 def test_parse_failure_does_not_default_to_uphold():
@@ -546,6 +485,33 @@ def test_verify_quote_strips_whitespace():
     assert verify_quote("  Strong family support documented.  ", note) is True
 
 
+def test_verify_quote_true_across_mimic_hard_wrap_newline():
+    """A quote spanning a MIMIC-style hard-wrapped line break in the note
+    must still verify as True -- confirmed 2026-09-21 against real notes
+    from a 50-patient validation run: all_quotes_verified was 0% across
+    every patient, and 87% of individual quote failures were exactly this
+    (a faithful quote scored identically to a fabricated one), not
+    hallucination. MIMIC notes hard-wrap at a fixed column width with
+    literal newlines mid-sentence; the model reproduces quotes as flowing
+    text, which a naive exact-substring check incorrectly penalizes."""
+    note = (
+        "Discharge Instructions:\nDear Ms ___, It was a pleasure taking "
+        "care of you during \nyour stay at ___. You were \nadmitted for "
+        "malaise in the setting of neutropenia."
+    )
+    quote = "It was a pleasure taking care of you during your stay at ___."
+    assert verify_quote(quote, note) is True
+
+
+def test_verify_quote_still_false_for_genuine_fabrication_despite_normalization():
+    """Whitespace normalization must not accidentally make hallucinated
+    content verify as True -- the anti-hallucination guarantee itself must
+    survive this fix, not just the false-negative rate."""
+    note = "Discharge Instructions:\nPatient tolerated the procedure well."
+    fabricated = "Patient experienced severe complications during the procedure."
+    assert verify_quote(fabricated, note) is False
+
+
 # ── _detect_truncated ────────────────────────────────────────────────────────
 # The one genuinely new piece of logic from the 2026-09-15 batching rewrite
 # (audit finding 2026-09-18 2.3): call_llm_batch's own tests mock
@@ -588,3 +554,222 @@ def test_detect_truncated_no_eos_id_returns_all_false():
 def test_detect_truncated_empty_batch():
     """Zero rows must return an empty list, not error."""
     assert _detect_truncated(np.empty((0, 4), dtype=int), EOS_ID) == []
+
+
+# ── _trim_incomplete_trailing_sentence ────────────────────────────────────────
+# clinical_justification's maxLength=800 schema constraint (audit finding
+# 2026-09-21, from a real 50-patient validation run) cuts generation off at
+# exactly 800 chars regardless of word/sentence boundaries, producing
+# mid-word or garbled endings. This trims back to the last complete
+# sentence for display, rather than showing the raw cutoff.
+
+def test_trim_leaves_complete_sentence_unchanged():
+    """A justification that already ends cleanly must not be altered."""
+    text = "The patient is stable. Follow-up is arranged."
+    assert _trim_incomplete_trailing_sentence(text) == text
+
+
+def test_trim_cuts_back_to_last_sentence_boundary():
+    """A mid-word cutoff must be trimmed back to the last complete sentence."""
+    text = "The patient is stable. Follow-up is arranged with the renal faili"
+    assert _trim_incomplete_trailing_sentence(text) == "The patient is stable."
+
+
+def test_trim_handles_single_fragment_with_no_boundary():
+    """A single sentence with no boundary at all must be returned as-is --
+    something is better than nothing."""
+    text = "The patient has significant comorbidities including renal faili"
+    assert _trim_incomplete_trailing_sentence(text) == text
+
+
+def test_trim_strips_trailing_whitespace():
+    """Trailing whitespace after a complete sentence must not itself count
+    as 'incomplete'."""
+    text = "The patient is stable.   "
+    assert _trim_incomplete_trailing_sentence(text) == "The patient is stable."
+
+
+def test_trim_handles_empty_string():
+    """Empty input must not error."""
+    assert _trim_incomplete_trailing_sentence("") == ""
+
+
+# ── _extract_discharge_support_ground / _finalize_annotation ────────────────
+# strong_discharge_support (2026-09-27): removed from MITIGATING_GROUNDS as
+# a directly-citable ground after a real 50-patient run showed the model
+# citing it on 47/50 patients on weak single-criterion evidence, including
+# the bare "Discharge Disposition: Extended Care" field an explicit
+# negative example in the prompt already excluded. Now synthesized in code
+# from three independently-extracted quotes, credited only when all three
+# are present and verified -- same fix pattern as compute_decision_rule.
+
+_DISCHARGE_SUPPORT_NOTE = (
+    "History of present illness: patient admitted with community acquired "
+    "pneumonia, treated with IV antibiotics with good response. "
+    "Patient will follow up with Dr. Smith on Monday. "
+    "Daughter Jane will be assisting with care at home. "
+    "Patient is clinically stable at discharge."
+)
+_FOLLOWUP_QUOTE = "Patient will follow up with Dr. Smith on Monday."
+_CAREGIVER_QUOTE = "Daughter Jane will be assisting with care at home."
+_STABILITY_QUOTE = "Patient is clinically stable at discharge."
+
+
+def test_discharge_support_added_when_all_three_present_and_verified():
+    """All three quotes present and verified must yield a credited ground."""
+    ground = _extract_discharge_support_ground(
+        _FOLLOWUP_QUOTE, _CAREGIVER_QUOTE, _STABILITY_QUOTE, _DISCHARGE_SUPPORT_NOTE
+    )
+    assert ground is not None
+    assert ground["ground"] == "strong_discharge_support"
+    assert ground["quote_verified"] is True
+
+
+def test_discharge_support_not_added_when_one_quote_missing():
+    """Only two of three criteria documented must NOT be credited -- this is
+    exactly the over-triggering bug the split fixes."""
+    ground = _extract_discharge_support_ground(
+        _FOLLOWUP_QUOTE, "", _STABILITY_QUOTE, _DISCHARGE_SUPPORT_NOTE
+    )
+    assert ground is None
+
+
+def test_discharge_support_not_added_when_one_quote_unverified():
+    """A fabricated (non-verbatim) third quote must not slip the ground
+    through even when the other two are genuine -- the AND must hold on
+    VERIFIED evidence, not just non-empty strings."""
+    ground = _extract_discharge_support_ground(
+        _FOLLOWUP_QUOTE, _CAREGIVER_QUOTE, "This sentence is not in the note at all.",
+        _DISCHARGE_SUPPORT_NOTE,
+    )
+    assert ground is None
+
+
+def test_discharge_support_not_added_when_all_empty():
+    """No evidence at all must not be credited."""
+    assert _extract_discharge_support_ground("", "", "", _DISCHARGE_SUPPORT_NOTE) is None
+
+
+def test_finalize_annotation_synthesizes_discharge_support_ground():
+    """End-to-end: a response with all three discharge-support quotes and
+    no other grounds must surface strong_discharge_support in the final
+    mitigating_grounds list, drive decision_rule to override, and not leak
+    the three raw quote fields into the returned annotation."""
+    raw = _good_json(
+        decision="override",
+        mitigating=[],
+        aggravating=[],
+        followup_plan_quote=_FOLLOWUP_QUOTE,
+        named_caregiver_quote=_CAREGIVER_QUOTE,
+        clinically_stable_quote=_STABILITY_QUOTE,
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    grounds = [g["ground"] for g in annotation["mitigating_grounds"]]
+    assert "strong_discharge_support" in grounds
+    assert annotation["decision_rule"] == "override"
+    assert "followup_plan_quote" not in annotation
+    assert "named_caregiver_quote" not in annotation
+    assert "clinically_stable_quote" not in annotation
+
+
+def test_finalize_annotation_omits_discharge_support_when_incomplete():
+    """A response with only one of the three quotes must not surface
+    strong_discharge_support, and with no other grounds cited, decision_rule
+    must be uphold (no mitigating grounds at all)."""
+    raw = _good_json(
+        decision="uphold",
+        mitigating=[],
+        aggravating=[],
+        followup_plan_quote=_FOLLOWUP_QUOTE,
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["mitigating_grounds"] == []
+    assert annotation["decision_rule"] == "uphold"
+
+
+# ── decision_rule must only be driven by quote-verified evidence ────────────
+# The whole point of decision_rule is a cross-check the model can't
+# fabricate its way past (docs: "a fully transparent fallback if
+# decision_model proves unreliable"). Before this fix, compute_decision_rule
+# was handed the RAW mitigating/aggravating lists regardless of
+# quote_verified -- a hallucinated ground (a cited quote that isn't actually
+# in the note) could still flip decision_rule to override, or force it to
+# uphold, defeating that guarantee entirely. _finalize_annotation must
+# filter to verified-only grounds before calling compute_decision_rule.
+
+def test_finalize_annotation_decision_rule_ignores_unverified_mitigating_ground():
+    """A mitigating ground with a fabricated (non-verbatim) quote must be
+    reported (for transparency) but must NOT be able to drive decision_rule
+    to override -- only verified evidence may do that."""
+    raw = _good_json(
+        decision="override",
+        mitigating=[
+            {"ground": "palliative_intent", "quote": "This sentence is not in the note at all."}
+        ],
+        aggravating=[],
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["mitigating_grounds"][0]["quote_verified"] is False
+    assert annotation["decision_rule"] == "uphold"
+
+
+def test_finalize_annotation_decision_rule_ignores_unverified_aggravating_ground():
+    """An aggravating ground with a fabricated quote must not be able to
+    force decision_rule to uphold over otherwise-genuine, verified
+    mitigating evidence."""
+    raw = _good_json(
+        decision="uphold",
+        mitigating=[],
+        aggravating=[
+            {"ground": "cognitive_impairment", "quote": "This is not actually in the note."}
+        ],
+        followup_plan_quote=_FOLLOWUP_QUOTE,
+        named_caregiver_quote=_CAREGIVER_QUOTE,
+        clinically_stable_quote=_STABILITY_QUOTE,
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["aggravating_grounds"][0]["quote_verified"] is False
+    assert annotation["decision_rule"] == "override"
+
+
+def test_finalize_annotation_all_quotes_verified_still_reflects_full_list():
+    """all_quotes_verified must remain a transparency metric over EVERY
+    cited ground (verified or not) -- it must go False even when the
+    unverified ground didn't end up mattering to decision_rule, so a
+    reviewer can still find and inspect it."""
+    raw = _good_json(
+        decision="uphold",
+        mitigating=[
+            {"ground": "palliative_intent", "quote": "This sentence is not in the note at all."}
+        ],
+        aggravating=[],
+    )
+    annotation = _finalize_annotation(raw, _DISCHARGE_SUPPORT_NOTE, likely_truncated=False)
+    assert annotation["all_quotes_verified"] is False
+    assert annotation["decision_rule"] == "uphold"
+
+
+# ── duplicate ground citation is deduplicated, not double-counted ──────────
+
+def test_parse_response_dedupes_ground_cited_twice():
+    """A ground cited twice with different quotes must be deduplicated
+    (keeping the first occurrence), not fail validation nor double-count --
+    confirmed a real production pattern (cognitive_impairment cited twice
+    for the same patient with two different quotes)."""
+    raw = json.dumps({
+        "mitigating_grounds": [],
+        "aggravating_grounds": [
+            {"ground": "cognitive_impairment", "quote": "First confusion quote."},
+            {"ground": "cognitive_impairment", "quote": "Second confusion quote."},
+        ],
+        "followup_plan_quote": "",
+        "named_caregiver_quote": "",
+        "clinically_stable_quote": "",
+        "planned_return": "no",
+        "clinical_justification": "whatever",
+        "decision": "uphold",
+    })
+    result = _parse_response(raw)
+    assert result["annotation_failed"] is False
+    assert len(result["aggravating_grounds"]) == 1
+    assert result["aggravating_grounds"][0]["quote"] == "First confusion quote."

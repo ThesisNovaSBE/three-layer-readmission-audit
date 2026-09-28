@@ -127,6 +127,13 @@ alongside `decision_model` as a consistency metric and a fully transparent
 fallback. `insufficient_evidence` (new third value) is a code-side judgment
 about the note's length — a note below `_MIN_INFORMATIVE_NOTE_CHARS`
 cannot ground either finding regardless of what was extracted from it.
+**Critically, `decision_rule` is computed from quote-verified grounds
+only** (`_finalize_annotation` filters on `quote_verified` before calling
+`compute_decision_rule`) — a ground with a fabricated, non-verbatim quote
+cannot drive it. Without this filter the "fully transparent, can't-be-
+fooled fallback" claim would be false: a hallucinated ground could still
+flip the deterministic decision, which is precisely the failure mode this
+whole mechanism exists to rule out.
 
 **Schema-constrained generation (session 19; serving mechanism changed
 session 23, changed again 2026-09-15, same guarantee preserved each time).**

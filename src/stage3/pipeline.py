@@ -42,7 +42,8 @@ from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
 from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
-from src.stage3.explain import build_prompt, call_llm, compute_discordance, is_note_truncated
+from src.stage3.discordance import compute_discordance
+from src.stage3.explain import build_prompt, call_llm, is_note_truncated
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
 

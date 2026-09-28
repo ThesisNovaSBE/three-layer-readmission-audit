@@ -76,10 +76,13 @@ def _patched(results_df, explain_side_effect):  # pylint: disable=redefined-oute
 
 
 def _cfg(batch_size: int = 10) -> SimpleNamespace:
-    """cfg stand-in exposing only what run_batch_audit reads directly
-    (generation_batch_size) -- everything else flows through mocked
-    _prepare_patient/call_llm_batch/_assemble_result instead of real config."""
-    return SimpleNamespace(stage3=SimpleNamespace(generation_batch_size=batch_size))
+    """cfg stand-in exposing what run_batch_audit reads directly
+    (generation_batch_size, model_name for prep-failure rows) --
+    everything else flows through mocked _prepare_patient/call_llm_batch/
+    _assemble_result instead of real config."""
+    return SimpleNamespace(
+        stage3=SimpleNamespace(generation_batch_size=batch_size, model_name="fake-model")
+    )
 
 
 def _fake_prepared(hadm_id: int) -> SimpleNamespace:
@@ -158,10 +161,17 @@ def test_grounds_columns_are_json_serialised(tmp_path, results_df):  # pylint: d
     assert grounds[0]["ground"] == "palliative_intent"
 
 
-def test_one_failure_does_not_stop_the_batch(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+def test_prep_failure_does_not_stop_the_batch_and_still_writes_a_row(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
     """A raised exception preparing one admission must not prevent the rest
-    from being written -- injected at _prepare_patient, the first per-patient
-    step in the pipeline."""
+    from being written, AND the failed admission itself must still get
+    exactly one row (annotation_failed=True) -- not be silently dropped.
+    Before this fix, a prep failure was only printed to the job log and
+    never written to the CSV, which meant it would be retried on every
+    single --resume forever across a multi-day run's chained job
+    resubmissions, with no single place to reconcile the final row count
+    against the target admission count."""
     out = tmp_path / "out.csv"
 
     def prepare_se(hadm_id, *_a, **_kw):
@@ -176,8 +186,45 @@ def test_one_failure_does_not_stop_the_batch(tmp_path, results_df):  # pylint: d
         run_batch_audit(cfg=_cfg(), out_path=out)
 
     written = pd.read_csv(out)
-    assert len(written) == 3
-    assert 11 not in set(written["hadm_id"])
+    assert len(written) == 4
+    assert set(written["hadm_id"]) == {10, 11, 12, 13}
+    row = written[written["hadm_id"] == 11].iloc[0]
+    assert bool(row["annotation_failed"]) is True
+    assert "PREP FAILED" in row["clinical_justification"]
+    # basic Stage 1/2 fields must still come from results_df, not be blanked
+    assert row["stage1_score"] == pytest.approx(0.6)
+
+
+def test_resume_does_not_retry_a_prep_failure(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """Once an admission has a prep-failure row, --resume must not attempt
+    to prepare it again -- the entire point of writing the row in the first
+    place. A deterministic failure (missing note, malformed feature row)
+    would otherwise fail identically on every future resubmission forever."""
+    out = tmp_path / "out.csv"
+    calls: list[int] = []
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        calls.append(hadm_id)
+        if hadm_id == 11:
+            raise RuntimeError("permanent, deterministic failure")
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out)
+
+    calls.clear()
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out, resume=True)
+
+    assert 11 not in calls
 
 
 def test_chunk_generation_failure_does_not_stop_the_batch(tmp_path, results_df):  # pylint: disable=redefined-outer-name
@@ -230,6 +277,43 @@ def test_resume_skips_already_written_admissions(tmp_path, results_df):  # pylin
         run_batch_audit(cfg=_cfg(), out_path=out, resume=True)
 
     assert not calls
+    written = pd.read_csv(out)
+    assert len(written) == 4
+
+
+def test_setup_batch_skips_preload_when_nothing_pending(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """When --resume finds everything already done, _preload_notes must
+    never be called at all -- confirmed real 2026-09-27: the underlying
+    load_notes() raises ValueError ("No discharge notes found after
+    filtering") on an empty hadm_ids set instead of returning nothing, so
+    a --resume run landing on an already-fully-done batch would otherwise
+    crash instead of exiting cleanly. A plausible way for one of the full
+    run's several job segments to end."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out)
+
+    def preload_notes_se(*_a, **_kw):
+        raise AssertionError("_preload_notes must not be called when pending is empty")
+
+    with patch("src.stage3.batch._load_artifact", return_value={}), \
+            patch("src.stage3.batch._load_results", return_value=results_df), \
+            patch("src.stage3.batch.load_feature_matrix", return_value=pd.DataFrame()), \
+            patch("src.stage3.batch._preload_notes", side_effect=preload_notes_se), \
+            patch("src.stage3.batch._prepare_patient", side_effect=prepare_se), \
+            patch("src.stage3.batch.call_llm_batch", side_effect=_ok_call_llm_batch), \
+            patch("src.stage3.batch._assemble_result", side_effect=_ok_assemble):
+        run_batch_audit(cfg=_cfg(), out_path=out, resume=True)
+
     written = pd.read_csv(out)
     assert len(written) == 4
 
