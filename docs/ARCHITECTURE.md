@@ -453,17 +453,24 @@ session 17.
   covered subset as headline) still needs explicit confirmation before this
   is written up as "the" RQ1 answer in the thesis text, but the numbers
   themselves are real and current.
-- **Run `batch.py` at full scale** — the actual next step as of session 23.
-  Cluster infrastructure (`download_stage3_model.sh`,
-  `scripts/slurm_stage3_batch.sh`) and the MedGemma serving switch (now via
-  HF transformers + lm-format-enforcer, see above) are in place; a
-  10-patient smoke test was queued but not yet confirmed working
-  end-to-end. Needed to produce real RQ2 numbers and let
-  `evaluate_pipeline.py`'s `stage3` coverage block become non-empty — the
-  current pipeline numbers (cascade ≈ control arm) are not yet the real
-  RQ2 answer, since Stage 3 hasn't run.
-- **Run `batch.py --sweep`** once the above exists, to actually validate
-  `discordance_displacement_pp` rather than leave it at the provisional 20.
+- ~~Run `batch.py` at full scale~~ **Done (2026-10-06)** — all 9,899
+  flagged+noted admissions, 0.94% annotation failure rate (93 patients,
+  token-budget truncation, fall back to Stage 2's threshold). Real RQ2
+  result: at matched alert volume, Stage 1 alone (control arm) beats the
+  full cascade on both precision (0.450 vs 0.435) and recall (0.316 vs
+  0.295, 95% CIs effectively non-overlapping on recall) — blanket Stage 3
+  auditing is net harmful to screening performance, not neutral. A
+  post-hoc conditional-triggering re-analysis (Stage 3 only on discordant
+  cases) recovers both metrics versus the blanket run at 48% fewer LLM
+  calls (see `MODEL_CARD.md` for full numbers and caveats — no CI computed
+  yet for the conditional-triggering arm, and its alert volume isn't
+  perfectly matched to the control arm's).
+- ~~Run `batch.py --sweep`~~ **Done (2026-10-06)** —
+  `models/discordance_sensitivity.json`: at the provisional ±20pp,
+  CONCORDANT=47.6%, NOTE_MITIGATES=29.8%, NOTE_AMPLIFIES=22.7%. Sweep
+  across ±10-30pp shows the mode split is meaningfully sensitive to the
+  threshold choice (CONCORDANT ranges 27.0%-65.2%), worth discussing as a
+  robustness caveat rather than treating ±20pp as uniquely correct.
 - **Wire and run the Layer 3 robustness arm** — blocked on the model-choice
   decision below, not on code.
 - **N1 ablation runner** (5+ arms) beyond the two-arm RQ1 comparison
@@ -471,9 +478,10 @@ session 17.
   load-bearing arm, L1-at-matched-capacity, no longer needs a separate
   runner: `evaluate_pipeline.py:_control_arm_report` (session 18,
   2026-08-28) computes it inline as part of every pipeline evaluation.
-- **Bootstrap CIs not yet in `evaluate_pipeline.py`** — `evaluate.py` and
-  `compare_layers.py` have them; the cascade's full/notes-cohort pipeline
-  numbers still don't.
+- ~~Bootstrap CIs not yet in `evaluate_pipeline.py`~~ **Done** —
+  `_add_precision_recall_ci` (patient-clustered, 1000 resamples) now
+  covers `full_cohort` and `control_arm_stage1_matched`. Still missing for
+  `notes_cohort` and the `conditional_triggering` arm.
 - Feature audit (vitals missingness, lab itemid validation against
   `d_labitems`) — not touched.
 - **Included-vs-excluded (notes-covered vs. not) selection-bias table** —

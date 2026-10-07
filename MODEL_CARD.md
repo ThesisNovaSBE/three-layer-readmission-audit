@@ -14,8 +14,9 @@
 > MedGemma-27B-text-it (2026-09-10), served via plain HF transformers +
 > lm-format-enforcer (2026-09-15, after vLLM proved structurally
 > incompatible with KISSKI's CUDA 12.8 driver ceiling) — matches the
-> current code, but has only been smoke-tested at small scale, not run at
-> full scale yet.
+> current code, and has now run at full scale (2026-10-06, all 9,899
+> flagged+noted admissions, see §"Stage 1+2+3 — Combined pipeline" below
+> for the real RQ2 result).
 
 ## Model Details
 
@@ -145,23 +146,51 @@ reportable per this project's own design docs, not a failure of either
 model: on this population, the discharge note alone carries no more (and no
 less) predictive signal than the structured record alone.
 
-### Stage 1+2 — Combined pipeline
+### Stage 1+2+3 — Combined pipeline (real RQ2 result, full run 2026-10-06)
+
+All 9,899 flagged+noted admissions audited by Stage 3
+(`google/medgemma-27b-text-it`, temperature=0); 93 annotation failures
+(0.94%, token-budget truncations) fall back to Stage 2's threshold per the
+documented fallback chain. 95% CIs are patient-clustered bootstrap (1000
+resamples).
 
 | Metric | Value |
 |--------|-------|
 | Stage 1 alone (test n=104,242) | AUROC=0.7215, recall=0.352, precision=0.431 |
 | Stage 2 alone (flagged+noted, n=9,899, 61.1% note coverage of flagged) | AUROC=0.622, recall=0.974, precision=0.437 |
-| Pipeline, full cohort (n=104,242, C9 no-note fallback applied) | precision=0.437, recall=0.347, F1=0.387, F2=0.362 |
-| Pipeline, notes cohort only (n=97,929) | precision=0.437, recall=0.241 |
-| Control arm (Stage 1 alone @ matched 15.1% alert rate) | precision=0.431, recall=0.352, F1=0.388, F2=0.366 |
+| Pipeline, full cohort (n=104,242, blanket Stage 3, C9 fallback applied) | precision=0.435 [0.417, 0.457], recall=0.295 [0.276, 0.315], F1=0.351, F2=0.315 |
+| Pipeline, notes cohort only (n=97,929) | precision=0.433, recall=0.180 |
+| Control arm (Stage 1 alone @ matched 12.9% alert rate) | precision=0.450 [0.433, 0.469], recall=0.316 [0.298, 0.338], F1=0.372, F2=0.336 |
+| Conditional triggering (discordant-only, post-hoc; 5,131/9,793 LLM calls, 4,662 saved) | precision=0.437, recall=0.319 (no CI computed yet) |
 
-The control arm is nearly identical to the full pipeline here — but unlike
-the previous (mismatched-vintage) version of this table, this is now a real
-finding, not an artifact: the current cascade (Stage 1 → Stage 2 prune
-only) does not yet beat matched-budget Stage 1 alone. This is expected and
-incomplete, not a negative result to draw conclusions from yet — Stage 3
-(the actual "auditor" layer this pipeline is designed around) hasn't run at
-full scale yet. The real RQ2 answer is pending that.
+**Headline RQ2 result: at matched alert volume, Stage 1 alone (the control
+arm) beats the full three-layer cascade on both precision and recall.**
+The precision CIs overlap substantially, but recall looks like a real gap
+— the control arm's lower bound (0.298) sits above the full pipeline's own
+point estimate (0.295). Applying Stage 3 to every flagged admission is net
+*harmful* to screening performance: the auditor's overrides cancel some
+alerts that turn out to be correct, and that cost outweighs what it
+correctly catches.
+
+The **conditional-triggering** analysis clarifies why. It re-scores the
+same completed run under a different rule: a CONCORDANT admission (Stage 1
+and Stage 2 agree) is treated as if Stage 3 had never been called — Stage
+1's flag simply stands — while a DISCORDANT admission keeps its real Stage
+3 decision. This is not a different execution mode (the real batch run
+always audits everyone; this is a post-hoc re-filter of its output), and
+it was deliberately run this way rather than restricting the real batch
+run to discordant cases from the start — doing it post-hoc meant Stage 3's
+actual decisions on concordant cases were available to check, not just
+assumed useless. Under this rule, both precision *and* recall improve
+versus the blanket pipeline (0.437/0.319 vs. 0.435/0.295) using 4,662
+fewer LLM calls (48% reduction) — evidence that auditing concordant cases
+specifically is where the harm concentrates, not auditing in general. Two
+caveats before leaning on this: its alert volume (13.9%) is ~1 point higher
+than the matched-budget comparisons above, which is itself part of the
+mechanism (fewer harmful overrides survive on concordant cases) but means
+it isn't a perfectly volume-matched comparison against the control arm;
+and no bootstrap CI has been computed for it yet, so "better than blanket"
+is a point-estimate claim, not yet a statistically tested one.
 
 ## Stage 3 — Independent LLM Audit (MedGemma-27B via HF transformers + lm-format-enforcer)
 
@@ -180,9 +209,8 @@ on MIMIC-IV-style reasoning; see `sessions/2026-09-13_session-23.md` and
 `config.yaml`'s `stage3.model_name` comment for the full model comparison
 and license check. Available both on-demand (one patient per call, via the
 API) and in batch (`src/stage3/batch.py`, every Stage 1-flagged,
-note-covered admission) — batch has only been smoke-tested at small scale
-as of this writing, not run at full scale. For each patient, the model
-receives:
+note-covered admission) — the full batch run completed 2026-10-06 across
+all 9,899 flagged+noted admissions. For each patient, the model receives:
 - Stage 1's score + top-k SHAP-ranked structured risk factors
 - Stage 2's independently-derived, note-based score
 - A quantitatively pre-computed discordance mode (never chosen by the LLM)
@@ -236,13 +264,11 @@ calibration between the two model families (see `docs/ARCHITECTURE.md`).
 **Research contribution:** No prior work in the literature review's
 49-study systematic search uses an LLM as an independent auditor of another
 model's output (as opposed to predictor, feature extractor, or explainer of
-its own prediction). `src/stage3/batch.py:run_batch_audit` produces Stage 3
-decisions across every Stage 1-flagged, note-covered admission — needed to
-evaluate RQ2 (net reclassification vs. structured triage) and characterise
-disagreement at scale — but has not yet been *run* at full scale. The
-Stage 1/Stage 2 retrain that previously blocked this is complete; the
-current blocker is the Stage 3 batch run itself (serving-mechanism
-stabilization, see `sessions/`) — see `docs/ARCHITECTURE.md` §4.
+its own prediction). `src/stage3/batch.py:run_batch_audit` produced Stage 3
+decisions across every Stage 1-flagged, note-covered admission (completed
+2026-10-06, 9,899/9,899, 0.94% annotation failure rate) — see "Stage
+1+2+3 — Combined pipeline" above for the real RQ2 result this made
+possible.
 
 ## Limitations
 
