@@ -1,0 +1,118 @@
+{
+  "n_total_cohort": 9899,
+  "n_excluded_no_decision": 106,
+  "concordant": {
+    "n": 4662,
+    "stage1_alone": {
+      "precision": 0.44659,
+      "recall": 1.0,
+      "f1": 0.61744,
+      "f2": 0.80139,
+      "n": 4662,
+      "tp": 2082,
+      "fp": 2580,
+      "fn": 0,
+      "tn": 0,
+      "precision_ci": {
+        "point_estimate": 0.44659,
+        "ci_lower": 0.4271,
+        "ci_upper": 0.466854,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 1.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    },
+    "stage3_decision": {
+      "precision": 0.44264,
+      "recall": 0.77089,
+      "f1": 0.56237,
+      "f2": 0.67132,
+      "n": 4662,
+      "tp": 1605,
+      "fp": 2021,
+      "fn": 477,
+      "tn": 559,
+      "precision_ci": {
+        "point_estimate": 0.44264,
+        "ci_lower": 0.4209155,
+        "ci_upper": 0.4658385,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 0.77089,
+        "ci_lower": 0.7408564999999999,
+        "ci_upper": 0.7961582500000001,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    }
+  },
+  "discordant": {
+    "n": 5131,
+    "stage1_alone": {
+      "precision": 0.40928,
+      "recall": 1.0,
+      "f1": 0.58083,
+      "f2": 0.776,
+      "n": 5131,
+      "tp": 2100,
+      "fp": 3031,
+      "fn": 0,
+      "tn": 0,
+      "precision_ci": {
+        "point_estimate": 0.40928,
+        "ci_lower": 0.3915745,
+        "ci_upper": 0.425982,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 1.0,
+        "ci_lower": 1.0,
+        "ci_upper": 1.0,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    },
+    "stage3_decision": {
+      "precision": 0.42284,
+      "recall": 0.68238,
+      "f1": 0.52214,
+      "f2": 0.60777,
+      "n": 5131,
+      "tp": 1433,
+      "fp": 1956,
+      "fn": 667,
+      "tn": 1075,
+      "precision_ci": {
+        "point_estimate": 0.42284,
+        "ci_lower": 0.4020265,
+        "ci_upper": 0.443791,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 0.68238,
+        "ci_lower": 0.65630875,
+        "ci_upper": 0.70777525,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    }
+  }
+}
