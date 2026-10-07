@@ -12,7 +12,7 @@ Predict 30-day hospital readmission using a three-layer pipeline:
 
 1. A classical ML model flags high-risk patients from **structured** MIMIC-IV data at a deployable, capacity-constrained operating point.
 2. A fine-tuned clinical language model reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate.
-3. A reasoning LLM (phi4-mini) audits each flagged case — reading both scores and the note — and makes its own independent uphold/override decision with a clinical justification.
+3. A reasoning LLM (MedGemma-27B-text-it, local via HF transformers) audits each flagged case — reading both scores and the note — and makes its own independent uphold/override decision with a clinical justification. Full batch run across all 9,899 flagged+noted admissions completed 2026-10-06.
 
 See `docs/ARCHITECTURE.md` for the full design and rationale.
 
@@ -29,7 +29,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 - Imbalance: `scale_pos_weight` / `class_weight="balanced"`
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC)
 
-### Stage 2 — Clinical-Longformer, note-only (independent risk estimate) — IMPLEMENTED, RETRAIN PENDING
+### Stage 2 — Clinical-Longformer, note-only (independent risk estimate) — IMPLEMENTED, RETRAINED
 
 - Model: Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`, Li et al. 2022), 4096-token window (raised from 2048 on 2026-08-25 — see `docs/ARCHITECTURE.md` §2)
 - Input: Discharge notes (MIMIC-IV-Note) only — no structured features. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run; see `docs/ARCHITECTURE.md` §2 for why.
@@ -38,19 +38,20 @@ Full design detail (and what's implemented vs. still pending) lives in
 - Calibration: Platt scaling per age group
 - Requires real MIMIC-IV-Note; cannot run on synthetic data
 - Key modules: `src/stage2/splits.py`, `src/stage2/train.py`, `src/stage2/calibrate.py`, `src/stage2/evaluate.py`, `src/stage2/predict.py`
-- **Training scale:** 249k stratified notes (~99% of available MIMIC-IV-Note training data); 70+ group oversampled
-- **HPC training:** GWDG KISSKI cluster (A100 80GB, bf16, batch_size=8) — retrain pending at the new 4096-token window
+- **Training scale:** 141,767 real age-stratified notes (2026-09-09/10 retrain, corrected unplanned-readmission target); 70+ group oversampled
+- **HPC training:** GWDG KISSKI cluster (A100 80GB, bf16, batch_size=8, effective 16 with grad accumulation)
 - **Job script:** `train_stage2.sh` — Slurm job with pre-flight checks; auto-resumes from checkpoint on resubmission
 
-### Stage 3 — Independent LLM Auditor — REWRITTEN 2026-08-25
+### Stage 3 — Independent LLM Auditor — full run completed 2026-10-06
 
-- Model: `phi4-mini` via Ollama, `temperature=0` (pinned for reproducibility)
+- Model: `google/medgemma-27b-text-it`, served locally via HF `transformers.generate()` + `lm-format-enforcer` (guided JSON decoding), `temperature=0` (pinned for reproducibility). Switched from Ollama/phi4-mini 2026-09-10 (batch run moved to cluster GPU hardware) and from vLLM 2026-09-15 (KISSKI's CUDA 12.8 driver ceiling proved incompatible with vLLM's kernel stack) — see `sessions/` for the full diagnosis.
 - Input per patient: Stage 1 score + SHAP-ranked reasons, Stage 2 score, near-full discharge note text, and a pre-computed (not LLM-chosen) discordance mode
-- **phi4-mini reaches its own independent `uphold`/`override` decision** — it does not narrate or classify a decision Stage 2 already made
-- Discordance mode (`CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES`) is computed quantitatively from percentile-rank displacement of stage1_score vs. stage2_score within the flagged+noted cohort (`src/stage3/explain.py:compute_discordance`) — not raw score subtraction, and never an LLM choice
-- Domain taxonomy: `social_support`, `frailty`, `palliative_intent`, `care_coordination`, `clinical_trajectory`, `other`
-- On-demand only (per-patient, called from the API); no batch runner yet — see `docs/ARCHITECTURE.md` §4 for what that blocks
-- Key modules: `src/stage3/explain.py`, `src/stage3/pipeline.py`, `src/stage3/models.py`, `src/stage3/attention.py` (optional auxiliary hint only), `src/stage3/shap_extract.py`
+- **MedGemma reaches its own independent `uphold`/`override`/`insufficient_evidence` decision** — it does not narrate or classify a decision Stage 2 already made
+- Discordance mode (`CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES`) is computed quantitatively from percentile-rank displacement of stage1_score vs. stage2_score within the flagged+noted cohort (`src/stage3/discordance.py:compute_discordance`) — not raw score subtraction, and never an LLM choice
+- Two-sided grounds taxonomy, each cited ground requiring its own verified quote: mitigating (`palliative_intent`, `planned_return`, `structured_driver_contradicted`, plus code-derived `strong_discharge_support`) and aggravating (`lives_alone_no_support`, `no_followup_arranged`, `functional_dependence`, `cognitive_impairment`, `nonadherence_risk`, `unstable_at_discharge`) — see `MODEL_CARD.md` for full definitions
+- `decision_rule`: a second, code-computed decision from quote-verified grounds only — a consistency check the model can't fabricate its way past
+- Available both on-demand (per-patient, via the API) and in batch (`src/stage3/batch.py`) — the full batch run across all 9,899 flagged+noted admissions completed 2026-10-06. **Real RQ2 result:** blanket auditing underperforms Stage 1 alone at matched alert volume; see `MODEL_CARD.md`.
+- Key modules: `src/stage3/explain.py`, `src/stage3/discordance.py`, `src/stage3/pipeline.py`, `src/stage3/batch.py`, `src/stage3/models.py`, `src/stage3/attention.py` (optional auxiliary hint only), `src/stage3/shap_extract.py`
 
 ## Data
 
