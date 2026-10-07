@@ -10,6 +10,14 @@
 *.h5
 *.hdf5
 
+# Per-admission exports derived from real MIMIC-IV-Note text (verbatim
+# quotes + clinical_justification) -- same PhysioNet DUA restriction as the
+# *.csv rule above, just in JSON form. Aggregate-only result summaries
+# (pipeline_evaluation.json, discordance_sensitivity.json,
+# discordance_subgroup_evaluation.json -- counts/metrics only, no note
+# excerpts) are NOT covered by this and stay trackable.
+models/stage3_full_evaluation_export.json
+
 # ── Model artifacts ──
 # Exclude large binaries at any depth under models/
 models/**/*.pkl
