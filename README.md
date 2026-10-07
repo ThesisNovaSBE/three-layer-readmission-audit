@@ -23,9 +23,9 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 > used all-cause despite that being the project's stated scope; see
 > `docs/ARCHITECTURE.md` §6). See `MODEL_CARD.md` for the full breakdown,
 > including per-age-group fairness metrics and the real RQ1 comparison.
-> Stage 3 (MedGemma-27B via HF transformers) has code and cluster infrastructure in
-> place but has only been smoke-tested at small scale, not run at full
-> scale — see `docs/ARCHITECTURE.md` §4 for what's still pending.
+> Stage 3 (MedGemma-27B via HF transformers) completed its full batch run
+> on 2026-10-06 across all 9,899 flagged+noted admissions — see the real
+> RQ2 result below and in `MODEL_CARD.md`.
 
 ### Stage 1 — XGBoost (MIMIC-IV v3.1, n=521,191, held-out test n=104,242, target=unplanned)
 
@@ -63,13 +63,18 @@ population (neither model gates the other): Stage 1 AUROC 0.7093 vs.
 Stage 2 AUROC 0.7101, diff +0.0008 [-0.0041, +0.0054]. **Null result** —
 expected and reportable per this project's own design docs, not a failure.
 
-### Stage 1+2 — Combined
+### RQ2 — Does the LLM auditor add value over Layer 1 alone?
 
-The current cascade (Stage 1 → Stage 2 prune only, no Stage 3 yet) is
-nearly identical to Stage 1 alone at the same alert budget (control arm) —
-expected and incomplete, since Stage 3 (the actual "auditor" layer) hasn't
-run at full scale yet. Full numbers and caveats in `MODEL_CARD.md`'s
-Stage 1+2 section.
+Full batch run, all 9,899 flagged+noted admissions audited by Stage 3.
+**At matched alert volume, Stage 1 alone (control arm) beats the full
+three-layer cascade** on both precision (0.450 vs. 0.435) and recall
+(0.316 vs. 0.295, 95% CIs essentially non-overlapping) — applying the
+auditor to every flagged admission is net harmful, not neutral. A post-hoc
+conditional-triggering analysis (Stage 3 only on cases where Stage 1 and
+Stage 2 disagree) recovers both precision and recall versus the blanket
+run using 48% fewer LLM calls, suggesting the harm concentrates in
+auditing *concordant* cases specifically. Full numbers, CIs, and caveats
+in `MODEL_CARD.md`'s "Stage 1+2+3 — Combined pipeline" section.
 
 ---
 
