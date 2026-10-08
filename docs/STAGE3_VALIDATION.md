@@ -17,10 +17,11 @@
 
 ## Motivation
 
-Stage 3 uses phi4-mini to independently decide, per patient, whether to
-uphold or override the structured risk alert, and to classify the primary
-clinical domain behind that decision.  Because this is LLM-generated output,
-the thesis must report how well it agrees with human clinical judgment —
+Stage 3 uses MedGemma-27B to independently decide, per patient, whether to
+uphold or override the structured risk alert, extracting mitigating/
+aggravating grounds (each with a verbatim quote) that support that decision.
+Because this is LLM-generated output, the thesis must report how well it
+agrees with human clinical judgment —
 otherwise the population-level finding has no validity anchor.
 
 ## Target Sample
@@ -95,15 +96,18 @@ Annotators are blinded to each other's labels until both are complete.
 **If κ > 0.61:** Report the kappa value prominently in the thesis. Use it to
 justify the population-level discordance findings as a validated research result.
 
-**If κ = 0.41–0.60:** Report with explicit caveats. Note that phi4-mini's
-classifications are indicative rather than ground-truth. Shift the thesis claim
-from "we found X% NOTE_MITIGATES" to "our LLM classifier, with moderate
+**If κ = 0.41–0.60:** Report with explicit caveats. Note that MedGemma's
+decisions are indicative rather than ground-truth. Shift the thesis claim
+from "we found X% NOTE_MITIGATES" to "our LLM auditor, with moderate
 agreement to human judgment, suggests X%."
 
 **If κ < 0.40:** The Stage 3 finding is not publishable as a research result.
 Options: (a) improve the prompt and re-annotate, (b) frame Stage 3 as a
-proof-of-concept / future work section only, (c) add a second LLM judge (GPT-4o
-or Claude) and report LLM-LLM agreement alongside human-LLM agreement.
+proof-of-concept / future work section only, (c) add a second LLM judge —
+must be another locally-served, fully offline model per the PhysioNet DUA
+(e.g. `cfg.stage3.robustness_model`, still unset as of this writing — a
+cloud API like GPT-4o or Claude cannot be used on MIMIC-IV-Note data) and
+report LLM-LLM agreement alongside human-LLM agreement.
 
 ## Jain & Wallace Attention Caveat
 
@@ -112,7 +116,7 @@ methodological note:
 
 > "Attention weights are not guaranteed to constitute faithful explanations of
 > model decisions (Jain & Wallace, 2019; Wiegreffe & Pinter, 2019).  The spans
-> extracted here are used to ground the phi4-mini prompt with contextually
+> extracted here are used to ground the Stage 3 auditor's prompt with contextually
 > relevant note content, not as standalone proof of which sentences caused the
 > Longformer's prediction.  A gradient-based attribution method (e.g. Integrated
 > Gradients) would be required for causally faithful explanations."
