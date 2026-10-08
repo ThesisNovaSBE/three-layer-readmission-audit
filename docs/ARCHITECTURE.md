@@ -3,11 +3,13 @@
 **Last updated:** 2026-09-13 (session 23; §4-§6 carry the most recent
 content — this banner previously understated how current the body was).
 This is the single current source of
-truth for the pipeline design. It supersedes `docs/IMPLEMENTATION_PLAN.md`,
-`docs/THESIS_NARRATIVE.md`, and `docs/SANITY_CHECK_2026-07-06.md` — those are
-kept for history (each now has a banner pointing here) but describe designs
-this project has since moved past. If you are a new session picking up this
-project, read this file, then the latest `sessions/` entry.
+truth for the pipeline design. It supersedes `docs/archive/IMPLEMENTATION_PLAN.md`,
+`docs/THESIS_NARRATIVE.md`, and `docs/archive/SANITY_CHECK_2026-07-06.md` — the
+archived two are kept for history (each has a banner pointing here) but
+describe designs this project has since moved past; `THESIS_NARRATIVE.md`
+stays in `docs/` (not archived) since its storytelling framing is still
+needed for writing the thesis itself. If you are a new session picking up
+this project, read this file, then the latest `sessions/` entry.
 
 ---
 
@@ -375,7 +377,7 @@ deliberately left as open decisions, not implemented — see §5.
 - **Narrative docs rewritten** — `docs/THESIS_NARRATIVE.md`'s one-sentence
   summary, abstract, storyline options, and "if the professor asks" section,
   plus the paste-ready session-start prompt and N5 literature-positioning
-  prompt in `docs/SANITY_CHECK_2026-07-06.md`, no longer describe a
+  prompt in `docs/archive/SANITY_CHECK_2026-07-06.md`, no longer describe a
   "high-recall screen" that a Stage 2 "second reader" "vetoes" — they now
   describe the capacity-constrained screen / independent second opinion /
   independent auditor design this file has described since session 15.

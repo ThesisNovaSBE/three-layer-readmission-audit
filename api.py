@@ -404,8 +404,10 @@ def get_patient(hadm_id: int, request: Request) -> PatientOut:
 def explain(hadm_id: int, request: Request) -> ExplanationResult:
     """Generate a Stage 3 on-demand clinical explanation for one patient.
 
-    Calls phi4-mini via Ollama — the first request may take 10–30 s while
-    the model loads.  Subsequent requests on a warm model are faster.
+    Calls the Stage 3 auditor model (locally-served, via HF transformers —
+    see config.yaml's stage3.model_name) — the first request triggers a
+    one-time model load that can take well over a minute for a 27B-class
+    model; subsequent requests on the warm, cached model are much faster.
 
     The ``results_df``, ``artifact``, and ``feature_matrix`` pre-loaded at
     startup are passed in to avoid per-request load costs.

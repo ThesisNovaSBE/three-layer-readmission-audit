@@ -149,7 +149,7 @@ def main():
     print("  Results saved to:     models/stage2_results.csv")
     print("  Evaluation saved to:  models/stage2_evaluation.json")
     print()
-    print("  Next: python -m src.stage3.pipeline <hadm_id>  (requires Ollama + phi4-mini)")
+    print("  Next: python -m src.stage3.pipeline <hadm_id>  (requires the Stage 3 model, see config.yaml's stage3.model_name)")
     print("=" * 64)
 
 
