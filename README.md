@@ -72,9 +72,13 @@ three-layer cascade** on both precision (0.450 vs. 0.435) and recall
 auditor to every flagged admission is net harmful, not neutral. A post-hoc
 conditional-triggering analysis (Stage 3 only on cases where Stage 1 and
 Stage 2 disagree) recovers both precision and recall versus the blanket
-run using 48% fewer LLM calls, suggesting the harm concentrates in
-auditing *concordant* cases specifically. Full numbers, CIs, and caveats
-in `MODEL_CARD.md`'s "Stage 1+2+3 — Combined pipeline" section.
+run using 48% fewer LLM calls — but a direct subgroup-level test (Stage 3
+vs. Stage 1 alone, computed separately within concordant and discordant
+cases) shows Stage 3 underperforms Stage 1 alone in **both** subgroups by
+F2, and more so on discordant cases, not less. The honest finding: Stage 3
+trades recall for little-to-no precision gain almost everywhere it's
+applied. Full numbers, CIs, and caveats in `MODEL_CARD.md`'s "Stage
+1+2+3 — Combined pipeline" section.
 
 ---
 

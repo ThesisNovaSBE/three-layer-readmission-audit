@@ -172,25 +172,51 @@ point estimate (0.295). Applying Stage 3 to every flagged admission is net
 alerts that turn out to be correct, and that cost outweighs what it
 correctly catches.
 
-The **conditional-triggering** analysis clarifies why. It re-scores the
-same completed run under a different rule: a CONCORDANT admission (Stage 1
-and Stage 2 agree) is treated as if Stage 3 had never been called — Stage
-1's flag simply stands — while a DISCORDANT admission keeps its real Stage
-3 decision. This is not a different execution mode (the real batch run
-always audits everyone; this is a post-hoc re-filter of its output), and
-it was deliberately run this way rather than restricting the real batch
-run to discordant cases from the start — doing it post-hoc meant Stage 3's
-actual decisions on concordant cases were available to check, not just
-assumed useless. Under this rule, both precision *and* recall improve
-versus the blanket pipeline (0.437/0.319 vs. 0.435/0.295) using 4,662
-fewer LLM calls (48% reduction) — evidence that auditing concordant cases
-specifically is where the harm concentrates, not auditing in general. Two
-caveats before leaning on this: its alert volume (13.9%) is ~1 point higher
-than the matched-budget comparisons above, which is itself part of the
-mechanism (fewer harmful overrides survive on concordant cases) but means
-it isn't a perfectly volume-matched comparison against the control arm;
-and no bootstrap CI has been computed for it yet, so "better than blanket"
-is a point-estimate claim, not yet a statistically tested one.
+The **conditional-triggering** analysis (`scripts/analyze_discordance_subgroups.py`)
+re-scores the same completed run under a different rule: a CONCORDANT
+admission (Stage 1 and Stage 2 agree) is treated as if Stage 3 had never
+been called — Stage 1's flag simply stands — while a DISCORDANT admission
+keeps its real Stage 3 decision. This is not a different execution mode
+(the real batch run always audits everyone; this is a post-hoc re-filter
+of its output), run this way deliberately so Stage 3's actual decisions on
+concordant cases were available to check, not just assumed useless. Under
+this rule, both precision *and* recall improve versus the blanket pipeline
+(0.437/0.319 vs. 0.435/0.295) using 4,662 fewer LLM calls (48% reduction).
+
+**This full-cohort comparison only varies treatment on the concordant
+group — it does not, by itself, show Stage 3 adds value on discordant
+cases**, since the discordant group's treatment (Stage 3's real decision)
+is identical in both the blanket and conditional numbers above. A direct
+follow-up test — Stage 3's real decision vs. "Stage 1's flag stands,"
+computed *within each subgroup separately* — gives the fuller, more honest
+picture (95% CIs, patient-clustered bootstrap):
+
+| Subgroup | Policy | Precision | Recall | F2 |
+|---|---|---|---|---|
+| Concordant (n=4,662) | Stage 1 alone | 0.447 [0.427, 0.467] | 1.000 | 0.801 |
+| | Stage 3's decision | 0.443 [0.421, 0.466] | 0.771 [0.741, 0.796] | **0.671** |
+| Discordant (n=5,131) | Stage 1 alone | 0.409 [0.392, 0.426] | 1.000 | 0.776 |
+| | Stage 3's decision | 0.423 [0.402, 0.444] | 0.682 [0.656, 0.708] | **0.608** |
+
+By F2 (weights recall 4x precision — appropriate here since a missed
+readmission is costlier than a false alarm), **Stage 3 makes things worse
+in both subgroups, and the drop is larger on discordant cases (−0.168)
+than concordant (−0.130)** — recall falls further there (32 points vs. 23
+points) and F2 punishes that hard. Stage 3 does buy a small, real
+precision gain on discordant cases (+1.4pp) that it doesn't buy on
+concordant cases (flat/slightly negative) — but that gain doesn't come
+close to compensating for the recall it gives up, in either subgroup.
+
+**The correct, complete statement**: Stage 3's overrides trade recall for
+little-to-no precision gain almost everywhere they're applied. That trade
+is unambiguously bad on concordant cases (zero redeeming precision value)
+and still a bad trade — just a smaller, partially-compensated one — on
+discordant cases. The earlier framing ("auditing concordant cases is where
+the harm concentrates") is not wrong about concordant cases being the
+clean win from removing Stage 3, but it should not be read as "Stage 3
+helps on discordant cases" — the subgroup analysis above directly tests
+that claim and finds it doesn't hold on F2. See `models/
+discordance_subgroup_evaluation.json` for the full numbers.
 
 ## Stage 3 — Independent LLM Audit (MedGemma-27B via HF transformers + lm-format-enforcer)
 

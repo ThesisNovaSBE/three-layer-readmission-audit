@@ -462,9 +462,17 @@ session 17.
   auditing is net harmful to screening performance, not neutral. A
   post-hoc conditional-triggering re-analysis (Stage 3 only on discordant
   cases) recovers both metrics versus the blanket run at 48% fewer LLM
-  calls (see `MODEL_CARD.md` for full numbers and caveats — no CI computed
-  yet for the conditional-triggering arm, and its alert volume isn't
-  perfectly matched to the control arm's).
+  calls, which initially read as "Stage 3 adds value on discordant cases" —
+  **but that comparison never varied Stage 3's treatment of the discordant
+  group, so it couldn't have tested that.** A direct follow-up
+  (`scripts/analyze_discordance_subgroups.py`, 2026-10-07): Stage 3's real
+  decision vs. "Stage 1's flag stands," within each subgroup separately,
+  with CIs. By F2, Stage 3 underperforms Stage 1 alone in BOTH subgroups,
+  and the drop is larger on discordant cases (−0.168) than concordant
+  (−0.130) — see `MODEL_CARD.md` for the full table. The correct
+  statement: Stage 3 trades recall for little-to-no precision gain almost
+  everywhere it's applied; removing it from concordant cases is a clean
+  win, but it is not adding value on discordant cases either.
 - ~~Run `batch.py --sweep`~~ **Done (2026-10-06)** —
   `models/discordance_sensitivity.json`: at the provisional ±20pp,
   CONCORDANT=47.6%, NOTE_MITIGATES=29.8%, NOTE_AMPLIFIES=22.7%. Sweep
