@@ -10,8 +10,8 @@ Caveat (Jain & Wallace 2019 / Wiegreffe & Pinter 2019): raw attention weights
 are not guaranteed to be faithful explanations of model decisions.  They
 correlate with gradient-based attribution in many practical cases but should
 be treated as *indicative* rather than *causal* in the thesis.  The attention
-spans are used here only to ground the phi4-mini prompt with salient note
-context, not as standalone proofs of which sentences caused the prediction.
+spans are used here only to ground the Stage 3 auditor's prompt with salient
+note context, not as standalone proofs of which sentences caused the prediction.
 
 If the fine-tuned model has not been saved yet (training in progress) or
 PyTorch is unavailable, returns empty lists so the rest of Stage 3 can still
