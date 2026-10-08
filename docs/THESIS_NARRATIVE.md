@@ -13,8 +13,10 @@
 > red thread through every chapter, concrete storytelling devices, and a ~400-word abstract
 > to give Prof. Shen as a preview.
 >
-> Companion docs: `PROJECT_TLDR.md` (what we built) · `docs/SANITY_CHECK_2026-07-06.md`
-> (what still needs fixing before these claims are fully backed).
+> Companion docs: `PROJECT_TLDR.md` (what we built) · `docs/ARCHITECTURE.md`
+> (current state, including the now-real RQ1/RQ2 results) ·
+> `docs/archive/SANITY_CHECK_2026-07-06.md` (historical — what needed
+> fixing as of 2026-07-06; most of it is resolved now, see `sessions/`).
 
 ---
 
@@ -28,10 +30,17 @@
 
 **Sanity check verdict:** the idea is sound and clinically resonant — *if* we frame it as an
 **audit layer** (LLM as independent auditor, not as narrator of a decision already made by
-Stage 2) rather than "LLM predicts readmission too." The known argumentation gaps (why a
-cascade beats a matched-budget structured-only baseline, notes-cohort denominator, clinical
-utility quantification) are catalogued in the sanity-check doc; the storyline below is
-designed so that answering those gaps *is* the story.
+Stage 2) rather than "LLM predicts readmission too." The known argumentation gaps this
+paragraph originally flagged (why a cascade beats a matched-budget structured-only baseline,
+notes-cohort denominator, clinical utility quantification) are now **answered, not just
+catalogued** — the full Stage 3 batch run (2026-10-06, all 9,899 flagged+noted admissions)
+gives a real result, and it is not the flattering one a reader might expect: at matched alert
+volume, Stage 1 alone beats the full cascade, and a subgroup-level follow-up shows the
+auditor trades recall for little-to-no precision gain almost everywhere it's applied (see
+`MODEL_CARD.md`). This changes the storyline below from "does the cascade beat the baseline"
+(open question) to "why doesn't an independently-reasoning LLM auditor beat simple threshold
+tightening, and what does that say about this class of system" (answered, and arguably a more
+interesting thesis finding than a clean win would have been).
 
 ---
 
@@ -154,7 +163,7 @@ contribute, and do it with small, local, fairness-audited models."*
 > follow up on, not a recall floor that flags most of it. A fine-tuned clinical language
 > model (Clinical-Longformer) reads the same population's discharge notes independently,
 > producing its own risk estimate — evidence for what follows, not a verdict. A locally
-> deployed reasoning model (phi4-mini, via Ollama) then audits every flagged case: given the
+> deployed reasoning model (MedGemma-27B, served via HF transformers) then audits every flagged case: given the
 > structured score and its stated reasons, the independent note-based score, and the note
 > itself, it reaches its own uphold-or-override judgment, quotes the note passage it relied
 > on, and states its reasoning in plain language. No patient data leaves the hospital

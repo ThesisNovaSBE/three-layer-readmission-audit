@@ -1,0 +1,443 @@
+{
+  "note": "Stage 1 test partition used for all three layers. Stage 2 scores come from stage2_results.csv \u2014 patients in Stage 1's test partition are out-of-sample for Stage 2. 'pipeline.full_cohort' is the primary, deployable number (100% of test admissions; flagged-no-note patients fall back to the Stage 1 flag per the C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes flagged-no-note admissions and must always be reported alongside full_cohort, never alone. The final prediction is Stage 3's uphold/override decision wherever a batch Stage 3 run covers the admission (see 'stage3' below for coverage); Stage 2's threshold is only a fallback where Stage 3 hasn't run yet. 'pipeline.control_arm_stage1_matched' is Stage 1 alone at the same alert volume as the full system \u2014 the single comparison that determines whether the cascade earns its complexity; report it alongside full_cohort every time, never omit it. 'pipeline.conditional_triggering' is a post-hoc analysis (not a different execution mode -- the real batch run always audits every flagged+noted admission) of what discordant-only Stage 3 triggering would have cost/saved; null until a batch Stage 3 run exists.",
+  "stage1": {
+    "n": 104242,
+    "pos_rate": 0.1902592045432743,
+    "auroc": 0.7215074172602733,
+    "auprc": 0.3965205278220835,
+    "threshold": 0.32349323493234927,
+    "precision": 0.4311,
+    "recall": 0.35239,
+    "f1": 0.38779,
+    "f2": 0.36575,
+    "tp": 6989,
+    "fp": 9223,
+    "fn": 12844,
+    "tn": 75186,
+    "by_age_band": {
+      "18-40": {
+        "n": 23650,
+        "pos_rate": 0.17801268498942918,
+        "auroc": 0.7501345940490504,
+        "precision": 0.44987,
+        "recall": 0.37625,
+        "f1": 0.40978,
+        "f2": 0.38898,
+        "tp": 1584,
+        "fp": 1937,
+        "fn": 2626,
+        "tn": 17503
+      },
+      "41-55": {
+        "n": 22890,
+        "pos_rate": 0.20620358235037134,
+        "auroc": 0.7369288056304394,
+        "precision": 0.43607,
+        "recall": 0.44725,
+        "f1": 0.44159,
+        "f2": 0.44496,
+        "tp": 2111,
+        "fp": 2730,
+        "fn": 2609,
+        "tn": 15440
+      },
+      "56-70": {
+        "n": 30352,
+        "pos_rate": 0.20087638376383765,
+        "auroc": 0.7277296940714546,
+        "precision": 0.44353,
+        "recall": 0.39036,
+        "f1": 0.41525,
+        "f2": 0.39995,
+        "tp": 2380,
+        "fp": 2986,
+        "fn": 3717,
+        "tn": 21269
+      },
+      "70+": {
+        "n": 27350,
+        "pos_rate": 0.17572212065813528,
+        "auroc": 0.6645403259307107,
+        "precision": 0.36795,
+        "recall": 0.19018,
+        "f1": 0.25075,
+        "f2": 0.21052,
+        "tp": 914,
+        "fp": 1570,
+        "fn": 3892,
+        "tn": 20974
+      }
+    }
+  },
+  "stage2": {
+    "n": 9899,
+    "pos_rate": 0.4270128295787453,
+    "auroc": 0.622010370233935,
+    "auprc": 0.5377053225544233,
+    "precision": 0.43692,
+    "recall": 0.97421,
+    "f1": 0.60328,
+    "f2": 0.78191,
+    "tp": 4118,
+    "fp": 5307,
+    "fn": 109,
+    "tn": 365,
+    "by_age_band": {
+      "18-40": {
+        "n": 1570,
+        "pos_rate": 0.49044585987261147,
+        "auroc": 0.6263547077922077,
+        "precision": 0.50689,
+        "recall": 0.95584,
+        "f1": 0.66247,
+        "f2": 0.812,
+        "tp": 736,
+        "fp": 716,
+        "fn": 34,
+        "tn": 84
+      },
+      "41-55": {
+        "n": 2836,
+        "pos_rate": 0.42912552891396333,
+        "auroc": 0.6167054843292191,
+        "precision": 0.43656,
+        "recall": 0.97535,
+        "f1": 0.60315,
+        "f2": 0.78226,
+        "tp": 1187,
+        "fp": 1532,
+        "fn": 30,
+        "tn": 87
+      },
+      "56-70": {
+        "n": 3514,
+        "pos_rate": 0.4225953329538987,
+        "auroc": 0.6316058564949644,
+        "precision": 0.43208,
+        "recall": 0.98316,
+        "f1": 0.60033,
+        "f2": 0.78335,
+        "tp": 1460,
+        "fp": 1919,
+        "fn": 25,
+        "tn": 110
+      },
+      "70+": {
+        "n": 1979,
+        "pos_rate": 0.3815058110156645,
+        "auroc": 0.5810912002770203,
+        "precision": 0.392,
+        "recall": 0.97351,
+        "f1": 0.55894,
+        "f2": 0.75077,
+        "tp": 735,
+        "fp": 1140,
+        "fn": 20,
+        "tn": 84
+      }
+    },
+    "available": true,
+    "n_test_with_s2_scores": 9899,
+    "n_flagged_no_note": 6313,
+    "note_coverage_of_flagged": 0.6105970885763632
+  },
+  "stage3": {
+    "available": true,
+    "n_test_with_stage3_decision": 9793,
+    "coverage_of_flagged": 0.6040587219343696,
+    "n_insufficient_evidence": 13
+  },
+  "pipeline": {
+    "full_cohort": {
+      "n": 104242,
+      "pos_rate": 0.1902592045432743,
+      "confirmed_rate": 0.1288348266533643,
+      "precision": 0.43507,
+      "recall": 0.29461,
+      "f1": 0.35132,
+      "f2": 0.31495,
+      "tp": 5843,
+      "fp": 7587,
+      "fn": 13990,
+      "tn": 76822,
+      "by_age_band": {
+        "18-40": {
+          "n": 23650,
+          "pos_rate": 0.17801268498942918,
+          "precision": 0.44761,
+          "recall": 0.32874,
+          "f1": 0.37907,
+          "f2": 0.34718,
+          "tp": 1384,
+          "fp": 1708,
+          "fn": 2826,
+          "tn": 17732
+        },
+        "41-55": {
+          "n": 22890,
+          "pos_rate": 0.20620358235037134,
+          "precision": 0.44027,
+          "recall": 0.37712,
+          "f1": 0.40625,
+          "f2": 0.38826,
+          "tp": 1780,
+          "fp": 2263,
+          "fn": 2940,
+          "tn": 15907
+        },
+        "56-70": {
+          "n": 30352,
+          "pos_rate": 0.20087638376383765,
+          "precision": 0.45102,
+          "recall": 0.32245,
+          "f1": 0.37605,
+          "f2": 0.34195,
+          "tp": 1966,
+          "fp": 2393,
+          "fn": 4131,
+          "tn": 21862
+        },
+        "70+": {
+          "n": 27350,
+          "pos_rate": 0.17572212065813528,
+          "precision": 0.36829,
+          "recall": 0.14836,
+          "f1": 0.21151,
+          "f2": 0.16848,
+          "tp": 713,
+          "fp": 1223,
+          "fn": 4093,
+          "tn": 21321
+        }
+      },
+      "precision_ci": {
+        "point_estimate": 0.43507,
+        "ci_lower": 0.417387,
+        "ci_upper": 0.456737,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 0.29461,
+        "ci_lower": 0.276143,
+        "ci_upper": 0.314764,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    },
+    "notes_cohort": {
+      "n": 97929,
+      "pos_rate": 0.17432017073594133,
+      "confirmed_rate": 0.07267510134893647,
+      "precision": 0.43291,
+      "recall": 0.18048,
+      "f1": 0.25475,
+      "f2": 0.20431,
+      "tp": 3081,
+      "fp": 4036,
+      "fn": 13990,
+      "tn": 76822,
+      "by_age_band": {
+        "18-40": {
+          "n": 21699,
+          "pos_rate": 0.15650490806027928,
+          "precision": 0.49956,
+          "recall": 0.16784,
+          "f1": 0.25127,
+          "f2": 0.19355,
+          "tp": 570,
+          "fp": 571,
+          "fn": 2826,
+          "tn": 17732
+        },
+        "41-55": {
+          "n": 20885,
+          "pos_rate": 0.18319367967440747,
+          "precision": 0.43474,
+          "recall": 0.23157,
+          "f1": 0.30218,
+          "f2": 0.25545,
+          "tp": 886,
+          "fp": 1152,
+          "fn": 2940,
+          "tn": 15907
+        },
+        "56-70": {
+          "n": 28500,
+          "pos_rate": 0.18252631578947368,
+          "precision": 0.4272,
+          "recall": 0.20588,
+          "f1": 0.27786,
+          "f2": 0.22968,
+          "tp": 1071,
+          "fp": 1436,
+          "fn": 4131,
+          "tn": 21862
+        },
+        "70+": {
+          "n": 26845,
+          "pos_rate": 0.17310486124045446,
+          "precision": 0.38714,
+          "recall": 0.11922,
+          "f1": 0.1823,
+          "f2": 0.13837,
+          "tp": 554,
+          "fp": 877,
+          "fn": 4093,
+          "tn": 21321
+        }
+      }
+    },
+    "control_arm_stage1_matched": {
+      "n": 104242,
+      "pos_rate": 0.1902592045432743,
+      "confirmed_rate": 0.13389037048406593,
+      "precision": 0.44974,
+      "recall": 0.31649,
+      "f1": 0.37153,
+      "f2": 0.33643,
+      "tp": 6277,
+      "fp": 7680,
+      "fn": 13556,
+      "tn": 76729,
+      "by_age_band": {
+        "18-40": {
+          "n": 23650,
+          "pos_rate": 0.17801268498942918,
+          "precision": 0.46264,
+          "recall": 0.34561,
+          "f1": 0.39565,
+          "f2": 0.36402,
+          "tp": 1455,
+          "fp": 1690,
+          "fn": 2755,
+          "tn": 17750
+        },
+        "41-55": {
+          "n": 22890,
+          "pos_rate": 0.20620358235037134,
+          "precision": 0.45188,
+          "recall": 0.41483,
+          "f1": 0.43256,
+          "f2": 0.42175,
+          "tp": 1958,
+          "fp": 2375,
+          "fn": 2762,
+          "tn": 15795
+        },
+        "56-70": {
+          "n": 30352,
+          "pos_rate": 0.20087638376383765,
+          "precision": 0.46261,
+          "recall": 0.34902,
+          "f1": 0.39787,
+          "f2": 0.36705,
+          "tp": 2128,
+          "fp": 2472,
+          "fn": 3969,
+          "tn": 21783
+        },
+        "70+": {
+          "n": 27350,
+          "pos_rate": 0.17572212065813528,
+          "precision": 0.3917,
+          "recall": 0.15314,
+          "f1": 0.22019,
+          "f2": 0.17438,
+          "tp": 736,
+          "fp": 1143,
+          "fn": 4070,
+          "tn": 21401
+        }
+      },
+      "precision_ci": {
+        "point_estimate": 0.44974,
+        "ci_lower": 0.43291500000000005,
+        "ci_upper": 0.4692295,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 0.31649,
+        "ci_lower": 0.29786175000000004,
+        "ci_upper": 0.33795,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "threshold": 0.34589980693019,
+      "target_alert_rate": 0.1288348266533643
+    },
+    "conditional_triggering": {
+      "blanket_llm_calls": 9793,
+      "conditional_llm_calls": 5131,
+      "llm_calls_saved": 4662,
+      "report": {
+        "n": 104242,
+        "pos_rate": 0.1902592045432743,
+        "confirmed_rate": 0.13877323919341533,
+        "precision": 0.43689,
+        "recall": 0.31866,
+        "f1": 0.36852,
+        "f2": 0.33689,
+        "tp": 6320,
+        "fp": 8146,
+        "fn": 13513,
+        "tn": 76263,
+        "by_age_band": {
+          "18-40": {
+            "n": 23650,
+            "pos_rate": 0.17801268498942918,
+            "precision": 0.45438,
+            "recall": 0.35131,
+            "f1": 0.39625,
+            "f2": 0.368,
+            "tp": 1479,
+            "fp": 1776,
+            "fn": 2731,
+            "tn": 17664
+          },
+          "41-55": {
+            "n": 22890,
+            "pos_rate": 0.20620358235037134,
+            "precision": 0.44067,
+            "recall": 0.4036,
+            "f1": 0.42132,
+            "f2": 0.41051,
+            "tp": 1905,
+            "fp": 2418,
+            "fn": 2815,
+            "tn": 15752
+          },
+          "56-70": {
+            "n": 30352,
+            "pos_rate": 0.20087638376383765,
+            "precision": 0.45032,
+            "recall": 0.34935,
+            "f1": 0.39346,
+            "f2": 0.36575,
+            "tp": 2130,
+            "fp": 2600,
+            "fn": 3967,
+            "tn": 21655
+          },
+          "70+": {
+            "n": 27350,
+            "pos_rate": 0.17572212065813528,
+            "precision": 0.37349,
+            "recall": 0.16771,
+            "f1": 0.23148,
+            "f2": 0.18848,
+            "tp": 806,
+            "fp": 1352,
+            "fn": 4000,
+            "tn": 21192
+          }
+        }
+      }
+    }
+  }
+}
