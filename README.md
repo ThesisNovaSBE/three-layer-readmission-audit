@@ -14,6 +14,91 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 ---
 
+## Architecture Overview
+
+"Stage" and "Layer" are the same three things — the docs use both names
+interchangeably. There is one sequential ML pipeline (Stage/Layer 1 → 2 → 3),
+wrapped in a handful of cross-cutting system layers (data, config, serving,
+frontend, ops) that are not sequential steps, just the surrounding plumbing.
+
+```mermaid
+flowchart TD
+    subgraph EXT["External Data (PhysioNet, credentialed)"]
+        MIV[("MIMIC-IV<br/>structured tables")]
+        MIVN[("MIMIC-IV-Note<br/>clinical notes")]
+    end
+
+    subgraph DATA["Data & Config Layer"]
+        SD["src/data/<br/>cohort · comorbidity · features · synthetic"]
+        FEAT[("data/processed/features.csv<br/>521,191 rows")]
+        CFG["config.yaml + src/config_schema.py + src/schemas.py"]
+    end
+
+    subgraph PIPE["ML Pipeline — 3 sequential stages (= layers)"]
+        S1["Stage 1 / Layer 1 — src/model/<br/>XGBoost: structured screen<br/>capacity-constrained flag"]
+        S2["Stage 2 / Layer 2 — src/stage2/<br/>Clinical-Longformer: note-only<br/>independent risk estimate"]
+        S3["Stage 3 / Layer 3 — src/stage3/<br/>MedGemma-27B: independent auditor<br/>uphold / override / insufficient_evidence"]
+        S1 --> S2 --> S3
+    end
+
+    subgraph EVAL["Orchestration & Evaluation"]
+        CMP["src/model/compare_layers.py<br/>RQ1: Stage 1 vs Stage 2"]
+        PE["src/model/evaluate_pipeline.py<br/>RQ2: cascade vs control arm"]
+    end
+
+    subgraph ART["Artifacts (gitignored)"]
+        MODELS[("models/<br/>weights, checkpoints, calibration")]
+        RESULTS[("results/<br/>final citable JSON snapshots")]
+    end
+
+    subgraph SERVE["Serving Layer"]
+        API["api.py (FastAPI)<br/>/health · /patients · /patients/{id} · /explain"]
+    end
+
+    subgraph FRONT["Frontend Layer"]
+        FE["frontend/ (React + Vite + TS + Tailwind)<br/>PipelineDiagram · PatientTable · PatientModal"]
+    end
+
+    subgraph OPS["Ops / Training Infra"]
+        SLURM["scripts/*.sh (SLURM)<br/>train_stage2.sh, setup_stage2.py, setup_demo.py"]
+    end
+
+    MIV --> SD
+    MIVN --> SD
+    SD --> FEAT
+    FEAT --> S1
+    MIVN --> S2
+    MIVN --> S3
+    CFG -.-> S1
+    CFG -.-> S2
+    CFG -.-> S3
+
+    S1 --> MODELS
+    S2 --> MODELS
+    S3 --> MODELS
+    S1 --> CMP
+    S2 --> CMP
+    S1 --> PE
+    S2 --> PE
+    S3 --> PE
+    CMP --> RESULTS
+    PE --> RESULTS
+
+    MODELS --> API
+    API --> FE
+
+    OPS -.->|trains / runs| S1
+    OPS -.->|trains / runs| S2
+    OPS -.->|trains / runs| S3
+```
+
+> Note: this diagram reflects the current backend design (`docs/ARCHITECTURE.md`).
+> The frontend box above is a structural placeholder only — the actual
+> `frontend/` code is still visually/behaviourally stale (pre-retrain numbers,
+> old model name, old cascade-gating copy) and due for a rebuild.
+
+---
+
 ## Results
 
 > **Note (2026-09-13):** Stage 1 and Stage 2 below are both real retrains —
