@@ -3,7 +3,7 @@
 This is the sole entry point for Stage 3.  It is called by the API when a
 clinician requests review of a specific flagged patient — never in batch.
 
-The function assembles evidence from all three layers and lets MedGemma-27B
+The function assembles evidence from all three stages and lets MedGemma-27B
 reach its own decision:
 
 * **Stage 1** (XGBoost on structured EHR): the risk score and SHAP-ranked

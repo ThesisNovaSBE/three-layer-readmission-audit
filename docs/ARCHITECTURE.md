@@ -37,9 +37,9 @@ See that session log for the full reasoning trail.
 
 ---
 
-## 2. The three layers, as implemented now
+## 2. The three stages, as implemented now
 
-### Layer 1 — XGBoost (structured screen)
+### Stage 1 — XGBoost (structured screen)
 
 - Input: ~40 structured MIMIC-IV features (demographics, admission traits,
   prior utilisation, Charlson comorbidity index, lab/vital aggregates).
@@ -55,7 +55,7 @@ See that session log for the full reasoning trail.
 - Config: `stage1.threshold_strategy`, `stage1.capacity_k`,
   `stage1.capacity_report_points` (`config.yaml`).
 
-### Layer 2 — Clinical-Longformer, note-only (independent note-based estimate)
+### Stage 2 — Clinical-Longformer, note-only (independent note-based estimate)
 
 - Plain `LongformerForSequenceClassification` fine-tuned on discharge notes
   only — **no structured features**. Clinical-Longformer backbone, 4096-token
@@ -67,7 +67,7 @@ See that session log for the full reasoning trail.
   training run.** `models/` never contained fusion weights — every evaluated
   Stage 2 number that exists (`stage2_evaluation.json`, dated 2026-08-01) is
   from the plain note-only model. Decision: drop fusion as a modeling target.
-  Reasons: (1) note-only is the cleaner independence story for Layer 3's
+  Reasons: (1) note-only is the cleaner independence story for Stage 3's
   discordance measure — Stage 1 (~40 structured features) and Stage 2 (note
   text, zero structured features) are unambiguously informationally
   independent, no caveating required; (2) it was never trained, so dropping
@@ -84,9 +84,9 @@ See that session log for the full reasoning trail.
   resumption — the code for it is gone.
 - Produces `stage2_score`. `stage2_confirmed` (a per-age-band threshold
   decision) is still computed and still useful for the N1 ablation's
-  "cascade" arm, but is **not** the final word on a patient — see Layer 3.
+  "cascade" arm, but is **not** the final word on a patient — see Stage 3.
 
-### Layer 3 — MedGemma-27B via HF transformers + lm-format-enforcer (independent auditor)
+### Stage 3 — MedGemma-27B via HF transformers + lm-format-enforcer (independent auditor)
 
 Rewritten 2026-08-25, extended 2026-08-28 (session 18) and 2026-08-28
 (session 19) (`src/stage3/explain.py`, `src/stage3/pipeline.py`,
@@ -185,23 +185,23 @@ sample from a distribution rather than a fixed, checkable quantity.
 
 ### RQ1 and RQ2 — which module answers what
 
-- **RQ1 — does text carry signal at all?** Layer 1 vs. Layer 2, scored
-  independently on the *same* population (not gated by Layer 1's flag) and
+- **RQ1 — does text carry signal at all?** Stage 1 vs. Stage 2, scored
+  independently on the *same* population (not gated by Stage 1's flag) and
   compared head-to-head. `src/stage2/predict.py:predict_stage2_all` produces
-  the population-wide Layer 2 scores this needs;
-  `src/model/compare_layers.py` does the comparison. Neither model feeds the
+  the population-wide Stage 2 scores this needs;
+  `src/model/compare_stages.py` does the comparison. Neither model feeds the
   other here — this is not the cascade.
-- **RQ2 — does the auditor add value over Layer 1 alone?** Layer 3 audits
-  Layer 1's positive predictions using Layer 2's score as evidence.
+- **RQ2 — does the auditor add value over Stage 1 alone?** Stage 3 audits
+  Stage 1's positive predictions using Stage 2's score as evidence.
   `src/stage3/batch.py:run_batch_audit` runs this at scale;
   `src/model/evaluate_pipeline.py` reports the resulting pipeline metrics
-  with Layer 3's decision (not Layer 2's threshold) as the final prediction
+  with Stage 3's decision (not Stage 2's threshold) as the final prediction
   wherever a batch audit covers the admission. The load-bearing comparison
   (colleague review item 1, 2026-08-28) is against a **control arm**:
-  Layer 1 alone, its threshold raised to match the full system's alert
+  Stage 1 alone, its threshold raised to match the full system's alert
   volume exactly (`evaluate_pipeline.py:_control_arm_report`, using
-  `select_threshold_for_capacity`) — not an unconstrained Layer 1. Without
-  this, an apparent precision gain from the cascade could just be Layer 1
+  `select_threshold_for_capacity`) — not an unconstrained Stage 1. Without
+  this, an apparent precision gain from the cascade could just be Stage 1
   flagging fewer admissions, which raising its own threshold would do for
   free. Reported as `report["pipeline"]["control_arm_stage1_matched"]`.
   `run_batch_audit` always audits **every** Stage 1-flagged, note-covered
@@ -287,10 +287,10 @@ All of the below required no model retraining and are already implemented.
 **Session 17 (2026-08-27):** built everything from the session-16 gap audit
 that needed no GPU and no open decision.
 
-- **Population-wide Layer 2 scoring** — `src/stage2/predict.py`. New
+- **Population-wide Stage 2 scoring** — `src/stage2/predict.py`. New
   `predict_stage2_all` (shares a refactored `_score_core`/`_prepare_population`
   pipeline with the existing `predict_stage2`), scores every test-partition
-  admission with a note, not just Layer 1's positives. Output
+  admission with a note, not just Stage 1's positives. Output
   `models/stage2_results_all.csv`. `--all` / `--limit` CLI flags added.
   Required for RQ1 — see §2.5.
   **Bug found while smoke-testing, not fully fixed:** running this module's
@@ -311,19 +311,19 @@ that needed no GPU and no open decision.
   `setup_stage2.py`'s already-working path. Until fixed: never invoke
   `python -m src.stage2.predict` directly on macOS; drive it the way
   `setup_stage2.py` does, or run on Linux/the cluster.
-- **`api.py` stopped gating on Layer 2's threshold.** `list_patients`'s
-  `confirmed_only` default flipped `True`→`False`; docstrings updated. Layer
-  2's score is evidence for Layer 3, not a display gate, per §2.
+- **`api.py` stopped gating on Stage 2's threshold.** `list_patients`'s
+  `confirmed_only` default flipped `True`→`False`; docstrings updated. Stage
+  2's score is evidence for Stage 3, not a display gate, per §2.
   **Follow-up found, not fixed:** the frontend (`frontend/src/api.ts`) has
   its own independent `confirmedOnly = true` default and UI copy built
   around "confirmed" patients (`PatientTable.tsx`, `PipelineDiagram.tsx`) —
   changing the backend default didn't change frontend behaviour. Needs an
   actual frontend change plus a browser check, not a blind edit; not done
   this session.
-- **N1 comparison runner (RQ1)** — new `src/model/compare_layers.py`.
+- **N1 comparison runner (RQ1)** — new `src/model/compare_stages.py`.
   Inner-joins Stage 1's test-partition scores with
   `stage2_results_all.csv` on `hadm_id`, reports both models' AUROC/AUPRC
-  (bootstrap 95% CI, patient-level) and an operating point matched to Layer
+  (bootstrap 95% CI, patient-level) and an operating point matched to Stage
   1's alert volume, plus a paired bootstrap CI on the AUROC difference.
   Output `models/comparison_rq1.json`.
 - **Batch Stage 3 runner (RQ2)** — new `src/stage3/batch.py`. Runs
@@ -337,20 +337,20 @@ that needed no GPU and no open decision.
   needed) plus `run_sensitivity_sweep` / `--sweep` in `src/stage3/batch.py`,
   consuming `stage3_batch_results.csv`. Output
   `models/discordance_sensitivity.json`.
-- **Layer 3's model call generalised** — `call_phi4mini` → `call_llm(prompt,
+- **Stage 3's model call generalised** — `call_phi4mini` → `call_llm(prompt,
   cfg, model_name=None)` in `src/stage3/explain.py`; `explain_patient` gained
   a matching `model_name` passthrough. New `stage3.robustness_model` config
   field (default `null` — a real open decision, not a default to assume; see
   §5). Makes the scale-robustness arm wireable without further code changes
   once a model is chosen.
-- **`evaluate_pipeline.py`'s final prediction now prefers Layer 3's
+- **`evaluate_pipeline.py`'s final prediction now prefers Stage 3's
   decision.** New `_apply_stage3_decisions`: wherever
   `stage3_batch_results.csv` has a decision for an admission, it replaces
   `stage2_confirmed` (+ C9 fallback) as the final prediction; admissions
-  Layer 3 hasn't covered keep the prior C9-corrected value unchanged — this
+  Stage 3 hasn't covered keep the prior C9-corrected value unchanged — this
   only ever narrows the gap to the design, never drops coverage. Report now
   includes a `stage3` block reporting coverage.
-- Tests: `test_compare_layers.py`, `test_stage3_batch.py`,
+- Tests: `test_compare_stages.py`, `test_stage3_batch.py`,
   `test_evaluate_pipeline.py` (new); `test_stage3_explain.py` extended for
   the sweep. 108 passed, 1 skipped; pylint 10.00/10.
 
@@ -449,7 +449,7 @@ session 17.
   corrected age-group oversampling, unplanned target. See `MODEL_CARD.md`.
 - ~~Run `predict_stage2_all` at full scale~~ **Done (session 23)** — real
   population-wide scores exist in `models/stage2_results_all.csv`.
-- ~~Run `compare_layers.py`~~ **Done (session 23)** — first real RQ1
+- ~~Run `compare_stages.py`~~ **Done (session 23)** — first real RQ1
   numbers: Stage 1 AUROC 0.7093 vs. Stage 2 AUROC 0.7101, a null result
   (see `MODEL_CARD.md`). The headline-denominator decision below (notes-
   covered subset as headline) still needs explicit confirmation before this
@@ -481,10 +481,10 @@ session 17.
   across ±10-30pp shows the mode split is meaningfully sensitive to the
   threshold choice (CONCORDANT ranges 27.0%-65.2%), worth discussing as a
   robustness caveat rather than treating ±20pp as uniquely correct.
-- **Wire and run the Layer 3 robustness arm** — blocked on the model-choice
+- **Wire and run the Stage 3 robustness arm** — blocked on the model-choice
   decision below, not on code.
 - **N1 ablation runner** (5+ arms) beyond the two-arm RQ1 comparison
-  `compare_layers.py` already covers — not yet written. The single most
+  `compare_stages.py` already covers — not yet written. The single most
   load-bearing arm, L1-at-matched-capacity, no longer needs a separate
   runner: `evaluate_pipeline.py:_control_arm_report` (session 18,
   2026-08-28) computes it inline as part of every pipeline evaluation.
@@ -521,7 +521,7 @@ session 17.
   clinical-capacity argument behind the existing 0.15 choice (session 15) —
   not changed without new operational evidence.
 
-- **Which model runs Layer 3's robustness arm, and is a cloud API even
+- **Which model runs Stage 3's robustness arm, and is a cloud API even
   permitted on this data?** MIMIC-IV/MIMIC-IV-Note are governed by a
   PhysioNet Data Use Agreement; sending credentialed data to a third-party
   cloud API is very likely restricted without a specific agreement.
@@ -531,15 +531,15 @@ session 17.
   explicitly checked and permits it.
   `stage3.robustness_model` is deliberately left `null` pending this — do
   not set it without checking.
-- **RQ1's headline comparison denominator.** Layer 2 only ever covers
-  admissions with a note (~63% in past runs); Layer 1 covers 100%.
+- **RQ1's headline comparison denominator.** Stage 2 only ever covers
+  admissions with a note (~63% in past runs); Stage 1 covers 100%.
   Recommendation (per the remediation review's denominator-integrity point):
   the headline RQ1 number is both models restricted to the notes-covered
   subset (`stage1_notes_cohort` vs. `stage2_notes_cohort` in
   `comparison_rq1.json`) — the only population both models can be fairly
   compared on — with `stage1_full_population` reported as separate
   deployment context, not blended into the headline claim. Needs explicit
-  confirmation before any number from `compare_layers.py` goes in the thesis
+  confirmation before any number from `compare_stages.py` goes in the thesis
   text as "the" RQ1 result.
 - **Three more open architecture questions raised 2026-08-28, all
   explicitly left for the user to evaluate, not implemented:** whether

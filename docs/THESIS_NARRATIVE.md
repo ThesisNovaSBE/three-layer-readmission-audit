@@ -29,7 +29,7 @@
 > and explaining, with a quoted passage, why.**
 
 **Sanity check verdict:** the idea is sound and clinically resonant — *if* we frame it as an
-**audit layer** (LLM as independent auditor, not as narrator of a decision already made by
+**audit stage** (LLM as independent auditor, not as narrator of a decision already made by
 Stage 2) rather than "LLM predicts readmission too." The known argumentation gaps this
 paragraph originally flagged (why a cascade beats a matched-budget structured-only baseline,
 notes-cohort denominator, clinical utility quantification) are now **answered, not just
@@ -156,7 +156,7 @@ contribute, and do it with small, local, fairness-audited models."*
 > statistically similar one — frailty, social support, discharge planning, palliative
 > intent — is rarely in the structured record at all. It is written in the clinical notes.
 >
-> This thesis proposes and evaluates a three-layer pipeline built around a role no prior
+> This thesis proposes and evaluates a three-stage pipeline built around a role no prior
 > study in a systematic 49-study literature review has used a language model for: auditing
 > another model's output. A structured XGBoost model flags the highest-risk 15% of
 > admissions using MIMIC-IV data (521,191 admissions) — a capacity a hospital can actually

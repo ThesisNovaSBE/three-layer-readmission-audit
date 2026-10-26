@@ -1,5 +1,5 @@
 {
-  "note": "Stage 1 test partition used for all three layers. Stage 2 scores come from stage2_results.csv \u2014 patients in Stage 1's test partition are out-of-sample for Stage 2. 'pipeline.full_cohort' is the primary, deployable number (100% of test admissions; flagged-no-note patients fall back to the Stage 1 flag per the C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes flagged-no-note admissions and must always be reported alongside full_cohort, never alone. The final prediction is Stage 3's uphold/override decision wherever a batch Stage 3 run covers the admission (see 'stage3' below for coverage); Stage 2's threshold is only a fallback where Stage 3 hasn't run yet. 'pipeline.control_arm_stage1_matched' is Stage 1 alone at the same alert volume as the full system \u2014 the single comparison that determines whether the cascade earns its complexity; report it alongside full_cohort every time, never omit it. 'pipeline.conditional_triggering' is a post-hoc analysis (not a different execution mode -- the real batch run always audits every flagged+noted admission) of what discordant-only Stage 3 triggering would have cost/saved; null until a batch Stage 3 run exists.",
+  "note": "Stage 1 test partition used for all three stages. Stage 2 scores come from stage2_results.csv \u2014 patients in Stage 1's test partition are out-of-sample for Stage 2. 'pipeline.full_cohort' is the primary, deployable number (100% of test admissions; flagged-no-note patients fall back to the Stage 1 flag per the C9 fix, session 15 2026-08-25). 'pipeline.notes_cohort' excludes flagged-no-note admissions and must always be reported alongside full_cohort, never alone. The final prediction is Stage 3's uphold/override decision wherever a batch Stage 3 run covers the admission (see 'stage3' below for coverage); Stage 2's threshold is only a fallback where Stage 3 hasn't run yet. 'pipeline.control_arm_stage1_matched' is Stage 1 alone at the same alert volume as the full system \u2014 the single comparison that determines whether the cascade earns its complexity; report it alongside full_cohort every time, never omit it. 'pipeline.conditional_triggering' is a post-hoc analysis (not a different execution mode -- the real batch run always audits every flagged+noted admission) of what discordant-only Stage 3 triggering would have cost/saved; null until a batch Stage 3 run exists.",
   "stage1": {
     "n": 104242,
     "pos_rate": 0.1902592045432743,
@@ -288,6 +288,22 @@
           "fn": 4093,
           "tn": 21321
         }
+      },
+      "precision_ci": {
+        "point_estimate": 0.43291,
+        "ci_lower": 0.416018,
+        "ci_upper": 0.4496015,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_ci": {
+        "point_estimate": 0.18048,
+        "ci_lower": 0.168409,
+        "ci_upper": 0.19327049999999998,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
       }
     },
     "control_arm_stage1_matched": {
@@ -436,6 +452,22 @@
             "fn": 4000,
             "tn": 21192
           }
+        },
+        "precision_ci": {
+          "point_estimate": 0.43689,
+          "ci_lower": 0.42016925,
+          "ci_upper": 0.4568035,
+          "confidence": 0.95,
+          "n_resamples_used": 1000,
+          "n_resamples_requested": 1000
+        },
+        "recall_ci": {
+          "point_estimate": 0.31866,
+          "ci_lower": 0.30057900000000004,
+          "ci_upper": 0.33920025,
+          "confidence": 0.95,
+          "n_resamples_used": 1000,
+          "n_resamples_requested": 1000
         }
       }
     }
