@@ -8,7 +8,7 @@ has ever seen:
   Because Stage 2 was fine-tuned only on Stage 1's *training* partition, any
   patient in Stage 1's test partition is also out-of-sample for Stage 2.
 
-The script reports four evaluation layers:
+The script reports four evaluation blocks:
 
 1. **Stage 1 alone** — AUROC / AUPRC / recall / precision on the test partition.
 2. **Stage 2 alone** — AUROC / recall / precision on the subset of test-partition
@@ -21,12 +21,12 @@ The script reports four evaluation layers:
    with the C9 Stage-1 fallback for note-less admissions. Reports
    pipeline-level precision / recall / F1 / F2.
 4. **Control arm** — Stage 1 alone, thresholded to match the full pipeline's
-   own alert volume (layer 3 above). The load-bearing comparison for RQ2:
+   own alert volume (block 3 above). The load-bearing comparison for RQ2:
    without it there is no answer to whether the cascade + audit caught more
    than simply tightening Stage 1's threshold to the same alert budget would
    have. Always report alongside the full pipeline, never omit.
 
-Per-age-band breakdowns are included for all four layers.
+Per-age-band breakdowns are included for all four blocks.
 
 Also reports ``pipeline.conditional_triggering``: a post-hoc analysis (not a
 different execution mode) of what discordant-only Stage 3 triggering would
@@ -95,7 +95,7 @@ def _add_precision_recall_ci(
 
     Added 2026-09-18: the RQ2 headline comparison (pipeline.full_cohort vs.
     pipeline.control_arm_stage1_matched) previously reported bare point
-    estimates only -- unlike RQ1's compare_layers.py, which correctly uses
+    estimates only -- unlike RQ1's compare_stages.py, which correctly uses
     a paired bootstrap for the AUROC difference. Without this it was
     impossible to tell whether e.g. 0.437 vs 0.431 precision was a real
     difference or noise around two close numbers. Patient-clustered
@@ -208,10 +208,10 @@ def _control_arm_report(
     The load-bearing comparison for RQ2 (colleague review, 2026-08-27):
     without this, there is no answer to "did the cascade + audit add
     anything, or would tightening Stage 1's own threshold to the same alert
-    budget have caught as much?" Distinct from compare_layers.py's matched-
+    budget have caught as much?" Distinct from compare_stages.py's matched-
     capacity operating point, which matches Stage 2 to Stage 1's *pre-audit*
     flag rate for RQ1 -- this matches Stage 1 to the whole system's
-    *post-audit* rate (Layer 3's decision, not Layer 2's threshold) for RQ2.
+    *post-audit* rate (Stage 3's decision, not Stage 2's threshold) for RQ2.
 
     Args:
         y_true:             ground-truth labels for the test partition.
@@ -242,7 +242,7 @@ def _load_test_partition(
     and subject_ids (for patient-clustered bootstrap resampling -- see
     src/model/bootstrap.py; previously discarded here, so the RQ2
     pipeline-vs-control-arm comparison had no CIs at all, unlike RQ1's
-    compare_layers.py which does this correctly).
+    compare_stages.py which does this correctly).
 
     Returns:
         (x_test, y_test, sub_test, hadm_test, groups_test)
@@ -293,7 +293,7 @@ def _eval_stage2(
     flagged = s1_scores >= s1_threshold
     s2_path = model_dir / "stage2_results.csv"
     if not s2_path.exists():
-        print("[pipeline_eval] stage2_results.csv not found — skipping Stage 2 layer.")
+        print("[pipeline_eval] stage2_results.csv not found — skipping Stage 2.")
         return {"available": False}, flagged.astype(int), np.zeros_like(flagged), flagged
 
     s2_all = pd.read_csv(s2_path)
@@ -334,9 +334,9 @@ def _apply_stage3_decisions(
     """Overlay Stage 3's decision onto the final prediction, where available.
 
     Per docs/ARCHITECTURE.md, the pipeline's final prediction should be
-    Layer 3's own uphold/override decision (``decision_model`` — session 19
+    Stage 3's own uphold/override decision (``decision_model`` — session 19
     renamed this from ``decision``), not Stage 2's confirm/reject threshold
-    — Stage 2's score is evidence Layer 3 reasons over, not the final word.
+    — Stage 2's score is evidence Stage 3 reasons over, not the final word.
     Requires a batch Stage 3 run (``src/stage3/batch.py``); where it doesn't
     cover an admission (not flagged, no note, an ``annotation_failed``
     audit, or an explicit ``insufficient_evidence`` verdict), the existing
@@ -553,7 +553,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
 
     report = {
         "note": (
-            "Stage 1 test partition used for all three layers. Stage 2 scores "
+            "Stage 1 test partition used for all three stages. Stage 2 scores "
             "come from stage2_results.csv — patients in Stage 1's test "
             "partition are out-of-sample for Stage 2. 'pipeline.full_cohort' "
             "is the primary, deployable number (100% of test admissions; "

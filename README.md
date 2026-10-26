@@ -2,13 +2,13 @@
 
 > **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md`, `docs/ARCHITECTURE.md`, and the latest file in `sessions/` before starting work.**
 
-A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics). Full design rationale: **`docs/ARCHITECTURE.md`**.
+A three-stage LLM-auditing pipeline for predicting 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics). Full design rationale: **`docs/ARCHITECTURE.md`**.
 
-**Layer 1 — XGBoost (structured screen):** Trained on 521,191 MIMIC-IV structured admissions, flags the top-K% highest-risk admissions (capacity-constrained operating point, default K=15%; recall-floor kept as a secondary comparison table).
+**Stage 1 — XGBoost (structured screen):** Trained on 521,191 MIMIC-IV structured admissions, flags the top-K% highest-risk admissions (capacity-constrained operating point, default K=15%; recall-floor kept as a secondary comparison table).
 
-**Layer 2 — Clinical-Longformer, note-only (independent risk estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads only the discharge note of flagged patients — no structured features — and produces an independent risk estimate, not a gate on Stage 1's flag. (A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.)
+**Stage 2 — Clinical-Longformer, note-only (independent risk estimate):** A fine-tuned `yikuan8/Clinical-Longformer` (4096-token window) reads only the discharge note of flagged patients — no structured features — and produces an independent risk estimate, not a gate on Stage 1's flag. (A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.)
 
-**Layer 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via plain HF `transformers.generate()` + `lm-format-enforcer` for guided/structured JSON decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
+**Stage 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via plain HF `transformers.generate()` + `lm-format-enforcer` for guided/structured JSON decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
 
@@ -16,35 +16,55 @@ A three-layer LLM-auditing pipeline for predicting 30-day hospital readmissions,
 
 ## Architecture Overview
 
-One pipeline, three stages — "Stage" and "Layer" mean the same thing in
-these docs. Everything else below is supporting plumbing, not a fourth step.
+Standard flowchart notation: parallelogram = input, rounded box = a
+model/process, diamond = a computed quantity. Stage 1 and Stage 2 each
+score independently off their own input (RQ1 — neither gates the other);
+Stage 3 is the one place all three connect, auditing on both scores, the
+discordance between them, and the note itself (RQ2).
 
 ```mermaid
-flowchart LR
-    DATA(["MIMIC-IV<br/>data + notes"]):::ext
-    S1(["① Screen<br/>XGBoost"]):::s1
-    S2(["② Independent Read<br/>Clinical-Longformer"]):::s2
-    S3(["③ Audit<br/>MedGemma-27B"]):::s3
-    API(["API<br/>FastAPI"]):::serve
-    FE(["Frontend<br/>React"]):::serve
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Georgia, \"Times New Roman\", serif", "fontSize": "15px", "lineColor": "#475569", "primaryTextColor": "#1e293b"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 60, "curve": "basis"}}}%%
+flowchart TD
+    STRUCT[/"Structured EHR data<br/>~40 features"/]:::input
+    NOTE[/"Discharge notes<br/>MIMIC-IV-Note"/]:::input
 
-    DATA --> S1 --> S2 --> S3 --> API --> FE
+    S1("Stage 1 — Screen<br/>XGBoost<br/>src/model/"):::s1
+    S2("Stage 2 — Independent Read<br/>Clinical-Longformer<br/>src/stage2/"):::s2
 
-    CFG["config.yaml"]:::support -.-> S1 & S2 & S3
-    OPS["SLURM / setup scripts"]:::support -.-> S2 & S3
-    S1 & S2 & S3 -.-> ART["models/ + results/"]:::support
+    DISC{"Discordance<br/>percentile-rank displacement"}:::calc
 
-    classDef ext fill:#f8fafc,stroke:#94a3b8,color:#334155
-    classDef s1 fill:#3b82f6,stroke:#1d4ed8,color:#fff,font-weight:bold
-    classDef s2 fill:#8b5cf6,stroke:#6d28d9,color:#fff,font-weight:bold
-    classDef s3 fill:#10b981,stroke:#047857,color:#fff,font-weight:bold
-    classDef serve fill:#f59e0b,stroke:#b45309,color:#fff
-    classDef support fill:#ffffff,stroke:#cbd5e1,color:#64748b,stroke-dasharray:3 3
+    S3("Stage 3 — Audit<br/>MedGemma-27B<br/>src/stage3/"):::s3
+
+    API("API<br/>api.py (FastAPI)"):::serve
+    RQ1[["RQ1 comparison<br/>compare_stages.py"]]:::eval
+
+    STRUCT ==> S1
+    NOTE ==> S2
+
+    S1 ==> DISC
+    S2 ==> DISC
+    S1 ==> S3
+    S2 ==> S3
+    DISC ==> S3
+    NOTE -.->|note text| S3
+    S3 ==> API
+
+    S1 -.-> RQ1
+    S2 -.-> RQ1
+
+    classDef input fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#1e293b,font-weight:600
+    classDef s1 fill:#2563eb,stroke:#1e3a8a,stroke-width:3px,color:#ffffff,font-weight:700
+    classDef s2 fill:#7c3aed,stroke:#4c1d95,stroke-width:3px,color:#ffffff,font-weight:700
+    classDef s3 fill:#059669,stroke:#064e3b,stroke-width:3px,color:#ffffff,font-weight:700
+    classDef calc fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#7c2d12,font-weight:600
+    classDef serve fill:#f59e0b,stroke:#92400e,stroke-width:2px,color:#1e293b,font-weight:700
+    classDef eval fill:#ffffff,stroke:#94a3b8,stroke-width:1px,color:#475569,font-style:italic
 ```
 
-The frontend box reflects the target, not current reality — the real
-`frontend/` code is still stale (pre-retrain numbers, old model name, old
-cascade-gating copy) and due for a rebuild.
+Config (`config.yaml`), training infra (SLURM scripts), and artifacts
+(`models/`, `results/`) are omitted from the diagram on purpose — they
+thread through every box above rather than forming their own step, and
+drawing them in is what caused the earlier overlapping-arrow clutter.
 
 ---
 
@@ -97,11 +117,11 @@ population (neither model gates the other): Stage 1 AUROC 0.7093 vs.
 Stage 2 AUROC 0.7101, diff +0.0008 [-0.0041, +0.0054]. **Null result** —
 expected and reportable per this project's own design docs, not a failure.
 
-### RQ2 — Does the LLM auditor add value over Layer 1 alone?
+### RQ2 — Does the LLM auditor add value over Stage 1 alone?
 
 Full batch run, all 9,899 flagged+noted admissions audited by Stage 3.
 **At matched alert volume, Stage 1 alone (control arm) beats the full
-three-layer cascade** on both precision (0.450 vs. 0.435) and recall
+three-stage cascade** on both precision (0.450 vs. 0.435) and recall
 (0.316 vs. 0.295, 95% CIs essentially non-overlapping) — applying the
 auditor to every flagged admission is net harmful, not neutral. A post-hoc
 conditional-triggering analysis (Stage 3 only on cases where Stage 1 and

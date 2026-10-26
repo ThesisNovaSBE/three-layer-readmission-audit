@@ -24,7 +24,7 @@
 - **Stage 2:** Fine-tuned Clinical-Longformer (`yikuan8/Clinical-Longformer`), note-only (no structured features) — 4096-token context (raised from 2048 on 2026-08-25), trained on real MIMIC-IV-Note discharge summaries; produces an independent, note-based risk estimate, not a gate on Stage 1's flag. A jointly-trained structured+note "FusionLongformer" variant was built and dropped on 2026-08-26 without ever completing a training run — see `docs/ARCHITECTURE.md` §2.
 - **Stage 3:** Independent LLM audit via HF `transformers.generate()` + `lm-format-enforcer` (`google/medgemma-27b-text-it`, temperature=0, switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 after KISSKI's CUDA 12.8 driver ceiling proved incompatible with vLLM's kernel stack) — reaches its own uphold/override decision rather than explaining a decision Stage 2 already made
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
-- **Model type:** Three-layer LLM-auditing classification pipeline
+- **Model type:** Three-stage LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
 
 ## Intended Use
@@ -130,7 +130,7 @@ remain, worth digging into further for the fairness discussion.
 
 ### RQ1 — Does the note text add signal beyond structured data?
 
-`compare_layers.py` scores Stage 1 and Stage 2 **independently, on the
+`compare_stages.py` scores Stage 1 and Stage 2 **independently, on the
 identical 62,759-admission notes-covered population** (neither model gates
 or feeds the other) — the fair, apples-to-apples comparison this project's
 own docs call for:
@@ -164,7 +164,7 @@ resamples).
 | Conditional triggering (discordant-only, post-hoc; 5,131/9,793 LLM calls, 4,662 saved) | precision=0.437, recall=0.319 (no CI computed yet) |
 
 **Headline RQ2 result: at matched alert volume, Stage 1 alone (the control
-arm) beats the full three-layer cascade on both precision and recall.**
+arm) beats the full three-stage cascade on both precision and recall.**
 The precision CIs overlap substantially, but recall looks like a real gap
 — the control arm's lower bound (0.298) sits above the full pipeline's own
 point estimate (0.295). Applying Stage 3 to every flagged admission is net

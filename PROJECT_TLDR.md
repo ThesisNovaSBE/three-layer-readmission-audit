@@ -1,6 +1,6 @@
 This is the single source of truth for project context. LLMs and teammates should read this file first before doing any work. Then read `docs/ARCHITECTURE.md` for the current pipeline design, then the most recent file in `sessions/` to see current state.
 
-# LLM-Augmented Hospital Readmission Prediction — A Three-Layer Auditing Pipeline
+# LLM-Augmented Hospital Readmission Prediction — A Three-Stage Auditing Pipeline
 
 **Program:** M.Sc. Business Analytics, Nova SBE
 **Advisor:** Prof. Yufei Shen
@@ -8,7 +8,7 @@ This is the single source of truth for project context. LLMs and teammates shoul
 
 ## Goal
 
-Predict 30-day hospital readmission using a three-layer pipeline:
+Predict 30-day hospital readmission using a three-stage pipeline:
 
 1. A classical ML model flags high-risk patients from **structured** MIMIC-IV data at a deployable, capacity-constrained operating point.
 2. A fine-tuned clinical language model reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate.
@@ -62,7 +62,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 
 - 1 person: literature review
 - 2 people: core coding (data pipeline + models)
-- 1 person (joining later): evaluation, explanation layer, integration
+- 1 person (joining later): evaluation, explanation component, integration
 
 ## Running Stage 1 (works without MIMIC, on synthetic data)
 
