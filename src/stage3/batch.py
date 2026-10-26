@@ -23,7 +23,7 @@ produce on its own:
   over Stage 1 alone) — needs a decision for every flagged+noted admission,
   not one at a time.
 - ``evaluate_pipeline.py``'s final-prediction column, which per
-  docs/ARCHITECTURE.md should be Layer 3's decision, not Stage 2's
+  docs/ARCHITECTURE.md should be Stage 3's decision, not Stage 2's
   threshold, once this file exists.
 
 Also runs the discordance-threshold sensitivity sweep (``--sweep``) over an
