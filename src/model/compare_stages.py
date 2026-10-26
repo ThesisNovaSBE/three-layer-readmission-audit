@@ -1,9 +1,9 @@
-"""RQ1: Structured (Layer 1) vs. notes-only (Layer 2), head-to-head.
+"""RQ1: Structured (Stage 1) vs. notes-only (Stage 2), head-to-head.
 
 Answers "does narrative text carry signal structured data doesn't" by
 scoring both models on the *same* population and comparing directly —
 neither model gates or feeds the other here (that's the separate cascade
-story in ``evaluate_pipeline.py`` / Layer 3).
+story in ``evaluate_pipeline.py`` / Stage 3).
 
 Stage 2 only ever covers admissions with a discharge note (~63% of Stage 1's
 test partition in past runs), so the only population both models can be
@@ -20,7 +20,7 @@ run ``python -m src.stage2.predict --all`` first; see src/stage2/predict.py).
 
 Usage::
 
-    python -m src.model.compare_layers
+    python -m src.model.compare_stages
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def _paired_auroc_diff_ci(
     }
 
 
-def compare_layers(cfg: AppConfig) -> dict:
+def compare_stages(cfg: AppConfig) -> dict:
     """Compare Stage 1 (structured) against Stage 2 (notes-only) on the same population.
 
     Loads Stage 1's test-partition scores and Stage 2's population-wide
@@ -134,7 +134,7 @@ def compare_layers(cfg: AppConfig) -> dict:
 
     joined = stage1_df.merge(stage2_df, on="hadm_id", how="inner")
     coverage = len(joined) / max(len(stage1_df), 1)
-    print(f"[compare_layers] Joined (notes-covered) population: {len(joined):,} / "
+    print(f"[compare_stages] Joined (notes-covered) population: {len(joined):,} / "
           f"{len(stage1_df):,} Stage 1 test admissions ({coverage:.1%} note coverage)")
 
     y = joined["readmission_30d_unplanned"].to_numpy()
@@ -176,9 +176,9 @@ def compare_layers(cfg: AppConfig) -> dict:
 
     out_path = model_dir / "comparison_rq1.json"
     out_path.write_text(json.dumps(report, indent=2))
-    print(f"[compare_layers] Saved -> {out_path}")
+    print(f"[compare_stages] Saved -> {out_path}")
     print(
-        f"[compare_layers] Stage 1 AUROC={stage1_notes_cohort['auroc']['point_estimate']:.4f}  "
+        f"[compare_stages] Stage 1 AUROC={stage1_notes_cohort['auroc']['point_estimate']:.4f}  "
         f"Stage 2 AUROC={stage2_notes_cohort['auroc']['point_estimate']:.4f}  "
         f"diff={auroc_diff['point_estimate']:+.4f} "
         f"[{auroc_diff['ci_lower']:+.4f}, {auroc_diff['ci_upper']:+.4f}]"
@@ -189,7 +189,7 @@ def compare_layers(cfg: AppConfig) -> dict:
 def main() -> None:
     """CLI entry point for the RQ1 comparison."""
     cfg = load_config()
-    compare_layers(cfg)
+    compare_stages(cfg)
 
 
 if __name__ == "__main__":

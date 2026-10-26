@@ -3,7 +3,7 @@
 Two modes, sharing the same scoring pipeline:
 
 - ``predict_stage2`` — Stage 1-flagged admissions only (``stage1_score >=
-  threshold``). This is the cascade population: Layer 3's audit workload.
+  threshold``). This is the cascade population: Stage 3's audit workload.
   Output: ``models/stage2_results.csv``.
 - ``predict_stage2_all`` — every test-partition admission with a note,
   independent of Stage 1's flag. This is required for RQ1 (does text carry

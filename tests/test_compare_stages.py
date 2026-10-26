@@ -1,7 +1,7 @@
 """Tests for the RQ1 comparison's join/alignment and paired-diff logic.
 
 Pure logic tests against small synthetic DataFrames — no real model or data
-needed. ``compare_layers()`` itself (the full pipeline) is not covered here
+needed. ``compare_stages()`` itself (the full pipeline) is not covered here
 since it requires a trained Stage 1 artifact and stage2_results_all.csv.
 """
 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.model.compare_layers import _metrics_block, _paired_auroc_diff_ci
+from src.model.compare_stages import _metrics_block, _paired_auroc_diff_ci
 
 
 @pytest.fixture

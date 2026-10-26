@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Callable
 
 import numpy as np
+import pandas as pd
 
 
 def bootstrap_ci(
@@ -56,18 +57,31 @@ def bootstrap_ci(
 
     point_estimate = float(metric_fn(y_true, y_score))
 
+    # Precompute each group's row positions ONCE via pandas' Cython groupby
+    # (O(n log n) total), not per resample. The previous version called
+    # np.where(group_of == g) once per SAMPLED group PER resample --
+    # O(n_unique_groups * n) work, repeated n_resamples times -- which at
+    # tens of thousands of unique patients and n_resamples=1000 made this
+    # function impractically slow in practice (confirmed: a real
+    # evaluate_pipeline.py run needing 4 bootstrap_ci calls at ~100k-row
+    # scale ran 39+ minutes without finishing). A dict lookup replaces the
+    # per-resample scan; the sequence of resamples drawn from ``rng`` is
+    # unchanged, so results are numerically identical, just much faster.
     if groups is None:
         unique_groups = np.arange(len(y_true))
-        group_of = unique_groups
+        group_indices: dict | None = None
     else:
         groups = np.asarray(groups)
         unique_groups = np.unique(groups)
-        group_of = groups
+        group_indices = pd.Series(groups).groupby(groups).indices
 
     values: list[float] = []
     for _ in range(n_resamples):
-        sampled = rng.choice(unique_groups, size=len(unique_groups), replace=True)
-        idx = np.concatenate([np.where(group_of == g)[0] for g in sampled])
+        if group_indices is None:
+            idx = rng.choice(len(y_true), size=len(y_true), replace=True)
+        else:
+            sampled = rng.choice(unique_groups, size=len(unique_groups), replace=True)
+            idx = np.concatenate([group_indices[g] for g in sampled])
         try:
             values.append(float(metric_fn(y_true[idx], y_score[idx])))
         except ValueError:

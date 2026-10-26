@@ -1,0 +1,84 @@
+{
+  "n_test": 104242,
+  "n_notes_covered": 62759,
+  "n_notes_excluded": 41483,
+  "notes_coverage_rate": 0.6020509967191727,
+  "outcome_rate_covered": 0.19845759173983013,
+  "outcome_rate_excluded": 0.17785598920039533,
+  "outcome_smd": 0.05272924499454275,
+  "baseline_characteristics": [
+    {
+      "feature": "age",
+      "covered_mean": 59.70381937252028,
+      "excluded_mean": 52.14502326254128,
+      "smd": 0.4018697986748236
+    },
+    {
+      "feature": "gender_M",
+      "covered_mean": 0.48593827180165394,
+      "excluded_mean": 0.4636357061928983,
+      "smd": 0.04467264323121036
+    },
+    {
+      "feature": "los_days",
+      "covered_mean": 5.2979354444072655,
+      "excluded_mean": 3.497879435886722,
+      "smd": 0.2698971744838049
+    },
+    {
+      "feature": "charlson_index",
+      "covered_mean": 2.2436463296100957,
+      "excluded_mean": 1.427355784297182,
+      "smd": 0.3724645170711301
+    },
+    {
+      "feature": "n_comorbidities",
+      "covered_mean": 1.4666741025191605,
+      "excluded_mean": 0.9416869561024999,
+      "smd": 0.40473369698591904
+    },
+    {
+      "feature": "n_prior_admissions",
+      "covered_mean": 3.012093882949059,
+      "excluded_mean": 3.8907745341465176,
+      "smd": -0.08992317218950592
+    },
+    {
+      "feature": "n_prior_ed_visits",
+      "covered_mean": 2.254162749565799,
+      "excluded_mean": 3.2496444326591614,
+      "smd": -0.10548517040413201
+    },
+    {
+      "feature": "days_since_last_discharge",
+      "covered_mean": 303.0230696906523,
+      "excluded_mean": 487.13174186344776,
+      "smd": -0.2716781507994574
+    },
+    {
+      "feature": "admission_type_emergency",
+      "covered_mean": 0.4980958906292325,
+      "excluded_mean": 0.17501145047368802,
+      "smd": 0.7275622223935863
+    },
+    {
+      "feature": "discharged_to_facility",
+      "covered_mean": 0.188769738204879,
+      "excluded_mean": 0.06867873586770484,
+      "smd": 0.36449693617075424
+    },
+    {
+      "feature": "came_via_ed",
+      "covered_mean": 0.7138259054478242,
+      "excluded_mean": 0.7185594098787456,
+      "smd": -0.010499235660582633
+    },
+    {
+      "feature": "is_medicaid_medicare",
+      "covered_mean": 0.6547746139995857,
+      "excluded_mean": 0.607453655714389,
+      "smd": 0.09819106834693841
+    }
+  ],
+  "note": "SMD (standardized mean difference, pooled SD) >= 0.1 in absolute value is the conventional threshold for a meaningfully imbalanced covariate (Austin 2009). Computed on Stage 1's test partition (n matches evaluate.py/evaluate_pipeline.py exactly), split by has_discharge_note (src/data/features.py), which is computed directly against the real MIMIC-IV-Note file at feature-build time -- not inferred from a downstream results CSV."
+}
