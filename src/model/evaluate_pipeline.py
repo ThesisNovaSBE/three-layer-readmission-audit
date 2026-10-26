@@ -398,6 +398,7 @@ def _conditional_triggering_report(
     flagged: np.ndarray,
     y_test: np.ndarray,
     sub_test: pd.DataFrame,
+    groups: np.ndarray | None = None,
 ) -> dict | None:
     """Report what the pipeline would look like under conditional (discordant-
     only) Stage 3 triggering — computed post-hoc from a completed BLANKET
@@ -412,6 +413,13 @@ def _conditional_triggering_report(
     resulting metric delta vs. the real (blanket) pipeline, alongside the
     LLM-call count saved, is the cost/benefit trade-off conditional
     triggering would have bought.
+
+    Args:
+        groups: optional subject_id array -- see ``_pipeline_report``'s
+                ``groups`` docstring. Passed through so this arm gets the
+                same patient-clustered bootstrap CIs as ``full_cohort`` and
+                ``control_arm_stage1_matched``, instead of bare point
+                estimates only.
 
     Returns:
         None if no batch Stage 3 result exists yet. Otherwise a dict with
@@ -455,7 +463,7 @@ def _conditional_triggering_report(
         "blanket_llm_calls": int(has_s3.sum()),
         "conditional_llm_calls": int(covered_discordant.sum()),
         "llm_calls_saved": int(covered_concordant.sum()),
-        "report": _pipeline_report(y_test, conditional_pred, sub_test),
+        "report": _pipeline_report(y_test, conditional_pred, sub_test, groups=groups),
     }
 
 
@@ -517,7 +525,8 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     notes_mask = (~flagged) | has_s2
     sub_notes = sub_test[notes_mask].reset_index(drop=True)
     notes_report = _pipeline_report(
-        y_test[notes_mask], pipeline_pred_full[notes_mask], sub_notes
+        y_test[notes_mask], pipeline_pred_full[notes_mask], sub_notes,
+        groups=groups_test[notes_mask],
     )
     print(f"[pipeline_eval] Pipeline, notes cohort only (n={notes_report['n']:,}, "
           f"excludes {int((~notes_mask).sum()):,} flagged-no-note admissions): "
@@ -541,7 +550,8 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     # only Stage 3 triggering would have cost/saved, computed from the real
     # blanket run -- does not change how the blanket run itself was targeted.
     conditional_report = _conditional_triggering_report(
-        model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test
+        model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test,
+        groups=groups_test,
     )
     if conditional_report is not None:
         cr = conditional_report["report"]
