@@ -344,6 +344,44 @@ real scheduled returns the structured proxy misses), so this is reported
 as an open, unresolved discrepancy between the two signals, not evidence
 that either one is simply wrong.
 
+### Is Stage 3 actually using its inputs? Three validation controls (2026-10-30)
+
+Session 19 built three diagnostic controls to test whether the auditor
+genuinely relies on the evidence it is given, rather than ignoring part
+of it. They had never been run against the real model until
+`scripts/run_validation_controls.py` executed all three on KISSKI
+(`models/stage3_validation_controls_summary.json`).
+
+**Blind-note control (n=150):** withholds the discharge note entirely.
+The auditor returned `insufficient_evidence` on **150 of 150**
+admissions. On the same 150 admissions with the note present, the real
+run never used `insufficient_evidence` once (104 uphold, 46 override).
+Raw agreement with the real decision is 0%, and that is the intended
+result, not a failure: the auditor does not guess uphold or override
+when it has nothing to read. It consistently recognizes the absence of
+evidence and says so. This is the strongest available evidence that
+Stage 3's real decisions are grounded in the note itself.
+
+**No-Stage-2 control (n=40):** withholds Stage 2's score and the
+discordance signal, note still present. Agreement with the real
+decision is 82.5%; removing Stage 2's evidence flips the decision on 7
+of 40 admissions, shifting toward more upholds (27→30 uphold, 13→10
+override). Stage 2's score measurably influences the audit without
+dominating it.
+
+**Self-agreement control (n=30):** runs the identical patient through
+Stage 3 twice. Agreement is 100% on both `decision_model` and
+`decision_rule` across all 30 admissions. `temperature=0` delivers a
+fixed, reproducible decision in practice, not just in principle, which
+the full RQ2 result (a single run across 9,899 admissions) depends on.
+
+**Taken together**, the net-harmful RQ2 finding is not an artifact of a
+broken or inattentive auditor. Stage 3 demonstrably reads the note,
+demonstrably uses Stage 2's evidence, and is demonstrably reproducible,
+and it still underperforms Stage 1 alone at matched alert volume. That
+is a materially stronger claim than an unvalidated negative result would
+have been.
+
 ## Limitations
 
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)
