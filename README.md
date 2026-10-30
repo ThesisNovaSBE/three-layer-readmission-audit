@@ -137,9 +137,13 @@ discordance signal between the two, and the discharge note itself. It
 then reaches its own uphold or override decision with a written
 justification, rather than narrating a decision Stage 2 already made.
 
-A separate robustness check is in progress: does the auditor actually
-read the note, and does withholding Stage 2's score change its reasoning?
-See `docs/ARCHITECTURE.md` §3 for status.
+A separate robustness check shows the auditor actually uses these
+inputs. With the note withheld, it answered `insufficient_evidence` on
+150 of 150 test admissions, versus 0 of 150 in the real run. Withholding
+Stage 2's score instead changed the decision on 7 of 40 admissions.
+Running the same patient twice gave an identical decision 30 of 30
+times. See `docs/ARCHITECTURE.md` §3 and `MODEL_CARD.md` for the full
+results.
 
 ### Does the Auditor Add Value? (RQ2)
 
