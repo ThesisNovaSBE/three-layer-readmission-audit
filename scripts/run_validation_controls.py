@@ -74,7 +74,7 @@ def _run_single_control(
     done = _already_done(out_path)
     pending = [h for h in hadm_ids if h not in done]
     print(f"[validation_controls] {name}: {len(hadm_ids)} target, "
-          f"{len(done)} already done, {len(pending)} pending")
+          f"{len(done)} already done, {len(pending)} pending", flush=True)
     if not pending:
         return
 
@@ -94,7 +94,7 @@ def _run_single_control(
                 row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
                 row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                print(f"[validation_controls] {name} hadm_id={hadm_id} FAILED: {exc}")
+                print(f"[validation_controls] {name} hadm_id={hadm_id} FAILED: {exc}", flush=True)
                 row = {
                     "hadm_id": hadm_id, "decision_model": None, "decision_rule": None,
                     "all_quotes_verified": None, "mitigating_grounds": "[]",
@@ -105,7 +105,7 @@ def _run_single_control(
             writer.writerow({k: row[k] for k in _FIELDS})
             fh.flush()
             if i % 10 == 0 or i == len(pending):
-                print(f"[validation_controls] {name} [{i}/{len(pending)}]")
+                print(f"[validation_controls] {name} [{i}/{len(pending)}]", flush=True)
 
 
 def _agreement_report(real: pd.DataFrame, control: pd.DataFrame, label: str) -> dict:
@@ -145,7 +145,7 @@ def main() -> None:
 
     batch_df = pd.read_csv(model_dir / "stage3_batch_results.csv")
     sample = _select_sample(batch_df, args.n, args.seed)
-    print(f"[validation_controls] Sample size: {len(sample)} (requested {args.n})")
+    print(f"[validation_controls] Sample size: {len(sample)} (requested {args.n})", flush=True)
 
     report: dict = {"n_sample": len(sample), "sample_hadm_ids": sample}
 
@@ -159,7 +159,7 @@ def main() -> None:
         control_df = pd.read_csv(out)
         report["d1_blind_note"] = _agreement_report(batch_df, control_df, "blind_note")
         print(f"[validation_controls] D1 agreement vs real: "
-              f"{report['d1_blind_note']['decision_model_agreement_vs_real']:.1%}")
+              f"{report['d1_blind_note']['decision_model_agreement_vs_real']:.1%}", flush=True)
 
     if "d2" in controls:
         out = model_dir / "stage3_control_no_stage2.csv"
@@ -171,7 +171,7 @@ def main() -> None:
         control_df = pd.read_csv(out)
         report["d2_no_stage2"] = _agreement_report(batch_df, control_df, "no_stage2")
         print(f"[validation_controls] D2 agreement vs real: "
-              f"{report['d2_no_stage2']['decision_model_agreement_vs_real']:.1%}")
+              f"{report['d2_no_stage2']['decision_model_agreement_vs_real']:.1%}", flush=True)
 
     if "d3" in controls:
         out_a = model_dir / "stage3_control_self_agreement_run1.csv"
@@ -196,11 +196,11 @@ def main() -> None:
             ),
         }
         print(f"[validation_controls] D3 self-agreement (decision_model): "
-              f"{report['d3_self_agreement']['decision_model_agreement']:.1%}")
+              f"{report['d3_self_agreement']['decision_model_agreement']:.1%}", flush=True)
 
     out_path = model_dir / "stage3_validation_controls_summary.json"
     out_path.write_text(json.dumps(report, indent=2))
-    print(f"\n[validation_controls] Saved summary -> {out_path}")
+    print(f"\n[validation_controls] Saved summary -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":

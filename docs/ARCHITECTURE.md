@@ -1,6 +1,6 @@
 # Architecture — Current State
 
-**Last updated:** 2026-10-27 (session 32; §3 carries the most recent
+**Last updated:** 2026-10-30 (session 34; §3 carries the most recent
 content). This is the single current source of
 truth for the pipeline design. It supersedes `docs/archive/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/archive/SANITY_CHECK_2026-07-06.md` — the
@@ -480,15 +480,63 @@ internally consistent and match every number already committed in
   written** (cancelled, not a crash: `nvidia-smi` showed 100% GPU
   utilization throughout, so it was genuinely computing, not hung/idle —
   model loading itself took only 95 seconds per the job's own log).
-  Leading hypothesis, not yet confirmed: this is the first time
-  `suppress_note=True` has ever been exercised against the real model,
-  and the schema-constrained decoder may behave pathologically when
-  asked to extract quotes from a note that says "not available." An
-  isolated single-patient timing test (normal vs. no-Stage-2 vs.
-  blind-note, each timed separately) was handed off to isolate which
-  path is actually slow — **outcome not yet known as of this writing.**
-  Do not resubmit the full n=150 run until that's resolved, or it will
-  likely burn another several hundred core-hours for no output.
+  ~~Leading hypothesis, not yet confirmed: the schema-constrained
+  decoder may behave pathologically when asked to extract quotes from a
+  note that says "not available."~~ **Wrong — see session 34. The job
+  was never stuck; it completed successfully. A logging bug made it
+  look stuck.**
+
+**Session 34 (2026-10-30):** resolved the D1/D2/D3 validation controls
+end to end, after two more rounds of cluster troubleshooting.
+
+- **The "4-hour stall" from session 31 was never a stall.** An isolated,
+  single-patient timing test (job 16947546) ran all three conditions
+  cleanly: NORMAL=212.1s (includes a one-time ~87s model load),
+  D2 no-Stage-2=109.4s, D1 blind-note=69.5s — blind-note was the
+  *fastest* of the three and correctly returned `insufficient_evidence`.
+  Scaled the real run down to `--n 30` out of caution
+  (`scripts/slurm_stage3_validation.sh`) and resubmitted (job 16948923).
+  That job's log showed `D1 blind-note: 30 target, 150 already done, 0
+  pending` — the original, supposedly-stuck job 16873264 had in fact
+  completed all 150 D1 patients and 40 D2 patients before being
+  cancelled. **Root cause: `scripts/run_validation_controls.py`'s
+  progress `print()` calls had no explicit `flush`.** Redirected to a
+  SLURM log file (not a terminal), Python block-buffers stdout; the
+  per-patient `[i/n]` checkpoints were sitting in that buffer, never
+  written to disk, when `scancel` killed the process without a clean
+  exit. The CSV data itself was never at risk (the CSV writer was
+  flushed explicitly after every row) — only the human-readable log was
+  invisible. Fixed: `flush=True` added to every `print()` call in that
+  script. 607.5 core-hours were not wasted; they produced 150 real D1
+  rows and 40 real D2 rows that job 16948923 then reused instead of
+  recomputing.
+- **Real D1/D2/D3 results** (`models/stage3_validation_controls_summary.json`):
+  - **D1 blind-note (n=150): 0% decision agreement with the real run,
+    and that is the best possible outcome, not a red flag.** Every
+    single one of the 150 blind-note responses was
+    `insufficient_evidence`; the real run (same patients, note present)
+    never used `insufficient_evidence` at all (104 uphold, 46 override).
+    The auditor does not guess uphold/override when it has nothing to
+    read — it reliably recognizes that and says so. This is the
+    strongest available evidence that Stage 3's real decisions are
+    actually grounded in the note, not just the two numeric scores.
+  - **D2 no-Stage-2 (n=40): 82.5% agreement.** Removing Stage 2's score
+    and the discordance signal flips the decision on 7 of 40 patients,
+    shifting toward more uphold calls when Stage 2 is hidden (27→30
+    uphold, 13→10 override). Stage 2's evidence earns its place in the
+    prompt to a real, moderate degree without dominating it.
+  - **D3 self-agreement (n=30): 100% agreement** on both
+    `decision_model` and `decision_rule` across two independent runs of
+    every patient. `temperature=0` delivers exactly what it was pinned
+    for — a fixed, reproducible decision, not a sample from a
+    distribution. Verifies, rather than just assumes, the premise the
+    entire RQ2 design rests on.
+  - **Taken together: the net-harmful RQ2 finding is not an artifact of
+    a broken or inattentive auditor.** Stage 3 demonstrably reads the
+    note, demonstrably uses Stage 2's evidence, and is demonstrably
+    reproducible — and still underperforms Stage 1 alone. That is a
+    materially stronger, more defensible claim than an unvalidated
+    negative result would have been.
 
 ---
 
