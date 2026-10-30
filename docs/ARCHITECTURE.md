@@ -1,8 +1,7 @@
 # Architecture — Current State
 
-**Last updated:** 2026-09-13 (session 23; §4-§6 carry the most recent
-content — this banner previously understated how current the body was).
-This is the single current source of
+**Last updated:** 2026-10-27 (session 32; §3 carries the most recent
+content). This is the single current source of
 truth for the pipeline design. It supersedes `docs/archive/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/archive/SANITY_CHECK_2026-07-06.md` — the
 archived two are kept for history (each has a banner pointing here) but
@@ -434,6 +433,63 @@ triggering post-hoc; keep K=0.15 primary) — see §5.
   functions. 143 passed, 1 skipped; pylint 10.00/10; frontend `tsc --noEmit`
   clean.
 
+**Session 31 (2026-10-26):** closed out every open §4 item that needed no
+GPU/cluster time — pure local analysis on the already-committed Stage
+1/2/3 result files, after a freshness audit confirmed those files are
+internally consistent and match every number already committed in
+`MODEL_CARD.md`.
+
+- **Selection-bias table built** (`scripts/analyze_selection_bias.py`,
+  new) — see §4, now resolved.
+- **`planned_return` cross-check built** (`scripts/
+  analyze_planned_return_crosscheck.py`, new) — see §6, now resolved.
+  **Not the same thing as the human-annotator validation plan in
+  `docs/STAGE3_VALIDATION.md`** — that's a separate, not-yet-executed
+  Cohen's-kappa protocol against an independent clinical annotator; this
+  is a code-only cross-check against the structured label.
+- **Real performance bug found and fixed in `src/model/bootstrap.py`,
+  not something gone looking for — it blocked the next item.**
+  `bootstrap_ci`'s resampling loop called `np.where(group_of == g)` once
+  per *sampled patient*, per resample — O(n_unique_patients × n_rows)
+  work repeated `n_resamples` times. At this project's real scale (tens
+  of thousands of unique patients, 1000 resamples), re-running
+  `evaluate_pipeline.py` to add the two missing CIs below ran 39+ minutes
+  without finishing. Fixed by precomputing each patient's row positions
+  once via `pandas`' Cython groupby before the resample loop, then doing
+  O(1) dict lookups inside it — **verified bit-for-bit identical output**
+  against the old algorithm on a controlled case, then benchmarked at
+  realistic scale: 24 seconds instead of 39+ unfinished minutes. Speeds
+  up every bootstrap CI in the codebase, not just the two below.
+- **Bootstrap CIs for `notes_cohort` and `conditional_triggering`** — the
+  infra already existed and was already wired into `full_cohort`/
+  `control_arm_stage1_matched` (two `groups=` pass-throughs were
+  missing). Reran the full evaluation post-fix and confirmed every
+  already-reported number (`full_cohort`, `control_arm`) is
+  byte-identical to the pre-fix run — pure speed + coverage addition, no
+  change to any previously-reported result.
+- **D1/D2/D3 validation-control CLI entry point built**
+  (`scripts/run_validation_controls.py` + `scripts/
+  slurm_stage3_validation.sh`, new). Session 19's `run_blind_note_control`
+  / `run_no_stage2_control` / `check_self_agreement` (`src/stage3/
+  batch.py`) existed as callable functions but were never wired to an
+  actual entry point or run against the real model — this is that entry
+  point, on a sample (default n=150), writing incrementally and
+  resumable like the main batch run. **Submitted to KISSKI
+  (job 16873264) but the D1 blind-note control ran ~4 hours on a single
+  patient without completing — 607.5 core-hours spent, zero patients
+  written** (cancelled, not a crash: `nvidia-smi` showed 100% GPU
+  utilization throughout, so it was genuinely computing, not hung/idle —
+  model loading itself took only 95 seconds per the job's own log).
+  Leading hypothesis, not yet confirmed: this is the first time
+  `suppress_note=True` has ever been exercised against the real model,
+  and the schema-constrained decoder may behave pathologically when
+  asked to extract quotes from a note that says "not available." An
+  isolated single-patient timing test (normal vs. no-Stage-2 vs.
+  blind-note, each timed separately) was handed off to isolate which
+  path is actually slow — **outcome not yet known as of this writing.**
+  Do not resubmit the full n=150 run until that's resolved, or it will
+  likely burn another several hundred core-hours for no output.
+
 ---
 
 ## 4. What is explicitly deferred (not done yet)
@@ -488,17 +544,27 @@ session 17.
   load-bearing arm, L1-at-matched-capacity, no longer needs a separate
   runner: `evaluate_pipeline.py:_control_arm_report` (session 18,
   2026-08-28) computes it inline as part of every pipeline evaluation.
-- ~~Bootstrap CIs not yet in `evaluate_pipeline.py`~~ **Done** —
-  `_add_precision_recall_ci` (patient-clustered, 1000 resamples) now
-  covers `full_cohort` and `control_arm_stage1_matched`. Still missing for
-  `notes_cohort` and the `conditional_triggering` arm.
+- ~~Bootstrap CIs not yet in `evaluate_pipeline.py`~~ **Done (2026-10-26,
+  session 31)** — `_add_precision_recall_ci` (patient-clustered, 1000
+  resamples) now covers all four pipeline arms, including `notes_cohort`
+  (precision=0.433 [0.416, 0.450], recall=0.180 [0.168, 0.193]) and
+  `conditional_triggering` (precision=0.437 [0.420, 0.457],
+  recall=0.319 [0.301, 0.339]) — fixing a real resampling-performance bug
+  in `bootstrap.py` along the way (see §3, session 31).
 - Feature audit (vitals missingness, lab itemid validation against
   `d_labitems`) — not touched.
-- **Included-vs-excluded (notes-covered vs. not) selection-bias table** —
-  no such baseline-characteristics comparison exists anywhere in the repo
-  (identified 2026-08-28, session 19). Needed to disclose whether the ~63%
-  notes-covered cohort RQ1/RQ2 are evaluated on differs systematically from
-  the ~37% without notes.
+- ~~Included-vs-excluded (notes-covered vs. not) selection-bias table~~
+  **Done (2026-10-26, session 31)** — `scripts/analyze_selection_bias.py`.
+  Real result: the notes-covered subset of Stage 1's test partition
+  (60.2%, n=62,759) is clinically distinct from the excluded 39.8%
+  (n=41,483) — older (59.7 vs. 52.1), sicker (Charlson 2.24 vs. 1.43),
+  far more often an emergency admission (SMD=0.73, the largest gap by a
+  wide margin), more often discharged to a facility — but has a nearly
+  balanced outcome rate (19.8% vs. 17.8%, SMD=0.053, below the
+  conventional 0.1 imbalance flag). RQ1/RQ2 are evaluated on a population
+  skewed toward older, sicker, emergency-admitted patients — a real scope
+  caveat for the thesis text — but that skew is not an outcome-rate
+  confound.
 
 ---
 
@@ -531,26 +597,59 @@ session 17.
   explicitly checked and permits it.
   `stage3.robustness_model` is deliberately left `null` pending this — do
   not set it without checking.
-- **RQ1's headline comparison denominator.** Stage 2 only ever covers
-  admissions with a note (~63% in past runs); Stage 1 covers 100%.
-  Recommendation (per the remediation review's denominator-integrity point):
-  the headline RQ1 number is both models restricted to the notes-covered
-  subset (`stage1_notes_cohort` vs. `stage2_notes_cohort` in
-  `comparison_rq1.json`) — the only population both models can be fairly
-  compared on — with `stage1_full_population` reported as separate
-  deployment context, not blended into the headline claim. Needs explicit
-  confirmation before any number from `compare_stages.py` goes in the thesis
-  text as "the" RQ1 result.
-- **Three more open architecture questions raised 2026-08-28, all
-  explicitly left for the user to evaluate, not implemented:** whether
-  Stage 1 and Stage 2 should be forced onto identical data splits for
-  cleaner comparability (currently: same test partition, but Stage 2 is
-  further restricted to the notes-covered subset within it); what exactly
-  Stage 3 should be understood to reason "over" beyond the current
-  score+SHAP+note+discordance-mode bundle (e.g. should it also see Stage 1's
-  raw feature values, not just SHAP strings); and whether per-subgroup
-  (e.g. age-band) context should be surfaced to Stage 3 explicitly rather
-  than left implicit in the note text and scores.
+**Resolved 2026-10-30 (user decision, after reviewing session 31's new
+findings):**
+
+- **RQ1's headline comparison denominator.** Confirmed: the headline RQ1
+  number is both models restricted to the notes-covered subset
+  (`stage1_notes_cohort` vs. `stage2_notes_cohort` in `comparison_rq1.json`
+  — AUROC 0.7093 vs. 0.7101) — the only population both models can be
+  fairly compared on, since comparing each model on a different
+  population isn't a comparison at all. `stage1_full_population` (AUROC
+  0.7215) is reported as separate deployment context, never blended into
+  the headline claim. This matches how `README.md`/`MODEL_CARD.md` already
+  present the numbers — this confirms that presentation as the deliberate,
+  decided choice, not a provisional default awaiting sign-off.
+- **Should Stage 1 and Stage 2 be forced onto identical data splits?**
+  Confirmed: no — the current setup (same held-out test partition; Stage
+  2's training data further restricted to the notes-covered subset within
+  Stage 1's *training* patients) is the correct design, not an open
+  question. Restricting Stage 1's own training data to notes-covered
+  admissions only would have thrown away a large fraction of real training
+  data for no benefit — Stage 1 doesn't need a note to train or predict.
+  The actual fairness requirement is that both models are *evaluated* on
+  the exact same test admissions, which they already are; each model
+  trains on the most data it can legitimately use, while the comparison
+  itself stays apples-to-apples.
+- **What should Stage 3 reason over, beyond the current
+  score+SHAP+note+discordance-mode bundle?** Confirmed: leave as-is — do
+  not add Stage 1's raw feature values. Two reasons: (1) giving the LLM
+  all ~40 raw structured features, instead of the top-5 SHAP-ranked,
+  direction-and-magnitude-labeled strings already provided, would dilute
+  the prompt with mostly-irrelevant structured noise on top of near-full
+  note text already competing for the model's attention under a hard
+  token budget — more raw input is not obviously more signal; (2) more
+  importantly, this risks drifting back toward the exact design this
+  project already rejected in session 11 (§1 above): an LLM narrating a
+  structured model's own SHAP values, "a well-trodden pattern with no
+  novel finding." SHAP-ranked strings keep Stage 3 doing what it's
+  actually for — an independent audit grounded in the clinical note — not
+  a second explainer of Stage 1's decision.
+- **Should per-subgroup (e.g. age-band) context be surfaced to Stage 3
+  explicitly?** Confirmed: no — not implemented, and deliberately not
+  pursued. Stage 1 (isotonic calibration, fairness subgroup reporting) and
+  Stage 2 (age-group oversampling, per-age-group loss weights, per-band
+  Platt calibration and thresholds) already carry explicit, targeted
+  bias-mitigation machinery. Layering a systematic age-band context onto
+  Stage 3 as well risks compounding those corrections in an uncontrolled
+  way, or introducing a new vector for inconsistent treatment (the auditor
+  reasoning differently about identical clinical content depending on a
+  stated age band), rather than reducing bias further. One honest caveat:
+  `age` is one of Stage 1's ~40 features, so it can appear *incidentally*
+  in a given patient's top-5 SHAP block if age happens to be a top risk
+  driver for that specific admission (`src/stage3/shap_extract.py`'s
+  `_FEATURE_LABELS`) — a side effect of SHAP ranking, not the deliberate,
+  systematic age-band framing this question is about.
 
 ---
 
@@ -582,9 +681,22 @@ session 17.
   2026-09-04, alongside the switch of the model's actual target from
   all-cause to this column). Stage 3's `planned_return` field (added
   2026-08-28, §2 above) now gives an LLM-extracted, note-based answer to
-  the same question at audit time — but the two are not yet cross-checked
-  against each other; whether they agree, and what to do when they don't,
-  is unexamined.
+  the same question at audit time. ~~The two are not yet cross-checked
+  against each other~~ **Done (2026-10-26, session 31,
+  `scripts/analyze_planned_return_crosscheck.py`) — and the finding is
+  not reassuring.** Restricted to Stage-3-audited patients who were
+  actually readmitted within 30 days (n=4,375, the only population where
+  "was the readmission planned" has a structured answer at all): raw
+  agreement is 81.7%, but a trivial "always predict unplanned" baseline
+  already scores 95.8% (structured-planned rate is only 4.2%) — **Stage
+  3's actual agreement is below the trivial baseline.** Stage 3 calls
+  "planned" 4.5× more often than the structured proxy does (19.2% vs.
+  4.2%); of Stage 3's 842 "yes" calls, only 112 (13.3%) match the
+  structured proxy. Reads as the LLM being substantially more liberal
+  about reading a note as describing a planned return than the
+  structured data would license — worth stating explicitly as an open
+  discrepancy between the two signals in the thesis text, not quietly
+  citing the 81.7% number alone.
 - `MODEL_TARGET_COL` (`src/schemas.py`) is the single switch controlling
   which label column (`TARGET_COL`/all-cause vs `TARGET_COL_UNPLANNED`)
   every training/eval script actually uses — set to unplanned as of
