@@ -48,6 +48,7 @@ src/
   model/                         # Stage 1 XGBoost + metrics
   stage2/                        # Clinical-Longformer fine-tuning
   stage3/                        # Independent LLM audit of Stage 1's flags
+scripts/                         # SLURM job scripts + standalone analysis scripts
 tests/                           # pytest suite (no MIMIC data)
 sessions/                        # per-session development notes
 docs/                            # Architecture, methodology, and narrative notes

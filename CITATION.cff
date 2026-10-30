@@ -3,25 +3,26 @@ message: "If you use this code in academic work, please cite it as below."
 type: software
 title: "An LLM Auditor for Hospital Readmission Alerts: Independent Verification Beyond Prediction"
 abstract: >
-  A three-layer readmission prediction pipeline: a capacity-constrained XGBoost
+  A three-stage readmission prediction pipeline: a capacity-constrained XGBoost
   screen on structured EHR features (Stage 1), an independent Clinical-Longformer
-  risk estimate from discharge notes (Stage 2), and a local phi4-mini model
+  risk estimate from discharge notes (Stage 2), and a local MedGemma-27B model
   (Stage 3) that independently audits each of Stage 1's flagged cases —
   reasoning over both scores, the percentile-rank displacement between them,
   and the note itself — to extract quoted, individually-verified mitigating
   and aggravating grounds, reach its own uphold/override/insufficient-
   evidence decision, and report a second decision recomputed deterministically
   from those grounds as a transparency check. Trained and evaluated on
-  MIMIC-IV.
+  MIMIC-IV; at matched alert volume the structured screen alone outperforms
+  the full three-stage cascade, a validated negative result.
 authors:
   - family-names: Stenzel
     given-names: Lennart
     email: lennartstenzel@gmail.com
     affiliation: Nova School of Business and Economics
-version: "0.1.0"
-date-released: "2026-07-31"
+version: "1.0.0"
+date-released: "2026-10-06"
 license: MIT
-repository-code: "https://github.com/LennartStenzel/readmission-prediction"
+repository-code: "https://github.com/ThesisNovaSBE/three-layer-readmission-audit"
 keywords:
   - hospital readmission prediction
   - clinical NLP
