@@ -11,10 +11,14 @@
 > session 31) checks something different and purely mechanical — does the
 > auditor's decision change when evidence is withheld, and is it
 > reproducible at temperature=0 — with no human judgment involved at all.
-> That track was attempted on the cluster 2026-10-27 and got stuck (see
-> `docs/ARCHITECTURE.md` §3, session 31) before producing output. Neither
-> track is done; they answer different questions and neither substitutes
-> for the other.
+> That track **completed 2026-10-30** (see `docs/ARCHITECTURE.md` §3,
+> session 34) with clean, decisive results: the auditor returned
+> `insufficient_evidence` on 150/150 patients when the note was
+> withheld (vs. 0/150 in the real run), 82.5% decision agreement when
+> Stage 2's score was withheld, and 100% self-agreement across two runs
+> at temperature=0. This document's human-kappa track is still **not
+> done** — the two tracks answer different questions, and this one is
+> not substituted by the other being complete.
 >
 > **Partly superseded 2026-08-25, re-targeted 2026-08-28 (session 19).** As
 > of the current `src/stage3/explain.py`, the LLM no longer chooses the
