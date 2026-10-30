@@ -2,7 +2,42 @@
 
 > **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md`, `docs/ARCHITECTURE.md`, and the latest file in `sessions/` before starting work.**
 
-A three-stage LLM-auditing pipeline for predicting 30-day hospital readmissions, built as a Master's thesis at Nova SBE (M.Sc. Business Analytics). Full design rationale: **`docs/ARCHITECTURE.md`**.
+A Master's thesis project at Nova SBE (M.Sc. Business Analytics) testing
+whether LLMs add real value over classical ML for hospital readmission
+prediction. Full design rationale: **`docs/ARCHITECTURE.md`**.
+
+## The Idea
+
+About one in five hospital patients is readmitted within 30 days — costly
+for hospitals, harmful for patients. Hospitals already predict this with
+algorithms trained on structured data: diagnoses, labs, length of stay.
+The open question is whether large language models that read doctors'
+free-text notes add real value on top of that, or whether it's mostly
+hype.
+
+This project stacks three tools the way a hospital would actually deploy
+them, and asks the same question at every step: **does adding more AI
+add value?**
+
+1. **Screen** — a classical ML model flags high-risk patients from
+   structured data alone, at an alert volume a hospital could actually
+   act on (not a research-only recall floor that flags most of everyone).
+2. **Independent second opinion** — a separate language model reads only
+   the discharge note — no structured data — and produces its own risk
+   estimate, independently of the first model, never gated by its flag.
+3. **Audit** — a medical reasoning LLM acts like a senior doctor
+   double-checking the flagged cases: it reads both scores and the note,
+   then reaches its own uphold/override decision with a justification.
+
+Every layer is benchmarked against the simpler option alone, **at the
+same number of alerts** — so "does more AI help" has an actual,
+falsifiable answer, not a vibe. Real MIMIC-IV data, real local models: no
+ChatGPT/Claude anywhere in the loop — patient data never leaves secure
+servers, and every model here is trained and run on a university GPU
+cluster, consistent with the PhysioNet Data Use Agreement governing
+MIMIC-IV access.
+
+## Implementation at a Glance
 
 **Stage 1 — XGBoost (structured screen):** Trained on 521,191 MIMIC-IV structured admissions, flags the top-K% highest-risk admissions (capacity-constrained operating point, default K=15%; recall-floor kept as a secondary comparison table).
 
@@ -11,60 +46,6 @@ A three-stage LLM-auditing pipeline for predicting 30-day hospital readmissions,
 **Stage 3 — MedGemma-27B (independent auditor):** A local reasoning model (served via plain HF `transformers.generate()` + `lm-format-enforcer` for guided/structured JSON decoding, temperature=0 — switched from Ollama/phi4-mini 2026-09-10 once the batch run moved to cluster GPU hardware, then from vLLM 2026-09-15 once KISSKI's CUDA 12.8 driver ceiling proved structurally incompatible with vLLM's flashinfer/CUTLASS kernels) reads Stage 1's score + SHAP reasons, Stage 2's score, a quantitatively-computed discordance signal, and the discharge note itself, then reaches its **own** uphold/override judgment with a clinical justification — it does not narrate a decision Stage 2 already made.
 
 **Frontend:** A React + TypeScript + Vite dashboard visualises the pipeline logic and patient-level results — useful for demos and thesis presentations.
-
----
-
-## Architecture Overview
-
-Standard flowchart notation: parallelogram = input, rounded box = a
-model/process, diamond = a computed quantity. Stage 1 and Stage 2 each
-score independently off their own input (RQ1 — neither gates the other);
-Stage 3 is the one place all three connect, auditing on both scores, the
-discordance between them, and the note itself (RQ2).
-
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Georgia, \"Times New Roman\", serif", "fontSize": "15px", "lineColor": "#475569", "primaryTextColor": "#1e293b"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 60, "curve": "basis"}}}%%
-flowchart TD
-    STRUCT[/"Structured EHR data<br/>~40 features"/]:::input
-    NOTE[/"Discharge notes<br/>MIMIC-IV-Note"/]:::input
-
-    S1("Stage 1 — Screen<br/>XGBoost<br/>src/model/"):::s1
-    S2("Stage 2 — Independent Read<br/>Clinical-Longformer<br/>src/stage2/"):::s2
-
-    DISC{"Discordance<br/>percentile-rank displacement"}:::calc
-
-    S3("Stage 3 — Audit<br/>MedGemma-27B<br/>src/stage3/"):::s3
-
-    API("API<br/>api.py (FastAPI)"):::serve
-    RQ1[["RQ1 comparison<br/>compare_stages.py"]]:::eval
-
-    STRUCT ==> S1
-    NOTE ==> S2
-
-    S1 ==> DISC
-    S2 ==> DISC
-    S1 ==> S3
-    S2 ==> S3
-    DISC ==> S3
-    NOTE -.->|note text| S3
-    S3 ==> API
-
-    S1 -.-> RQ1
-    S2 -.-> RQ1
-
-    classDef input fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#1e293b,font-weight:600
-    classDef s1 fill:#2563eb,stroke:#1e3a8a,stroke-width:3px,color:#ffffff,font-weight:700
-    classDef s2 fill:#7c3aed,stroke:#4c1d95,stroke-width:3px,color:#ffffff,font-weight:700
-    classDef s3 fill:#059669,stroke:#064e3b,stroke-width:3px,color:#ffffff,font-weight:700
-    classDef calc fill:#fff7ed,stroke:#ea580c,stroke-width:2px,color:#7c2d12,font-weight:600
-    classDef serve fill:#f59e0b,stroke:#92400e,stroke-width:2px,color:#1e293b,font-weight:700
-    classDef eval fill:#ffffff,stroke:#94a3b8,stroke-width:1px,color:#475569,font-style:italic
-```
-
-Config (`config.yaml`), training infra (SLURM scripts), and artifacts
-(`models/`, `results/`) are omitted from the diagram on purpose — they
-thread through every box above rather than forming their own step, and
-drawing them in is what caused the earlier overlapping-arrow clutter.
 
 ---
 
@@ -222,10 +203,14 @@ The dashboard has two views:
 |--------|---------|
 | `setup_demo.py` | Synthetic data demo — no MIMIC needed |
 | `setup_stage2.py` | Fine-tune Stage 2 end-to-end |
-| `python -m src.stage3.pipeline <hadm_id>` | On-demand Stage 3 audit for one patient (no batch runner yet) |
+| `python -m src.stage3.pipeline <hadm_id>` | On-demand Stage 3 audit for one patient |
+| `python -m src.stage3.batch` | Full batch audit — every Stage 1-flagged, note-covered admission |
 | `train_stage2.sh` | Slurm job script for HPC/GPU training (GWDG KISSKI A100) |
 | `diagnose_cluster.sh` | Cluster diagnostic job (checks env, GPU, paths) |
-| `analyse_age_fairness.py` | Age-group fairness analysis on Stage 1 results |
+| `scripts/analyze_discordance_subgroups.py` | Stage 3 subgroup analysis (concordant vs. discordant) |
+| `scripts/analyze_selection_bias.py` | Notes-covered vs. excluded baseline-characteristics comparison |
+| `scripts/analyze_planned_return_crosscheck.py` | Stage 3's `planned_return` vs. the structured-data proxy |
+| `scripts/run_validation_controls.py` | Stage 3 D1/D2/D3 validation controls (blind-note, no-Stage-2, self-agreement) |
 
 ---
 
@@ -238,6 +223,26 @@ The dashboard has two views:
 
 ---
 
+## Pipeline
+
+Purely the technical data flow — no research framing here, see "The Idea"
+above for that.
+
+```mermaid
+flowchart LR
+    STRUCT[/"Structured EHR data"/]:::input --> S1("Stage 1 — Screen<br/>XGBoost"):::s1
+    NOTE[/"Discharge notes"/]:::input --> S2("Stage 2 — Second opinion<br/>Clinical-Longformer"):::s2
+    S1 --> S3("Stage 3 — Audit<br/>MedGemma-27B"):::s3
+    S2 --> S3
+    NOTE -.->|note text| S3
+    S3 --> OUT[/"Final decision<br/>uphold / override"/]:::input
+
+    classDef input fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#1e293b
+    classDef s1 fill:#2563eb,stroke:#1e3a8a,stroke-width:3px,color:#ffffff,font-weight:700
+    classDef s2 fill:#7c3aed,stroke:#4c1d95,stroke-width:3px,color:#ffffff,font-weight:700
+    classDef s3 fill:#059669,stroke:#064e3b,stroke-width:3px,color:#ffffff,font-weight:700
+```
+
 ## Project Structure
 
 ```
@@ -249,7 +254,8 @@ The dashboard has two views:
 ├── setup_stage2.py              # Stage 2 fine-tuning runner
 │                                 # (Stage 3 has no setup script — on-demand only, src/stage3/pipeline.py)
 ├── train_stage2.sh              # Slurm job script — GWDG KISSKI A100 80GB
-├── analyse_age_fairness.py      # Age-group fairness analysis
+├── scripts/                     # SLURM job scripts + standalone analysis scripts
+│                                 # (see "Utility Scripts" above for what's in here)
 ├── frontend/                    # React + TS + Vite dashboard
 │   └── src/
 │       ├── components/          # PipelineDiagram, PatientTable, PatientModal
@@ -263,7 +269,9 @@ The dashboard has two views:
 │   │   ├── comorbidity.py       # Charlson comorbidity index
 │   │   ├── features.py          # Feature engineering
 │   │   └── synthetic.py         # Synthetic data generator
-│   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv
+│   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv,
+│   │                             # calibration, bootstrap, compare_stages (RQ1),
+│   │                             # evaluate_pipeline (RQ2 + control arm)
 │   ├── stage2/
 │   │   ├── _utils.py            # Shared helpers (band_key, model path)
 │   │   ├── dataset.py           # ClinicalNotesDataset + note loading
@@ -273,7 +281,8 @@ The dashboard has two views:
 │   │   ├── evaluate.py          # Stage 2 evaluation metrics
 │   │   └── predict.py           # Stage 2 inference on Stage 1 flags
 │   └── stage3/
-│       ├── explain.py           # Prompt building, discordance calc, MedGemma call
+│       ├── explain.py           # Prompt building, grounds taxonomy, MedGemma call
+│       ├── discordance.py       # Percentile-rank displacement calc
 │       ├── pipeline.py          # explain_patient() — the on-demand entry point
 │       ├── batch.py             # Batch audit runner — every flagged, note-covered admission
 │       ├── models.py            # ExplanationResult (Pydantic)
@@ -283,7 +292,11 @@ The dashboard has two views:
 ├── tests/                       # Unit & integration tests
 ├── docs/
 │   ├── ARCHITECTURE.md          # Current pipeline design — read this first
-│   └── MODELING_PLAN.md         # Stage 1 modeling strategy
+│   ├── MODELING_PLAN.md         # Stage 1 modeling strategy
+│   ├── STAGE3_VALIDATION.md     # Human-annotator (Cohen's kappa) validation plan
+│   ├── THESIS_NARRATIVE.md      # Storytelling/framing guide for the thesis text
+│   └── archive/                 # Superseded planning docs, kept for history
+├── results/                     # Final, citable result snapshots (aggregate-only)
 ├── data/                        # LOCAL ONLY — gitignored
 └── models/                      # Trained artifacts — gitignored
 ```

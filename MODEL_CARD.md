@@ -146,6 +146,29 @@ reportable per this project's own design docs, not a failure of either
 model: on this population, the discharge note alone carries no more (and no
 less) predictive signal than the structured record alone.
 
+### Selection bias: does the notes-covered population look like the excluded one?
+
+`scripts/analyze_selection_bias.py` (2026-10-26) compares baseline
+characteristics between Stage 1's test-partition admissions that have a
+discharge note (the population RQ1/RQ2 are evaluated on) and those that
+don't, using `has_discharge_note` (computed directly against the real
+MIMIC-IV-Note file, not inferred). **They are clinically distinct
+populations.** Of 104,242 test admissions, 60.2% (n=62,759) have a note,
+39.8% (n=41,483) don't. The notes-covered group is older (59.7 vs. 52.1),
+sicker (Charlson comorbidity index 2.24 vs. 1.43), far more often an
+emergency admission (SMD=0.73 — the largest gap of any feature checked by
+a wide margin), and more often discharged to a facility. Standardized
+mean differences (Austin 2009; |SMD| ≥ 0.1 flags a meaningfully
+imbalanced covariate, independent of sample size) exceed that threshold
+on 8 of 12 baseline characteristics checked.
+
+**The readmission outcome rate itself, however, is nearly balanced**
+(19.8% covered vs. 17.8% excluded, SMD=0.053 — below the imbalance flag).
+So the skew is real and worth disclosing as scope — RQ1/RQ2 generalize to
+an older, sicker, more acutely-admitted population, not to all
+admissions equally — but it is not an outcome-rate confound driving the
+RQ1/RQ2 results themselves.
+
 ### Stage 1+2+3 — Combined pipeline (real RQ2 result, full run 2026-10-06)
 
 All 9,899 flagged+noted admissions audited by Stage 3
@@ -295,6 +318,31 @@ decisions across every Stage 1-flagged, note-covered admission (completed
 2026-10-06, 9,899/9,899, 0.94% annotation failure rate) — see "Stage
 1+2+3 — Combined pipeline" above for the real RQ2 result this made
 possible.
+
+### Does Stage 3's `planned_return` agree with the structured-data proxy?
+
+`scripts/analyze_planned_return_crosscheck.py` (2026-10-26) compares
+Stage 3's note-derived `planned_return` field against the structured,
+`admission_type`-based "unplanned" proxy (`readmission_30d_unplanned`),
+restricted to Stage-3-audited patients who were actually readmitted
+within 30 days (n=4,375 — the only population where "was the readmission
+planned" has a structured answer at all; this question was raised but
+never examined as of the 2026-09-13 architecture pass).
+
+**The finding is not reassuring.** Raw agreement is 81.7% — which reads
+as fine in isolation, but a trivial "always predict unplanned" baseline
+already scores 95.8% (the structured-planned rate is only 4.2%), so
+**Stage 3's actual agreement is below what doing nothing would achieve.**
+Stage 3 calls "planned" 4.5× more often than the structured proxy
+supports (19.2% vs. 4.2%); of Stage 3's 842 "yes" calls, only 112 (13.3%)
+match the structured proxy. This reads as the LLM being substantially
+more liberal about reading a note as describing a planned return than
+the structured data would license — both signals have known, disclosed
+limitations (the structured proxy only catches planned returns visible
+in `admission_type`; Stage 3's answer could in principle be catching
+real scheduled returns the structured proxy misses), so this is reported
+as an open, unresolved discrepancy between the two signals, not evidence
+that either one is simply wrong.
 
 ## Limitations
 
