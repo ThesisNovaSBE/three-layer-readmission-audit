@@ -453,6 +453,14 @@ def run_blind_note_control(
     blinded run's output; join the result on ``hadm_id`` against an
     existing ``stage3_batch_results.csv`` to compare decision distributions.
 
+    Run via ``scripts/run_validation_controls.py`` (session 34,
+    2026-10-30) on n=150: ``decision_model`` returned
+    ``insufficient_evidence`` on 150/150 blinded admissions, versus 0/150
+    in the real run on the same admissions. The auditor does not guess
+    uphold/override without the note — see
+    ``models/stage3_validation_controls_summary.json`` and
+    ``MODEL_CARD.md`` for the full result.
+
     Args:
         cfg:            validated project config.
         hadm_ids:       admissions to rerun blind. Keep this a deliberate
@@ -487,6 +495,14 @@ def run_no_stage2_control(
     Stage 2 earns its place in the prompt, independent of the RQ1 question
     of whether Stage 2 beats Stage 1 on discrimination metrics alone
     (docs/ARCHITECTURE.md §5 item 2).
+
+    Run via ``scripts/run_validation_controls.py`` (session 34,
+    2026-10-30) on n=40: 82.5% decision agreement with the real run.
+    Withholding Stage 2's evidence flips the decision on 7/40 admissions,
+    shifting toward more uphold calls — Stage 2's score measurably
+    influences the audit without dominating it. See
+    ``models/stage3_validation_controls_summary.json`` and
+    ``MODEL_CARD.md`` for the full result.
     """
     return _run_control(
         cfg, hadm_ids, artifact=artifact, results_df=results_df,
@@ -508,10 +524,15 @@ def check_self_agreement(
     """Self-agreement check (session 19 Phase D3).
 
     Calls :func:`explain_patient` TWICE per admission. Temperature is
-    already pinned at 0 (``cfg.stage3.temperature``) for reproducibility,
-    but that assumption has never been verified against a real Ollama
-    model. Run this once before a full Phase C5 batch run, not as part of
-    it — a diagnostic, not a production path.
+    pinned at 0 (``cfg.stage3.temperature``) for reproducibility. Verified
+    against the real MedGemma-27B model (session 34, 2026-10-30, via
+    ``scripts/run_validation_controls.py``): 100% agreement on both
+    ``decision_model`` and ``decision_rule`` across 30 admissions run
+    twice each — see ``models/stage3_validation_controls_summary.json``
+    and ``MODEL_CARD.md``. Run as a diagnostic, not a production path; in
+    practice this was run after the main batch completed (2026-10-06),
+    not before it as originally planned, since the entry point for it
+    did not exist yet at that point.
 
     Args:
         cfg:            validated project config.

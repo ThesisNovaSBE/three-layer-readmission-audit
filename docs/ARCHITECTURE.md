@@ -585,8 +585,8 @@ session 17.
   across ±10-30pp shows the mode split is meaningfully sensitive to the
   threshold choice (CONCORDANT ranges 27.0%-65.2%), worth discussing as a
   robustness caveat rather than treating ±20pp as uniquely correct.
-- **Wire and run the Stage 3 robustness arm** — blocked on the model-choice
-  decision below, not on code.
+- ~~Wire and run the Stage 3 robustness arm~~ **Decided against, 2026-10-30
+  — see §5.** Not a deferred item anymore; closed.
 - **N1 ablation runner** (5+ arms) beyond the two-arm RQ1 comparison
   `compare_stages.py` already covers — not yet written. The single most
   load-bearing arm, L1-at-matched-capacity, no longer needs a separate
@@ -635,16 +635,21 @@ session 17.
   clinical-capacity argument behind the existing 0.15 choice (session 15) —
   not changed without new operational evidence.
 
-- **Which model runs Stage 3's robustness arm, and is a cloud API even
-  permitted on this data?** MIMIC-IV/MIMIC-IV-Note are governed by a
-  PhysioNet Data Use Agreement; sending credentialed data to a third-party
-  cloud API is very likely restricted without a specific agreement.
-  Recommendation: default to a larger *local* model (served the same way
-  as the primary auditor — HF transformers + lm-format-enforcer as of
-  2026-09-15, see `stage3.model_name`), not a cloud API, unless the DUA is
-  explicitly checked and permits it.
-  `stage3.robustness_model` is deliberately left `null` pending this — do
-  not set it without checking.
+- ~~Which model runs Stage 3's robustness arm, and is a cloud API even
+  permitted on this data?~~ **Resolved 2026-10-30 (user decision): not
+  pursued.** A robustness arm means a full second Stage 3 batch run
+  against a different (larger) model — not a small follow-up analysis.
+  The original full run across all 9,899 flagged-and-noted admissions
+  took 6 days of wall-clock cluster time. A second run at that cost is
+  not affordable within the thesis timeline, and nothing about the
+  already-validated D1/D2/D3 results (session 34) suggests the primary
+  model is behaving unreliably in a way that would make a second model
+  the more urgent use of remaining cluster time. The cloud-API question
+  (MIMIC-IV/MIMIC-IV-Note are governed by a PhysioNet Data Use
+  Agreement; sending credentialed data to a third-party cloud API is
+  very likely restricted without a specific agreement) is moot now that
+  the arm itself is not being run. `stage3.robustness_model` stays
+  `null`; this is a closed decision, not a deferred one.
 **Resolved 2026-10-30 (user decision, after reviewing session 31's new
 findings):**
 

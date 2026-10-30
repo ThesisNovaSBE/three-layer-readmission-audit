@@ -40,7 +40,14 @@ auditor trades recall for little-to-no precision gain almost everywhere it's app
 `MODEL_CARD.md`). This changes the storyline below from "does the cascade beat the baseline"
 (open question) to "why doesn't an independently-reasoning LLM auditor beat simple threshold
 tightening, and what does that say about this class of system" (answered, and arguably a more
-interesting thesis finding than a clean win would have been).
+interesting thesis finding than a clean win would have been). **Added 2026-10-30:** the
+obvious pushback to a negative result, that the auditor might simply be broken or ignoring
+its inputs, is also now answered, not just anticipated. Three validation controls show the
+auditor returns "insufficient evidence" on 150 of 150 admissions when the note is withheld
+(versus 0 of 150 when it is present), changes its decision on 1 in 6 admissions when Stage 2's
+score is withheld, and reaches an identical decision 30 of 30 times when asked twice at
+temperature zero (see `MODEL_CARD.md`). The system does what it is supposed to do, and still
+underperforms the simple baseline. That combination is the actual finding.
 
 ---
 
@@ -56,8 +63,12 @@ interesting thesis finding than a clean win would have been).
 - **Strengths:** True to our numbers (this is exactly what the auditor is for vs. a
   matched-budget structured-only baseline), clinically urgent, differentiates from "yet
   another readmission model."
-- **Risk:** Needs the control-arm comparison (structured-only at the same alert budget) to
-  fully land (`_control_arm_report`, done; large-scale run pending Stage 1/2 retrain).
+- **Status:** The control-arm comparison is done, at full scale, and the finding sharpens
+  this story rather than weakening it. The structured-only baseline, at the same alert
+  budget, beats the full audited cascade. The honest version of Option A is not "the
+  auditor catches what the simple screen misses," it is "we built the auditor, tested it
+  properly, and the simple screen alone still wins," which is itself a real answer to the
+  alert-fatigue question: more AI is not automatically the fix.
 
 ### Option B — "The independent auditor" (workflow mirror)
 - **Hook:** Hospitals already work this way: a broad screen, an independent second opinion,
@@ -66,9 +77,12 @@ interesting thesis finding than a clean win would have been).
 - **Strengths:** Instantly intuitive to clinicians and committee; makes the three-stage
   architecture feel *inevitable* rather than arbitrary; matches the literature-review gap
   directly (LLM-as-auditor, not LLM-as-predictor/explainer).
-- **Risk:** A metaphor, not a result — must be backed by the control-arm comparison showing
-  the audited pipeline beats the structured screen alone at the same alert budget
-  (backlog N1).
+- **Status:** The workflow metaphor holds regardless of outcome, but the result it predicted
+  did not land the way this option originally hoped. The audited pipeline does not beat the
+  structured screen alone at the same alert budget. Use this option to frame the *design*
+  (screen, independent read, audit mirrors how a ward actually works), not to imply the
+  audited version necessarily performs better. It does not, and the thesis should say so
+  plainly rather than let the metaphor imply a result the numbers do not support.
 
 ### Option C — "Two kinds of evidence" (epistemic story)
 - **Hook:** Structured data knows *what* happened (labs, codes, LOS); notes know *what it
@@ -76,7 +90,13 @@ interesting thesis finding than a clean win would have been).
 - **Story:** The scientific payload is the **disagreement analysis** — the cases where the
   note overturns the numbers, and *why*.
 - **Strengths:** The most genuinely academic framing; produces the thesis's star exhibit.
-- **Risk:** Depends on an analysis not yet run (backlog N2).
+- **Status:** Done, and worth leading with. The disagreement analysis
+  (`scripts/analyze_discordance_subgroups.py`) found the auditor underperforms the simple
+  baseline in *both* the agreeing and disagreeing cases, and more so in the disagreeing
+  ones, which is the opposite of what "two kinds of evidence" would predict if the note and
+  the structured score genuinely complemented each other through the auditor. The honest
+  version of this story is about what the disagreement *should* have bought and did not,
+  which is a more interesting academic finding than a clean confirmation would have been.
 
 ### Option D — "AI that fits in the hospital basement" (pragmatics)
 - **Hook:** No cloud APIs, no patient data leaving the building, models that run on a
@@ -90,7 +110,12 @@ interesting thesis finding than a clean win would have been).
   introduced by Stage 2 v1) — so we rebuilt Stage 2 with age-stratified training, focal loss,
   and per-group calibration.
 - **Strengths:** Honest, self-critical science; fairness is a first-class thesis theme.
-- **Risk:** Rebuilt Stage 2 not yet trained (backlog C2) — currently a promise, not a result.
+- **Status:** The rebuilt Stage 2 is trained and evaluated. The age-stratified training and
+  per-group calibration closed the recall gap for patients 70+ (0.027 gap, down from a
+  13-point gap pre-rebuild), but the AUROC and precision gaps for that group did not close
+  (still the weakest subgroup in both Stage 1 and Stage 2, see `MODEL_CARD.md`). Tell this
+  as a partial, honest win: one fairness dimension fixed, two still open, not a solved
+  problem.
 
 ### Recommended blend
 **Lead with A (alert fatigue), structure with B (independent auditor), deliver scientific
@@ -118,9 +143,9 @@ contribute, and do it with small, local, fairness-audited models."*
    Discussion. (Composite/fictional — never a real MIMIC record.)
 2. **Alert-budget-matched comparison** as the recurring clinical metric: does the audited
    pipeline outperform the structured screen alone at the *same* alert volume
-   (`_control_arm_report`)? Every results table repeats this comparison. [Stage 1's own
-   control-arm number now exists (`MODEL_CARD.md`); the real cascade comparison still
-   needs Stage 2's retrain — see `docs/ARCHITECTURE.md` §4.]
+   (`_control_arm_report`)? Every results table repeats this comparison. [Done, at full
+   scale, in both directions (`MODEL_CARD.md`): the control arm wins. Use the real numbers,
+   not a placeholder.]
 3. **Name the pipeline.** Prefer "screen, independent read, audit" over the retired
    "triage-and-verify" framing — use it consistently as a
    brand (figure titles, table captions), so the committee remembers *the pattern*, not just
@@ -136,14 +161,12 @@ contribute, and do it with small, local, fairness-audited models."*
 
 ## 4. Abstract (preview for Prof. Shen, ~400 words)
 
-> **REWRITTEN 2026-08-28 to match the current architecture** — the previous version
-> described a high-recall XGBoost screen (recall ≥ 0.85, flagging 67% of admissions) and a
-> Stage 2 that "vetoes" alarms as a gatekeeper. Neither is current: Stage 1 is now
-> capacity-constrained (flags the top ~15% by risk), and Stage 2 is an independent second
-> opinion Stage 3 reasons over, not a gate. **Updated 2026-09-05:** Stage 1 has now been
-> retrained for real (400-trial search, targeting unplanned readmission, AUROC 0.7215 —
-> see `MODEL_CARD.md`); Stage 2/Stage 3 numbers below are still placeholders pending their
-> retrain/first full run (`docs/ARCHITECTURE.md` §4) — replace before sending to Prof. Shen.
+> **Updated 2026-10-30: every result below is now real, final, and verified** — not a
+> placeholder. Stage 1 and Stage 2 are both retrained (`MODEL_CARD.md`); the full Stage 3
+> batch run, the RQ1/RQ2 comparisons, the subgroup analysis, and three validation controls
+> confirming the auditor genuinely uses its inputs are all complete
+> (`docs/ARCHITECTURE.md` §3, session 34). The body below states the actual findings
+> directly rather than posing them as open questions, since they no longer are.
 
 > **An LLM Auditor for Hospital Readmission Alerts: Independent Verification Beyond
 > Prediction**
@@ -169,25 +192,30 @@ contribute, and do it with small, local, fairness-audited models."*
 > on, and states its reasoning in plain language. No patient data leaves the hospital
 > environment at any stage: every model is small, open, and locally deployable by design.
 >
-> Beyond aggregate metrics, the thesis asks two separable questions: does narrative text add
-> predictive signal structured data alone doesn't (tested directly, on the same population,
-> independent of the cascade — a null result here is expected and reportable), and does an
-> independently-informed auditor improve on the structured screen alone, including against
-> the simplest alternative of just raising its threshold to the same alert budget. A
-> disagreement analysis examines *where* and *why* the auditor overrides a structured alert;
-> a fairness audit addressed a recall disparity affecting patients over 70 through
-> age-stratified training and per-group calibration; and every override is quote-verified
-> against the source note, making human review of the audit's reasoning tractable rather
-> than a leap of faith.
+> Beyond aggregate metrics, the thesis answers two separable questions directly. Does
+> narrative text add predictive signal structured data alone doesn't? Tested on the same
+> population, independent of the cascade: no — the two carry statistically indistinguishable
+> signal, a null result that is itself informative. Does an independently-informed auditor
+> improve on the structured screen alone, including against the simplest alternative of just
+> raising its threshold to the same alert budget? Also no: at matched alert volume, the
+> structured screen alone beats the full three-stage cascade on both precision and recall.
+> Three validation controls rule out the obvious objection that the auditor is simply
+> ignoring its inputs — it reads the note, uses the independent score, and is fully
+> reproducible — and the gap persists regardless, worsening specifically where the two risk
+> signals disagree. A fairness audit closed a recall disparity affecting patients over 70
+> through age-stratified training and per-group calibration, though a smaller discrimination
+> gap for that group remains open. Every override is quote-verified against the source note,
+> making human review of the audit's reasoning tractable rather than a leap of faith.
 >
-> The result is intended less as another readmission model than as a transferable pattern
-> for clinical AI: a cheap, broad screen, an independent second reading, and an accountable
-> auditor over both — not a black box that predicts, but a system whose disagreements are
-> visible and whose overrides explain themselves.
+> The result is intended less as another readmission model than as a transferable pattern for
+> clinical AI, and a cautionary finding about it: a cheap, broad screen, an independent second
+> reading, and an accountable auditor over both are each individually sound, but stacking them
+> does not guarantee the audited system beats the simpler screen alone. The validated negative
+> result, and the methodology that makes it trustworthy rather than merely asserted, is as much
+> the thesis's contribution as the architecture itself.
 
-*(Stage 1 numbers are now real (`MODEL_CARD.md`); Stage 2/Stage 3 numbers still to
-fill in once retrained/run under the current config — `docs/ARCHITECTURE.md` §4.
-Word count target unchanged at ~400.)*
+*(All numbers and findings above are final, not placeholders. Word count target unchanged
+at ~400; re-check length after any further edits.)*
 
 ---
 
@@ -198,11 +226,23 @@ Word count target unchanged at ~400.)*
   modular interpretability, and the workflow analogy — plus the control-arm comparison (N1)
   to show it empirically against a matched-budget structured-only baseline.
 - **"Why not just raise Stage 1's threshold to the alert budget you want and skip the LLMs?"**
-  → That's exactly the control arm (`_control_arm_report`): Stage 1 alone, same alert volume,
-  same evaluation. The cascade has to beat *that*, not an unconstrained Stage 1 — Stage 1's
-  side of that number is now real (`MODEL_CARD.md`), the full cascade comparison is still
-  pending Stage 2's retrain.
+  → We tested exactly that (`_control_arm_report`): Stage 1 alone, same alert volume, same
+  evaluation. The answer is uncomfortable but real: raising the threshold alone beats the
+  full three-stage cascade on both precision and recall. That is the thesis's headline
+  finding, not a caveat to it.
+- **"Isn't a negative result bad for the thesis?"** → No — it is the contribution. No prior
+  work in a systematic 49-study literature review uses an LLM as an independent auditor of
+  *another model's* output. A rigorous, validated negative result (matched-volume control
+  arm, subgroup-level test, three separate controls ruling out "the system is just broken")
+  is a real empirical finding, not a failed experiment.
+- **"How do you know the auditor isn't just ignoring its inputs?"** → Three controls test
+  this directly. Withholding the note entirely makes it answer "insufficient evidence" on
+  150 of 150 admissions, versus 0 of 150 when the note is present: it does not guess.
+  Withholding Stage 2's score changes the decision on 1 in 6 admissions: that evidence
+  matters too. Asking the same question twice gives an identical answer 30 of 30 times:
+  the result is reproducible, not a lucky draw.
 - **"What's novel?"** → The *auditor* framing (LLM independently reviews another model's
   flagged output, on stated evidence, with a quoted and verified justification for every
-  override) — a role absent from a systematic 49-study literature review — plus the
-  disagreement analysis and a fairness-audited, fully local implementation, not raw AUROC.
+  override) — a role absent from a systematic 49-study literature review — plus a validated
+  (not just asserted) negative result, the disagreement analysis, and a fairness-audited,
+  fully local implementation.
