@@ -4,19 +4,30 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 # D1/D2/D3 validation controls (session 19's run_blind_note_control /
 # run_no_stage2_control / check_self_agreement, never run at scale before
 # this script existed) on a deliberate sample -- NOT a second full batch
 # run. Calls explain_patient ONE admission at a time per control (not
-# batched like the main batch run), so per-admission latency here is
-# almost certainly higher than slurm_stage3_batch.sh's measured
-# ~41.5s/admission (that number was for batch-size-4 generation). No
-# verified single-call throughput exists yet -- the 24h budget below is
-# copied from the main batch job as a safe starting point, not a measured
-# estimate. Safe to resubmit on timeout: scripts/run_validation_controls.py
-# writes each control's CSV incrementally and skips already-done hadm_ids
-# automatically on rerun, no --resume flag needed.
+# batched like the main batch run).
+#
+# 2026-10-30: an earlier --n 150 attempt (job 16873264) got stuck for
+# ~4 hours on the first D1 blind-note patient and was cancelled (607.5
+# core-hours, zero patients written) -- but a follow-up isolated,
+# single-patient timing test (job 16947546) ran all three conditions
+# (normal/no-Stage-2/blind-note) cleanly and fast: 212.1s, 109.4s, and
+# 69.5s respectively (NORMAL's figure includes the one-time ~87s model
+# load). Blind-note was the FASTEST of the three and correctly returned
+# insufficient_evidence -- the earlier stall does not reproduce and is
+# most likely a one-off (a flaky node, or one pathological admission in
+# that run's random sample), not a systemic bug in the blind-note path.
+# At ~70-210s/admission, --n 150 across all 4 passes (D1 + D2 + D3 x2)
+# would realistically need 15-25 hours -- scaled down to --n 30 below to
+# fit comfortably inside an 8h budget instead of gambling another
+# all-day run. Safe to resubmit on timeout either way:
+# scripts/run_validation_controls.py writes each control's CSV
+# incrementally and skips already-done hadm_ids automatically on rerun,
+# no --resume flag needed.
 #SBATCH --job-name=thesis-stage3-validation
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_validation_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_validation_%j.err
@@ -73,11 +84,11 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 echo "=== All checks passed — starting validation controls ==="
 
 # ── Run ──────────────────────────────────────────────────────
-# --n 150: a deliberate sample (per run_blind_note_control's own
-# docstring: "tens to low hundreds"), not a second full audit. Override
-# with `sbatch --export=N=50 scripts/slurm_stage3_validation.sh` or just
-# edit the number below before submitting.
-python -m scripts.run_validation_controls --n 150
+# --n 30: a deliberate sample (per run_blind_note_control's own
+# docstring: "tens to low hundreds"), not a second full audit. Edit the
+# number below before submitting if you want a different size -- see the
+# timing note above before going much above 30 within an 8h budget.
+python -m scripts.run_validation_controls --n 30
 
 echo "[slurm] Done at $(date)"
 echo "[slurm] Results saved to models/stage3_control_*.csv and"
