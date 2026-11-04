@@ -387,6 +387,48 @@ have been.
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)
 - Temporal and demographic generalization not validated
 - Not intended for real-time clinical use
+- **Population scope.** RQ1 and RQ2 are evaluated on the notes-covered
+  subset of Stage 1's test partition, which is demographically distinct
+  from the excluded subset: older, sicker, and far more often an
+  emergency admission (see "Selection bias" above). The readmission
+  outcome rate itself is nearly balanced between the two groups, so this
+  is a scope caveat on who the results generalize to, not an outcome-rate
+  confound.
+- **Age 70+ remains the weakest subgroup on discrimination, not just
+  recall.** The Stage 2 rebuild (age-stratified training, per-group loss
+  weights) closed the recall gap for this group, but the AUROC and
+  precision gaps did not close — it is still the hardest subgroup for
+  both Stage 1 and Stage 2 to discriminate correctly, only the
+  recall-parity dimension of the original fairness problem was fixed.
+- **The discordance threshold (±20 percentage points) is provisional,
+  not empirically validated against any ground truth before being used
+  as the reporting default.** A sensitivity sweep (±10pp–±30pp) shows
+  the CONCORDANT/discordant split is meaningfully sensitive to this
+  choice (CONCORDANT ranges 27.0%–65.2% across the range swept) — see
+  `docs/ARCHITECTURE.md` §4.
+- **Stage 3's note-derived `planned_return` field disagrees with the
+  structured-data proxy more than chance would predict**, and the
+  disagreement is not resolved (see "planned_return" above) — both
+  signals have known, disclosed limitations, and this is reported as an
+  open discrepancy, not evidence either one is simply wrong.
+- **The "unplanned readmission" label is a structured-data proxy**
+  (based on the outcome admission's own `admission_type`), not CMS's
+  full ICD-procedure/diagnosis-code-based algorithm, and does not exclude
+  OBSERVATION-type stays from the readmission count — see
+  `docs/ARCHITECTURE.md` §6 for the full disclosure and why this
+  operationalization was still chosen.
+- **A model-scale robustness check (does a larger auditor change the
+  RQ2 result?) was considered and explicitly not pursued** — it would
+  require a second full Stage 3 batch run, and the original run took
+  six days of cluster wall-clock time. Not affordable within this
+  thesis's timeline; recorded as a closed decision, not an oversight
+  (`docs/ARCHITECTURE.md` §5).
+- Stage 1's decision threshold is selected on the same out-of-fold data
+  used for early stopping — a mild contamination risk, flagged once,
+  never revisited.
+- Truncation asymmetry between Stage 2 (4096-token window) and Stage 3
+  (20,000-character safety cap) is much smaller than in earlier designs
+  but not eliminated for pathologically long notes.
 
 ## Ethical Considerations
 
