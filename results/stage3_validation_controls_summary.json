@@ -1,0 +1,63 @@
+{
+  "n_sample": 30,
+  "sample_hadm_ids": [
+    26792245,
+    29918825,
+    24405338,
+    23094292,
+    23170003,
+    28722298,
+    23065112,
+    22303820,
+    21713675,
+    24132189,
+    21381761,
+    25981557,
+    29967572,
+    27081888,
+    24968711,
+    20896821,
+    20366630,
+    23184157,
+    20099797,
+    29754182,
+    25884592,
+    22629484,
+    25852095,
+    29975140,
+    25490400,
+    24230554,
+    22152369,
+    20412774,
+    21420544,
+    25965285
+  ],
+  "d1_blind_note": {
+    "n": 150,
+    "decision_model_agreement_vs_real": 0.0,
+    "real_distribution": {
+      "uphold": 104,
+      "override": 46
+    },
+    "blind_note_distribution": {
+      "insufficient_evidence": 150
+    }
+  },
+  "d2_no_stage2": {
+    "n": 40,
+    "decision_model_agreement_vs_real": 0.825,
+    "real_distribution": {
+      "uphold": 27,
+      "override": 13
+    },
+    "no_stage2_distribution": {
+      "uphold": 30,
+      "override": 10
+    }
+  },
+  "d3_self_agreement": {
+    "n": 30,
+    "decision_model_agreement": 1.0,
+    "decision_rule_agreement": 1.0
+  }
+}

@@ -23,7 +23,7 @@ script itself computes.
 
 Usage::
 
-    python scripts/analyze_discordance_subgroups.py
+    python -m scripts.analyze_discordance_subgroups
 """
 
 from __future__ import annotations
