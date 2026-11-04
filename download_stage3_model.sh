@@ -14,8 +14,10 @@
 # https://huggingface.co/settings/tokens (read access is enough).
 #
 # This is a real download (~27B params in bf16, roughly 54-55 GB) -- expect
-# it to take a while even on a fast connection. Not yet run/tested as of
-# 2026-09-10; if it fails partway through, re-running is safe (snapshot_
+# it to take a while even on a fast connection. Confirmed working: this is
+# the exact model the full Stage 3 batch run (2026-10-06, all 9,899
+# admissions) and the D1/D2/D3 validation controls (2026-10-30) both ran
+# against. If it fails partway through, re-running is safe (snapshot_
 # download resumes/skips files it already has).
 #
 # Usage (on login node, from ~/thesis):
