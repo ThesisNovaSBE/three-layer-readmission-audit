@@ -1,0 +1,21 @@
+{
+  "n_stage3_batch": 9899,
+  "n_valid_annotation": 9806,
+  "n_actually_readmitted": 4375,
+  "n_comparable": 4375,
+  "agreement_rate": 0.8169142857142857,
+  "majority_baseline_agreement": 0.9581714285714286,
+  "structured_planned_rate": 0.04182857142857143,
+  "llm_planned_rate": 0.19245714285714285,
+  "cross_tab": {
+    "structured=planned": {
+      "no": 71,
+      "yes": 112
+    },
+    "structured=unplanned": {
+      "no": 3462,
+      "yes": 730
+    }
+  },
+  "note": "Restricted to patients who were actually readmitted within 30 days (readmission_30d==1) -- only for them does 'was the readmission planned' have a structured answer at all. Excludes annotation_failed rows (no valid planned_return) and the single LLM 'not_stated' row (neither agreement nor disagreement)."
+}

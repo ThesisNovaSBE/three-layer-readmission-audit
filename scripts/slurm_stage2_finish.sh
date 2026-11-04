@@ -58,7 +58,7 @@ echo "[slurm] Refreshing Stage 1+2 end-to-end pipeline evaluation ..."
 python -m src.model.evaluate_pipeline
 
 echo "[slurm] Running RQ1 comparison (Stage 1 vs Stage 2, notes-covered population) ..."
-python -m src.model.compare_layers
+python -m src.model.compare_stages
 
 echo "[slurm] All steps complete at $(date)"
 echo "[slurm] Results saved to models/"
