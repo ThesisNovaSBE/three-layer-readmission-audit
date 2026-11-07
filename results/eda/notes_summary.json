@@ -1,0 +1,740 @@
+{
+  "target": "readmission_30d_unplanned",
+  "max_seq_length": 4096,
+  "privacy": {
+    "min_cell": 11,
+    "note": "per-note numbers only; no text retained"
+  },
+  "inventory": {
+    "cohort_with_discharge_note": 313740,
+    "discharge_notes": 331793,
+    "discharge_note_types": [
+      {
+        "category": "DS",
+        "n": 331793,
+        "share": 1.0
+      }
+    ],
+    "discharge_notes_without_hadm": 0,
+    "radiology_reports": 2321355,
+    "radiology_note_types": [
+      {
+        "category": "RR",
+        "n": 2295635,
+        "share": 0.9889
+      },
+      {
+        "category": "AR",
+        "n": 25720,
+        "share": 0.0111
+      }
+    ],
+    "radiology_without_hadm_share": 0.5069,
+    "discharge_detail_fields": [
+      {
+        "category": "author",
+        "n": 186138,
+        "share": 1.0
+      }
+    ],
+    "radiology_coverage": {
+      "cohort_admissions_with_radiology": 294293,
+      "radiology_reports_per_admission": {
+        "n": 294293,
+        "n_missing": 0,
+        "missing_rate": 0.0,
+        "mean": 3.499,
+        "sd": 4.79,
+        "p1": 1.0,
+        "p5": 1.0,
+        "p25": 1.0,
+        "p50": 2.0,
+        "p75": 4.0,
+        "p95": 10.0,
+        "p99": 24.0
+      },
+      "admissions_without_discharge_note_but_with_radiology": 41820
+    },
+    "note_version": "2.2"
+  },
+  "coverage": {
+    "cohort_admissions": 521191,
+    "cohort_admissions_with_discharge_note": 313740,
+    "share": 0.602,
+    "notes_analysed": 313740,
+    "admissions_with_multiple_discharge_notes": 0,
+    "cohort_admissions_with_radiology": 294293,
+    "radiology_reports_per_admission": {
+      "n": 294293,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 3.499,
+      "sd": 4.79,
+      "p1": 1.0,
+      "p5": 1.0,
+      "p25": 1.0,
+      "p50": 2.0,
+      "p75": 4.0,
+      "p95": 10.0,
+      "p99": 24.0
+    },
+    "admissions_without_discharge_note_but_with_radiology": 41820
+  },
+  "length": {
+    "chars": {
+      "n": 313740,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 10607.0,
+      "sd": 4449.0,
+      "p1": 3339.0,
+      "p5": 4812.0,
+      "p25": 7516.0,
+      "p50": 9912.0,
+      "p75": 12902.0,
+      "p95": 18660.0,
+      "p99": 24708.0
+    },
+    "words": {
+      "n": 313740,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 1610.0,
+      "sd": 667.0,
+      "p1": 492.0,
+      "p5": 725.0,
+      "p25": 1144.0,
+      "p50": 1512.0,
+      "p75": 1964.0,
+      "p95": 2814.0,
+      "p99": 3694.0
+    },
+    "tokens": {
+      "n": 313740,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 3470.0,
+      "sd": 1449.0,
+      "p1": 1109.0,
+      "p5": 1559.0,
+      "p25": 2450.0,
+      "p50": 3268.0,
+      "p75": 4236.0,
+      "p95": 6046.0,
+      "p99": 8031.0
+    },
+    "tokens_by_outcome": {
+      "readmitted": {
+        "n": 61603,
+        "n_missing": 0,
+        "missing_rate": 0.0,
+        "mean": 3797.11,
+        "sd": 1553.146,
+        "p1": 1208.0,
+        "p5": 1730.0,
+        "p25": 2732.0,
+        "p50": 3582.0,
+        "p75": 4591.0,
+        "p95": 6572.0,
+        "p99": 8756.9
+      },
+      "not_readmitted": {
+        "n": 252137,
+        "n_missing": 0,
+        "missing_rate": 0.0,
+        "mean": 3389.98,
+        "sd": 1410.288,
+        "p1": 1091.0,
+        "p5": 1529.0,
+        "p25": 2393.0,
+        "p50": 3193.0,
+        "p75": 4142.0,
+        "p95": 5897.0,
+        "p99": 7801.0
+      }
+    },
+    "chars_per_token": 3.057,
+    "truncated_share": 0.2794,
+    "truncated_share_readmitted": 0.3597,
+    "truncated_share_not_readmitted": 0.2597,
+    "truncated_by_age_band": [
+      {
+        "age_band": "18-40",
+        "n": 52192,
+        "truncated_share": 0.1809
+      },
+      {
+        "age_band": "41-55",
+        "n": 70456,
+        "truncated_share": 0.2579
+      },
+      {
+        "age_band": "56-70",
+        "n": 96878,
+        "truncated_share": 0.3036
+      },
+      {
+        "age_band": "70+",
+        "n": 94214,
+        "truncated_share": 0.3251
+      }
+    ],
+    "tokens_hist_readmitted": {
+      "edges": [
+        1208.0,
+        1358.978,
+        1509.956,
+        1660.934,
+        1811.912,
+        1962.89,
+        2113.868,
+        2264.846,
+        2415.824,
+        2566.802,
+        2717.78,
+        2868.758,
+        3019.736,
+        3170.714,
+        3321.692,
+        3472.67,
+        3623.648,
+        3774.626,
+        3925.604,
+        4076.582,
+        4227.56,
+        4378.538,
+        4529.516,
+        4680.494,
+        4831.472,
+        4982.45,
+        5133.428,
+        5284.406,
+        5435.384,
+        5586.362,
+        5737.34,
+        5888.318,
+        6039.296,
+        6190.274,
+        6341.252,
+        6492.23,
+        6643.208,
+        6794.186,
+        6945.164,
+        7096.142,
+        7247.12,
+        7398.098,
+        7549.076,
+        7700.054,
+        7851.032,
+        8002.01,
+        8152.988,
+        8303.966,
+        8454.944,
+        8605.922,
+        8756.9
+      ],
+      "counts": [
+        409,
+        658,
+        891,
+        1115,
+        1324,
+        1655,
+        1824,
+        2034,
+        2211,
+        2420,
+        2595,
+        2630,
+        2744,
+        2852,
+        2854,
+        2703,
+        2681,
+        2506,
+        2429,
+        2173,
+        2181,
+        1927,
+        1775,
+        1655,
+        1493,
+        1300,
+        1155,
+        1021,
+        896,
+        822,
+        664,
+        622,
+        608,
+        490,
+        388,
+        388,
+        277,
+        279,
+        266,
+        243,
+        199,
+        184,
+        147,
+        149,
+        133,
+        108,
+        81,
+        76,
+        63,
+        72
+      ]
+    },
+    "tokens_hist_not_readmitted": {
+      "edges": [
+        1091.0,
+        1225.2,
+        1359.4,
+        1493.6,
+        1627.8,
+        1762.0,
+        1896.2,
+        2030.4,
+        2164.6,
+        2298.8,
+        2433.0,
+        2567.2,
+        2701.4,
+        2835.6,
+        2969.8,
+        3104.0,
+        3238.2,
+        3372.4,
+        3506.6,
+        3640.8,
+        3775.0,
+        3909.2,
+        4043.4,
+        4177.6,
+        4311.8,
+        4446.0,
+        4580.2,
+        4714.4,
+        4848.6,
+        4982.8,
+        5117.0,
+        5251.2,
+        5385.4,
+        5519.6,
+        5653.8,
+        5788.0,
+        5922.2,
+        6056.4,
+        6190.6,
+        6324.8,
+        6459.0,
+        6593.2,
+        6727.4,
+        6861.6,
+        6995.8,
+        7130.0,
+        7264.2,
+        7398.4,
+        7532.6,
+        7666.8,
+        7801.0
+      ],
+      "counts": [
+        1960,
+        2895,
+        3998,
+        5110,
+        6357,
+        7146,
+        7928,
+        8739,
+        9376,
+        10076,
+        10406,
+        10623,
+        10679,
+        10653,
+        10554,
+        10521,
+        10058,
+        9798,
+        9385,
+        8769,
+        8432,
+        7746,
+        7204,
+        6621,
+        5945,
+        5551,
+        4913,
+        4485,
+        3956,
+        3513,
+        3090,
+        2771,
+        2380,
+        2032,
+        1932,
+        1714,
+        1463,
+        1221,
+        1157,
+        913,
+        836,
+        753,
+        646,
+        586,
+        477,
+        427,
+        398,
+        344,
+        295,
+        272
+      ]
+    }
+  },
+  "sections": {
+    "per_section": [
+      {
+        "section": "Chief Complaint",
+        "present_share": 0.969,
+        "median_relative_position": 0.024,
+        "beyond_window_share_of_present": 0.0
+      },
+      {
+        "section": "History of Present Illness",
+        "present_share": 0.9836,
+        "median_relative_position": 0.035,
+        "beyond_window_share_of_present": 0.0
+      },
+      {
+        "section": "Past Medical History",
+        "present_share": 0.9843,
+        "median_relative_position": 0.17,
+        "beyond_window_share_of_present": null
+      },
+      {
+        "section": "Social History",
+        "present_share": 0.9737,
+        "median_relative_position": 0.211,
+        "beyond_window_share_of_present": 0.0002,
+        "placeholder_only_share_of_present": 0.9708
+      },
+      {
+        "section": "Family History",
+        "present_share": 0.9699,
+        "median_relative_position": 0.214,
+        "beyond_window_share_of_present": 0.0002,
+        "placeholder_only_share_of_present": 0.024
+      },
+      {
+        "section": "Physical Exam",
+        "present_share": 0.9578,
+        "median_relative_position": 0.224,
+        "beyond_window_share_of_present": 0.0003
+      },
+      {
+        "section": "Pertinent Results",
+        "present_share": 0.964,
+        "median_relative_position": 0.318,
+        "beyond_window_share_of_present": 0.0009
+      },
+      {
+        "section": "Brief Hospital Course",
+        "present_share": 0.8798,
+        "median_relative_position": 0.501,
+        "beyond_window_share_of_present": 0.0279
+      },
+      {
+        "section": "Medications on Admission",
+        "present_share": 0.9424,
+        "median_relative_position": 0.744,
+        "beyond_window_share_of_present": 0.1086
+      },
+      {
+        "section": "Discharge Medications",
+        "present_share": 0.982,
+        "median_relative_position": 0.789,
+        "beyond_window_share_of_present": 0.1378
+      },
+      {
+        "section": "Discharge Disposition",
+        "present_share": 0.9879,
+        "median_relative_position": 0.877,
+        "beyond_window_share_of_present": 0.198,
+        "placeholder_only_share_of_present": 0.0001
+      },
+      {
+        "section": "Discharge Diagnosis",
+        "present_share": 0.9594,
+        "median_relative_position": 0.881,
+        "beyond_window_share_of_present": 0.1995
+      },
+      {
+        "section": "Discharge Condition",
+        "present_share": 0.9986,
+        "median_relative_position": 0.895,
+        "beyond_window_share_of_present": 0.2121
+      },
+      {
+        "section": "Discharge Instructions",
+        "present_share": 0.9955,
+        "median_relative_position": 0.91,
+        "beyond_window_share_of_present": 0.2202,
+        "placeholder_only_share_of_present": 0.0081
+      },
+      {
+        "section": "Followup Instructions",
+        "present_share": 0.9849,
+        "median_relative_position": 0.997,
+        "beyond_window_share_of_present": 0.2784,
+        "placeholder_only_share_of_present": 1.0
+      }
+    ],
+    "n_sections_found": {
+      "n": 313740,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 14.533,
+      "sd": 0.946,
+      "p1": 9.0,
+      "p5": 13.0,
+      "p25": 14.0,
+      "p50": 15.0,
+      "p75": 15.0,
+      "p95": 15.0,
+      "p99": 15.0
+    }
+  },
+  "keywords": {
+    "caveat": "lexical match, no negation handling",
+    "per_concept": [
+      {
+        "concept": "palliative / hospice",
+        "mention_share": 0.0423,
+        "rate_if_mentioned": 0.2353,
+        "rate_if_absent": 0.1946,
+        "mention_share_readmitted": 0.0507,
+        "mention_share_not_readmitted": 0.0403
+      },
+      {
+        "concept": "lives alone",
+        "mention_share": 0.0081,
+        "rate_if_mentioned": 0.1866,
+        "rate_if_absent": 0.1964,
+        "mention_share_readmitted": 0.0077,
+        "mention_share_not_readmitted": 0.0082
+      },
+      {
+        "concept": "home services (VNA)",
+        "mention_share": 0.041,
+        "rate_if_mentioned": 0.1963,
+        "rate_if_absent": 0.1964,
+        "mention_share_readmitted": 0.041,
+        "mention_share_not_readmitted": 0.041
+      },
+      {
+        "concept": "nonadherence / AMA",
+        "mention_share": 0.0421,
+        "rate_if_mentioned": 0.2613,
+        "rate_if_absent": 0.1935,
+        "mention_share_readmitted": 0.056,
+        "mention_share_not_readmitted": 0.0387
+      },
+      {
+        "concept": "cognitive impairment",
+        "mention_share": 0.0944,
+        "rate_if_mentioned": 0.1951,
+        "rate_if_absent": 0.1965,
+        "mention_share_readmitted": 0.0938,
+        "mention_share_not_readmitted": 0.0945
+      },
+      {
+        "concept": "functional dependence",
+        "mention_share": 0.2554,
+        "rate_if_mentioned": 0.2092,
+        "rate_if_absent": 0.1919,
+        "mention_share_readmitted": 0.2722,
+        "mention_share_not_readmitted": 0.2513
+      },
+      {
+        "concept": "substance use",
+        "mention_share": 0.1285,
+        "rate_if_mentioned": 0.2319,
+        "rate_if_absent": 0.1911,
+        "mention_share_readmitted": 0.1518,
+        "mention_share_not_readmitted": 0.1228
+      },
+      {
+        "concept": "follow-up appointment",
+        "mention_share": 0.348,
+        "rate_if_mentioned": 0.1838,
+        "rate_if_absent": 0.203,
+        "mention_share_readmitted": 0.3258,
+        "mention_share_not_readmitted": 0.3535
+      }
+    ]
+  },
+  "timing": {
+    "hours_dischtime_to_storetime": {
+      "n": 313728,
+      "n_missing": 12,
+      "missing_rate": 0.0,
+      "mean": 61.1,
+      "sd": 419.4,
+      "p1": -9.1,
+      "p5": -3.8,
+      "p25": -0.3,
+      "p50": 3.4,
+      "p75": 29.2,
+      "p95": 194.3,
+      "p99": 990.0
+    },
+    "hours_dischtime_to_storetime_hist": {
+      "edges": [
+        -9.0833,
+        15.8949,
+        40.8731,
+        65.8513,
+        90.8295,
+        115.8077,
+        140.786,
+        165.7642,
+        190.7424,
+        215.7206,
+        240.6988,
+        265.677,
+        290.6553,
+        315.6335,
+        340.6117,
+        365.5899,
+        390.5681,
+        415.5463,
+        440.5246,
+        465.5028,
+        490.481,
+        515.4592,
+        540.4374,
+        565.4156,
+        590.3939,
+        615.3721,
+        640.3503,
+        665.3285,
+        690.3067,
+        715.2849,
+        740.2632,
+        765.2414,
+        790.2196,
+        815.1978,
+        840.176,
+        865.1542,
+        890.1325,
+        915.1107,
+        940.0889,
+        965.0671,
+        990.0453
+      ],
+      "counts": [
+        193730,
+        46906,
+        21951,
+        12304,
+        7366,
+        5189,
+        4047,
+        2888,
+        1992,
+        1604,
+        1240,
+        1136,
+        915,
+        721,
+        554,
+        472,
+        407,
+        382,
+        348,
+        313,
+        255,
+        247,
+        224,
+        212,
+        190,
+        165,
+        162,
+        165,
+        190,
+        143,
+        116,
+        128,
+        129,
+        117,
+        93,
+        88,
+        78,
+        81,
+        103,
+        102
+      ]
+    },
+    "stored_before_discharge_share": 0.2614,
+    "stored_within_24h_share": 0.4474,
+    "charttime_minus_discharge_date_days": [
+      {
+        "category": "0",
+        "n": 313740,
+        "share": 1.0
+      }
+    ]
+  },
+  "deid": {
+    "placeholders_per_note": {
+      "n": 313740,
+      "n_missing": 0,
+      "missing_rate": 0.0,
+      "mean": 61.0,
+      "sd": 36.0,
+      "p1": 17.0,
+      "p5": 23.0,
+      "p25": 38.0,
+      "p50": 53.0,
+      "p75": 74.0,
+      "p95": 121.0,
+      "p99": 190.0
+    },
+    "placeholder_hist_rows": [
+      {
+        "bucket": "0",
+        "n": 0,
+        "share": 0.0
+      },
+      {
+        "bucket": "1-10",
+        "n": 132,
+        "share": 0.0004
+      },
+      {
+        "bucket": "11-25",
+        "n": 24645,
+        "share": 0.0786
+      },
+      {
+        "bucket": "26-50",
+        "n": 119017,
+        "share": 0.3793
+      },
+      {
+        "bucket": "51-100",
+        "n": 139626,
+        "share": 0.445
+      },
+      {
+        "bucket": "100+",
+        "n": 30320,
+        "share": 0.0966
+      }
+    ]
+  },
+  "sample": null
+}
