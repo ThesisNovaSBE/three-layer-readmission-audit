@@ -28,7 +28,8 @@ def _fake_result(hadm_id: int, *, fail: bool = False, decision: str = "override"
     """Build a stand-in for ExplanationResult -- exposes both attribute access
     (as check_self_agreement uses) and .model_dump() (as run_batch_audit uses)."""
     data = {
-        "hadm_id": hadm_id, "stage1_score": 0.6, "stage1_threshold": 0.35,
+        "hadm_id": hadm_id, "stage1_score": 0.6, "stage1_score_raw": 0.55,
+        "stage1_threshold": 0.35,
         "stage2_score": 0.4, "stage2_confirmed": True, "r1": 70.0, "r2": 40.0,
         "displacement": -30.0, "discordance_mode": "NOTE_MITIGATES",
         "top_shap_features": [] if fail else ["creatinine (last): 3.2 (up risk, SHAP=+0.18)"],
@@ -59,6 +60,7 @@ def results_df():  # pylint: disable=missing-function-docstring
         "subject_id": [1, 2, 3, 4],
         "readmission_30d": [0, 1, 0, 1],
         "stage1_score": [0.5, 0.6, 0.4, 0.7],
+        "stage1_score_raw": [0.45, 0.55, 0.35, 0.65],
         "stage1_threshold": [0.35] * 4,
         "stage2_score": [0.3, 0.5, 0.2, 0.6],
         "stage2_confirmed": [0, 1, 0, 1],
@@ -538,11 +540,14 @@ def test_sensitivity_sweep_raises_without_batch_results(tmp_path):
 
 
 def test_sensitivity_sweep_writes_expected_json(tmp_path):
-    """Must read displacement from an existing batch CSV and write the sweep JSON."""
+    """Must read displacement from an existing batch CSV, EXCLUDE prep-failure
+    rows (PREP_FAILED / NaN displacement), and write the sweep JSON."""
     batch_csv = tmp_path / "stage3_batch_results.csv"
     pd.DataFrame({
-        "hadm_id": [1, 2, 3, 4],
-        "displacement": [-40.0, -5.0, 10.0, 35.0],
+        "hadm_id": [1, 2, 3, 4, 5],
+        "displacement": [-40.0, -5.0, 10.0, 35.0, float("nan")],
+        "discordance_mode": ["NOTE_MITIGATES", "CONCORDANT", "CONCORDANT",
+                             "NOTE_AMPLIFIES", "PREP_FAILED"],
     }).to_csv(batch_csv, index=False)
 
     sweep = run_sensitivity_sweep(model_dir=tmp_path)
@@ -550,7 +555,8 @@ def test_sensitivity_sweep_writes_expected_json(tmp_path):
     out_path = tmp_path / "discordance_sensitivity.json"
     assert out_path.exists()
     saved = json.loads(out_path.read_text())
-    assert saved["n_patients"] == 4
+    assert saved["n_patients"] == 4  # the PREP_FAILED row is excluded
+    assert saved["n_excluded_prep_failed"] == 1
     assert saved["sweep"] == sweep
 
 

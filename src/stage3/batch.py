@@ -68,7 +68,7 @@ from src.stage3.explain import call_llm_batch
 from src.stage3.pipeline import _assemble_result, _lookup_patient, _prepare_patient, explain_patient
 
 _OUTPUT_FIELDS = [
-    "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
+    "hadm_id", "stage1_score", "stage1_score_raw", "stage1_threshold", "stage2_score",
     "stage2_confirmed", "r1", "r2", "displacement", "discordance_mode",
     "top_shap_features", "attention_sentences",
     "mitigating_grounds", "aggravating_grounds", "all_quotes_verified",
@@ -166,19 +166,25 @@ def _prep_failure_row(
     try:
         patient = _lookup_patient(hadm_id, results_df)
         stage1_score = patient["stage1_score"]
+        stage1_score_raw = patient["stage1_score_raw"]
         stage1_threshold = patient["stage1_threshold"]
         stage2_score = patient["stage2_score"]
         stage2_confirmed = patient["stage2_confirmed"]
     except Exception:  # pylint: disable=broad-exception-caught
-        stage1_score = stage1_threshold = stage2_score = 0.0
+        stage1_score = stage1_score_raw = stage1_threshold = stage2_score = 0.0
         stage2_confirmed = False
     return {
         "hadm_id": hadm_id,
         "stage1_score": stage1_score,
+        "stage1_score_raw": stage1_score_raw,
         "stage1_threshold": stage1_threshold,
         "stage2_score": stage2_score,
         "stage2_confirmed": stage2_confirmed,
-        "r1": 0.0, "r2": 0.0, "displacement": 0.0, "discordance_mode": "CONCORDANT",
+        # PREP_FAILED / NaN, not CONCORDANT / 0: a prep failure produced no
+        # real discordance, so it must be excluded from the sensitivity sweep
+        # and discordance analyses, not silently counted as a concordant 0.
+        "r1": float("nan"), "r2": float("nan"),
+        "displacement": float("nan"), "discordance_mode": "PREP_FAILED",
         "top_shap_features": "[]", "attention_sentences": "[]",
         "mitigating_grounds": "[]", "aggravating_grounds": "[]",
         "all_quotes_verified": None, "planned_return": None,
@@ -396,6 +402,15 @@ def run_batch_audit(
         The output path written to.
     """
     out_path = out_path or (get_model_dir() / "stage3_batch_results.csv")
+    if resume and out_path.exists():
+        existing_header = pd.read_csv(out_path, nrows=0).columns.tolist()
+        if existing_header != _OUTPUT_FIELDS:
+            raise SystemExit(
+                f"[stage3/batch] Refusing to --resume into {out_path}: its header "
+                f"({len(existing_header)} columns) does not match the current output "
+                f"schema ({len(_OUTPUT_FIELDS)} columns). This is almost certainly "
+                "an output file from an earlier run -- move it aside first."
+            )
     setup = _setup_batch(
         cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path
     )
@@ -458,14 +473,26 @@ def run_sensitivity_sweep(
             f"{results_path} not found. Run `python -m src.stage3.batch` first."
         )
     df = pd.read_csv(results_path)
-    sweep = sweep_discordance_thresholds(df["displacement"].to_numpy(), thresholds_pp)
+    # Exclude prep-failure rows (discordance_mode == "PREP_FAILED",
+    # displacement == NaN): they have no real discordance, so counting them
+    # would silently inflate CONCORDANT.
+    scored = df
+    if "discordance_mode" in scored.columns:
+        scored = scored[scored["discordance_mode"] != "PREP_FAILED"]
+    scored = scored.dropna(subset=["displacement"])
+    n_excluded = len(df) - len(scored)
+    sweep = sweep_discordance_thresholds(scored["displacement"].to_numpy(), thresholds_pp)
 
     out_path = model_dir / "discordance_sensitivity.json"
     out_path.write_text(json.dumps({
-        "n_patients": int(len(df)),
+        "n_patients": int(len(scored)),
+        "n_excluded_prep_failed": int(n_excluded),
         "current_config_value_pp": 20.0,
         "sweep": sweep,
     }, indent=2))
+    if n_excluded:
+        print(f"[stage3/batch] Sensitivity sweep excluded {n_excluded} "
+              "prep-failure row(s) with no discordance.")
     print(f"[stage3/batch] Sensitivity sweep saved -> {out_path}")
     for thr, dist in sweep.items():
         print(f"  ±{thr}pp: MITIGATES={dist['NOTE_MITIGATES']:.1%}  "

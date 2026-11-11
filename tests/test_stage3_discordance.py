@@ -12,6 +12,7 @@ import pytest
 
 from src.stage3.discordance import (
     DISCORDANCE_MODES,
+    _percentile_rank,
     compute_discordance,
     sweep_discordance_thresholds,
 )
@@ -25,6 +26,26 @@ def test_modes_tuple_nonempty():
     assert "CONCORDANT" in DISCORDANCE_MODES
     assert "NOTE_MITIGATES" in DISCORDANCE_MODES
     assert "NOTE_AMPLIFIES" in DISCORDANCE_MODES
+
+
+# ── _percentile_rank mid-rank tie guard ──────────────────────────────────────
+
+def test_percentile_rank_midrank_on_ties():
+    """A tie block gets the MEAN of the strictly-below and at-or-below ranks,
+    not the top of the block (which would bias the percentile upward)."""
+    pop = np.array([10.0, 20.0, 20.0, 20.0, 30.0])
+    # For value 20: below = 1/5 = 20%, at_or_below = 4/5 = 80%, mid = 50%.
+    assert _percentile_rank(20.0, pop) == pytest.approx(50.0)
+    # A plain (<=) rank would have said 80 -- confirm we are NOT doing that.
+    assert _percentile_rank(20.0, pop) != pytest.approx(80.0)
+
+
+def test_percentile_rank_no_ties_matches_plain_rank_midpoint():
+    """With all-distinct values, mid-rank is the midpoint between the
+    strictly-below and at-or-below fractions (both well-defined)."""
+    pop = np.array([1.0, 2.0, 3.0, 4.0])
+    # value 3: below = 2/4 = 50%, at_or_below = 3/4 = 75%, mid = 62.5%.
+    assert _percentile_rank(3.0, pop) == pytest.approx(62.5)
 
 
 # ── compute_discordance ─────────────────────────────────────────────────────────

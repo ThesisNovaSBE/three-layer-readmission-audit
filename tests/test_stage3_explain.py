@@ -10,6 +10,14 @@ import json
 
 import numpy as np
 
+from src.stage3._notecap import (
+    _NOTE_HEAD_CHARS,
+    _NOTE_MAX_CHARS,
+    _NOTE_TAIL_CHARS,
+    _note_block,
+    _shown_note_text,
+    is_note_truncated,
+)
 from src.stage3.explain import (
     AGGRAVATING_GROUNDS,
     DECISIONS,
@@ -22,7 +30,6 @@ from src.stage3.explain import (
     _trim_incomplete_trailing_sentence,
     build_prompt,
     compute_decision_rule,
-    is_note_truncated,
     verify_quote,
 )
 
@@ -520,18 +527,28 @@ def test_verify_quote_still_false_for_genuine_fabrication_despite_normalization(
 # .tolist() the same way a real torch tensor row does.
 
 EOS_ID = 999
+EOT_ID = 777  # e.g. the id of "<end_of_turn>" -- a second valid stop token
+STOP_IDS = {EOS_ID, EOT_ID}
 
 
 def test_detect_truncated_false_when_eos_present():
     """A row that contains the EOS token finished naturally -- not truncated."""
     rows = np.array([[1, 2, EOS_ID, 0], [5, 6, 7, EOS_ID]])
-    assert _detect_truncated(rows, EOS_ID) == [False, False]
+    assert _detect_truncated(rows, STOP_IDS) == [False, False]
+
+
+def test_detect_truncated_false_when_any_stop_token_present():
+    """A row that ended on a SECONDARY stop token (e.g. <end_of_turn>) is not
+    truncated, even though it lacks the primary EOS -- the exact over-report
+    this multi-stop-token change fixes."""
+    rows = np.array([[1, 2, EOT_ID, 0], [5, 6, 7, EOT_ID]])
+    assert _detect_truncated(rows, STOP_IDS) == [False, False]
 
 
 def test_detect_truncated_true_when_eos_absent():
-    """A row that never produced EOS ran the full token budget -- truncated."""
+    """A row that never produced any stop token ran the full budget -- truncated."""
     rows = np.array([[1, 2, 3, 4], [5, 6, 7, 8]])
-    assert _detect_truncated(rows, EOS_ID) == [True, True]
+    assert _detect_truncated(rows, STOP_IDS) == [True, True]
 
 
 def test_detect_truncated_mixed_batch():
@@ -541,19 +558,107 @@ def test_detect_truncated_mixed_batch():
     every row reports the same generated *length*, so length alone can't
     distinguish them)."""
     rows = np.array([[1, 2, EOS_ID, 0], [5, 6, 7, 8]])
-    assert _detect_truncated(rows, EOS_ID) == [False, True]
+    assert _detect_truncated(rows, STOP_IDS) == [False, True]
 
 
-def test_detect_truncated_no_eos_id_returns_all_false():
-    """If the tokenizer has no EOS token id, nothing can be flagged truncated
+def test_detect_truncated_no_stop_ids_returns_all_false():
+    """If no stop-token ids are known, nothing can be flagged truncated
     rather than guessing -- avoids a crash and a misleading signal."""
     rows = np.array([[1, 2, 3], [4, 5, 6]])
+    assert _detect_truncated(rows, set()) == [False, False]
     assert _detect_truncated(rows, None) == [False, False]
 
 
 def test_detect_truncated_empty_batch():
     """Zero rows must return an empty list, not error."""
-    assert _detect_truncated(np.empty((0, 4), dtype=int), EOS_ID) == []
+    assert _detect_truncated(np.empty((0, 4), dtype=int), STOP_IDS) == []
+
+
+# ── Note head+tail cap (Part 2) ──────────────────────────────────────────────
+
+_HEAD_SENTENCE = "HEAD_SENTENCE: admitted for chest pain evaluation."
+_TAIL_SENTENCE = "TAIL_SENTENCE: discharged home with cardiology follow-up in two weeks."
+_MIDDLE_SENTENCE = "MIDDLE_ONLY_SENTENCE: this sentence sits in the omitted middle."
+
+
+def _long_note() -> str:
+    """A note well over the cap, with recognizable sentences in the head, the
+    (to-be-omitted) middle, and the tail."""
+    head = _HEAD_SENTENCE + "\n" + "h" * 13_000          # head region (> 12,000)
+    middle = "m" * 5_000 + _MIDDLE_SENTENCE + "m" * 5_000
+    tail = "t" * 9_000 + "\n" + _TAIL_SENTENCE           # tail region (> 8,000)
+    note = head + middle + tail
+    assert len(note) > _NOTE_MAX_CHARS
+    return note
+
+
+def test_shown_note_text_short_note_unchanged():
+    """A note within the cap is shown verbatim (stripped)."""
+    note = "Short discharge note. Follow up with cardiology."
+    assert _shown_note_text(note) == note
+    assert is_note_truncated(note) is False
+
+
+def test_shown_note_text_long_note_has_head_marker_tail():
+    """A long note is shown as head + omitted-middle marker + tail, and the
+    middle is gone."""
+    shown = _shown_note_text(_long_note())
+    assert _HEAD_SENTENCE in shown
+    assert _TAIL_SENTENCE in shown
+    assert "middle of the discharge note omitted" in shown
+    assert _MIDDLE_SENTENCE not in shown
+    # Body is at most the cap plus the marker line (head<=12k + tail<=8k).
+    assert len(shown) <= _NOTE_MAX_CHARS + 200
+    assert is_note_truncated(_long_note()) is True
+
+
+def test_shown_note_text_respects_head_and_tail_budgets():
+    """Head and tail stay within their individual budgets after newline trim."""
+    note = _long_note()
+    shown = _shown_note_text(note)
+    head, tail = shown.split("\n", 1)[0], shown.rsplit("\n", 1)[-1]
+    assert len(head) <= _NOTE_HEAD_CHARS
+    assert len(tail) <= _NOTE_TAIL_CHARS
+
+
+def test_quote_from_tail_verifies_quote_from_middle_does_not():
+    """Quotes are verified against the SHOWN text: a tail quote verifies, a
+    quote that exists only in the omitted middle does not."""
+    shown = _shown_note_text(_long_note())
+    assert verify_quote(_TAIL_SENTENCE, shown) is True
+    assert verify_quote(_MIDDLE_SENTENCE, shown) is False
+    # ...even though the middle sentence IS in the full note.
+    assert verify_quote(_MIDDLE_SENTENCE, _long_note()) is True
+
+
+def test_note_block_capped_header_wording():
+    """A capped note gets the 'middle section omitted' header; a short note
+    keeps the 'full discharge note' wording."""
+    capped = _note_block(_long_note())
+    assert "middle section omitted to fit" in capped
+    assert f"{_NOTE_MAX_CHARS:,}-character limit" in capped
+    short = _note_block("Short note, follow up with cardiology.")
+    assert "full discharge note" in short
+
+
+def test_finalize_annotation_verifies_against_shown_text():
+    """Through _finalize_annotation, a tail-only quote verifies and a
+    middle-only quote does not."""
+    note = _long_note()
+    raw = json.dumps({
+        "mitigating_grounds": [],
+        "aggravating_grounds": [
+            {"ground": "no_followup_arranged", "quote": _MIDDLE_SENTENCE},
+            {"ground": "cognitive_impairment", "quote": _TAIL_SENTENCE},
+        ],
+        "planned_return": "not_stated",
+        "clinical_justification": "Mixed evidence.",
+        "decision": "uphold",
+    })
+    ann = _finalize_annotation(raw, note, likely_truncated=False)
+    verified = {g["ground"]: g["quote_verified"] for g in ann["aggravating_grounds"]}
+    assert verified["cognitive_impairment"] is True      # tail -> shown -> verifies
+    assert verified["no_followup_arranged"] is False     # middle -> omitted -> unverified
 
 
 # ── _trim_incomplete_trailing_sentence ────────────────────────────────────────

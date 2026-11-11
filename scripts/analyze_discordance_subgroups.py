@@ -98,11 +98,14 @@ def main() -> None:
     has_decision = merged["decision_model"].isin(["uphold", "override"])
     n_excluded = int((~has_decision).sum())
     scored = merged[has_decision].copy()
-    print(f"Excluded (no valid Stage 3 decision -- failed/insufficient_evidence): "
-          f"{n_excluded:,}")
+    print(f"Excluded (no valid Stage 3 decision -- failed/insufficient_evidence/"
+          f"prep-failed): {n_excluded:,}")
 
+    # Split by the real discordance modes only. PREP_FAILED rows (no real
+    # discordance) are already gone via has_decision, but name the modes
+    # explicitly so a PREP_FAILED row can never leak into "discordant".
     concordant = scored[scored["discordance_mode"] == "CONCORDANT"]
-    discordant = scored[scored["discordance_mode"] != "CONCORDANT"]
+    discordant = scored[scored["discordance_mode"].isin(["NOTE_MITIGATES", "NOTE_AMPLIFIES"])]
     print(f"Concordant: {len(concordant):,}  |  Discordant: {len(discordant):,}")
 
     print("\nComputing concordant subgroup (bootstrap CIs, ~1 min)...")
