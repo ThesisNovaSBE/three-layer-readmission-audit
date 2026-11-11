@@ -63,16 +63,25 @@ from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
 from src.stage3.discordance import sweep_discordance_thresholds
+from src.stage3._annotation import BatchGenerationError, generation_failure_annotation
 from src.stage3.explain import call_llm_batch
 from src.stage3.pipeline import _assemble_result, _lookup_patient, _prepare_patient, explain_patient
 
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
     "stage2_confirmed", "r1", "r2", "displacement", "discordance_mode",
+    "top_shap_features", "attention_sentences",
     "mitigating_grounds", "aggravating_grounds", "all_quotes_verified",
     "planned_return", "clinical_justification", "decision_model",
     "decision_rule", "note_truncated", "model_name", "annotation_failed",
 ]
+# top_shap_features/attention_sentences (2026-11): what the auditor actually
+# saw in its prompt, previously computed (ExplanationResult already had
+# both fields) but never written to the output CSV -- every post-hoc check
+# of the real SHAP/attention bugs had to reconstruct these from scratch
+# against the Stage 1 artifact and the raw notes instead of just reading
+# them. Must be added before the Stage 3 rerun: the only time this is free
+# to add is before the six-day run, not after.
 
 
 def _load_artifact(cfg: AppConfig) -> dict:
@@ -170,6 +179,7 @@ def _prep_failure_row(
         "stage2_score": stage2_score,
         "stage2_confirmed": stage2_confirmed,
         "r1": 0.0, "r2": 0.0, "displacement": 0.0, "discordance_mode": "CONCORDANT",
+        "top_shap_features": "[]", "attention_sentences": "[]",
         "mitigating_grounds": "[]", "aggravating_grounds": "[]",
         "all_quotes_verified": None, "planned_return": None,
         "clinical_justification": f"[PREP FAILED: {exc}]",
@@ -179,33 +189,74 @@ def _prep_failure_row(
     }
 
 
+def _retry_chunk_individually(
+    prepared: list[tuple[int, object]], cfg: AppConfig
+) -> tuple[list[dict], int, int]:
+    """After a whole-chunk generate() failure, retry each patient once in a
+    batch of one. Returns (annotations, n_retried, n_retry_failed) with one
+    annotation per prepared patient, in order -- a real annotation on
+    recovery, or a generation_failure_annotation (annotation_failed=True) if
+    the individual retry also raised. Logged separately from the normal
+    per-chunk counters so retries are visible in the job log."""
+    annotations: list[dict] = []
+    n_retried = n_retry_failed = 0
+    for hadm_id, prep in prepared:
+        n_retried += 1
+        try:
+            single = call_llm_batch(
+                [prep.prompt], cfg, note_texts=[prep.prompt_note_text],
+                raise_on_generate_error=True,
+            )
+            annotations.append(single[0])
+        except BatchGenerationError as exc:
+            n_retry_failed += 1
+            print(f"[stage3/batch] [generate-retry] hadm_id={hadm_id} "
+                  f"FAILED again: {exc} -- recording as annotation_failed", flush=True)
+            annotations.append(generation_failure_annotation(str(exc)))
+    print(f"[stage3/batch] [generate-retry] {n_retried} retried, "
+          f"{n_retried - n_retry_failed} recovered, {n_retry_failed} still failed",
+          flush=True)
+    return annotations, n_retried, n_retry_failed
+
+
 def _process_chunk(
     chunk: list[int],
     cfg: AppConfig,
+    setup: "_BatchSetup",
     *,
-    results_df: pd.DataFrame,
-    artifact: dict,
-    feature_matrix: pd.DataFrame,
-    notes_lookup: dict[int, str],
     writer: "csv.DictWriter",
     fh,
-) -> tuple[int, int, int]:
+    suppress_note: bool = False,
+    suppress_stage2: bool = False,
+) -> tuple[int, int, int, int, int]:
     """Prepare, batch-generate, assemble, and write one chunk of patients.
 
     Extracted from run_batch_audit() (2026-09-15) to fix a pylint
     too-many-locals -- same reason src/stage2/calibrate.py's cache helpers
-    were split out. Returns (n_ok, n_failed, n_annotation_failed) deltas
+    were split out. ``setup`` bundles the pre-loaded artifact / results /
+    feature matrix / notes so this stays within the arg limit. Returns
+    (n_ok, n_failed, n_annotation_failed, n_retried, n_retry_failed) deltas
     for this chunk only; the caller accumulates running totals.
+
+    suppress_note/suppress_stage2: validation-control manipulation (Phase
+    D1/D2), threaded through to _prepare_patient. Default False for the
+    real run. scripts/run_validation_controls.py passes these through this
+    same batched path (not a separate one-at-a-time implementation) so the
+    manipulated input is the only thing that differs from the main run --
+    confirmed 2026-11 that running controls one patient at a time instead
+    of batched (as the main run does) is itself a confound in bfloat16.
     """
+    results_df = setup.results_df
     n_ok = n_failed = n_annotation_failed = 0
     prepared: list[tuple[int, object]] = []
     for hadm_id in chunk:
         try:
             prepared.append((hadm_id, _prepare_patient(
                 hadm_id, cfg,
-                results_df=results_df, artifact=artifact,
-                feature_matrix=feature_matrix,
-                note_text=notes_lookup.get(hadm_id, ""),
+                results_df=results_df, artifact=setup.artifact,
+                suppress_note=suppress_note, suppress_stage2=suppress_stage2,
+                feature_matrix=setup.feature_matrix,
+                note_text=setup.notes_lookup.get(hadm_id, ""),
             )))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # One bad admission (missing note, malformed feature row) must
@@ -217,32 +268,50 @@ def _process_chunk(
             n_failed += 1
 
     if not prepared:
-        return n_ok, n_failed, n_annotation_failed
+        return n_ok, n_failed, n_annotation_failed, 0, 0
 
     prompts = [p.prompt for _, p in prepared]
     note_texts = [p.prompt_note_text for _, p in prepared]
+    n_retried = n_retry_failed = 0
     try:
-        annotations = call_llm_batch(prompts, cfg, note_texts=note_texts)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        # A whole-chunk generation failure (OOM, transient LLM-serving
-        # error) must not kill the rest of the batch -- mark every patient
-        # in this chunk failed and let the caller move on to the next chunk.
+        annotations = call_llm_batch(
+            prompts, cfg, note_texts=note_texts, raise_on_generate_error=True
+        )
+    except BatchGenerationError as exc:
+        # A whole-chunk generate() failure (OOM, transient kernel/serving
+        # error) is not necessarily per-patient-fatal -- a batch of one may
+        # fit where a batch of four did not. Retry each patient individually
+        # before recording any of them as failed, so a transient batch-level
+        # failure doesn't permanently mark the whole chunk annotation_failed
+        # (which --resume would then skip forever).
         ids = ", ".join(str(h) for h, _ in prepared)
-        print(f"[stage3/batch] [generate] hadm_ids=[{ids}] FAILED: {exc}")
-        return n_ok, n_failed + len(prepared), n_annotation_failed
+        print(f"[stage3/batch] [generate] chunk hadm_ids=[{ids}] FAILED: {exc} "
+              f"-- retrying {len(prepared)} patient(s) individually", flush=True)
+        annotations, n_retried, n_retry_failed = _retry_chunk_individually(prepared, cfg)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # An unexpected, non-generate failure (e.g. model load) is not a
+        # per-patient problem -- mark the whole chunk failed, write no rows,
+        # and let the caller move on. --resume retries these next run since
+        # no row was written.
+        ids = ", ".join(str(h) for h, _ in prepared)
+        print(f"[stage3/batch] [generate] hadm_ids=[{ids}] FAILED (non-generate): {exc}",
+              flush=True)
+        return n_ok, n_failed + len(prepared), n_annotation_failed, n_retried, n_retry_failed
 
     for (_, prep), annotation in zip(prepared, annotations):
         result = _assemble_result(prep, annotation)
         row = result.model_dump()
         row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
         row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
+        row["top_shap_features"] = json.dumps(row["top_shap_features"])
+        row["attention_sentences"] = json.dumps(row["attention_sentences"])
         writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
         fh.flush()
         n_ok += 1
         if row["annotation_failed"]:
             n_annotation_failed += 1
 
-    return n_ok, n_failed, n_annotation_failed
+    return n_ok, n_failed, n_annotation_failed, n_retried, n_retry_failed
 
 
 class _BatchSetup(NamedTuple):
@@ -334,6 +403,7 @@ def run_batch_audit(
     write_header = not (resume and out_path.exists())
     mode = "a" if resume and out_path.exists() else "w"
     n_ok = n_failed = n_annotation_failed = 0
+    n_retried = n_retry_failed = 0
     # Patients per batched generate() call, not per-row CSV write -- rows
     # are still written and flushed one at a time within a chunk, so
     # --resume's crash-recovery granularity is unchanged. Only the LLM call
@@ -349,15 +419,14 @@ def run_batch_audit(
 
         for chunk_start in range(0, len(setup.pending), chunk_size):
             chunk = setup.pending[chunk_start:chunk_start + chunk_size]
-            d_ok, d_failed, d_annotation_failed = _process_chunk(
-                chunk, cfg,
-                results_df=setup.results_df, artifact=setup.artifact,
-                feature_matrix=setup.feature_matrix, notes_lookup=setup.notes_lookup,
-                writer=writer, fh=fh,
+            d_ok, d_failed, d_annotation_failed, d_retried, d_retry_failed = _process_chunk(
+                chunk, cfg, setup, writer=writer, fh=fh,
             )
             n_ok += d_ok
             n_failed += d_failed
             n_annotation_failed += d_annotation_failed
+            n_retried += d_retried
+            n_retry_failed += d_retry_failed
 
             i_done = chunk_start + len(chunk)
             print(f"[stage3/batch] [{i_done}/{len(setup.pending)}] "
@@ -365,6 +434,10 @@ def run_batch_audit(
 
     print(f"[stage3/batch] Done. Saved -> {out_path} "
           f"(ok={n_ok}, failed={n_failed}, annotation_failed={n_annotation_failed})")
+    if n_retried:
+        print(f"[stage3/batch] Individual generate() retries: {n_retried} "
+              f"({n_retried - n_retry_failed} recovered, {n_retry_failed} still failed "
+              f"and recorded as annotation_failed)")
     return out_path
 
 
@@ -609,6 +682,13 @@ def main() -> None:
              "config.yaml each time -- Stage3Config isn't frozen, so this "
              "mutation is safe).",
     )
+    parser.add_argument(
+        "--out", type=Path, default=None,
+        help="Write results to this CSV instead of "
+             "models/stage3_batch_results.csv. Use with --limit for a smoke "
+             "run (e.g. --limit 20 --out models/stage3_smoke.csv) so the real "
+             "output file stays untouched.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -617,7 +697,7 @@ def main() -> None:
     if args.sweep:
         run_sensitivity_sweep()
     else:
-        run_batch_audit(cfg, limit=args.limit, resume=args.resume)
+        run_batch_audit(cfg, limit=args.limit, resume=args.resume, out_path=args.out)
 
 
 if __name__ == "__main__":

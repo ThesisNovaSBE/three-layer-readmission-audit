@@ -55,6 +55,10 @@ echo "[slurm] Running Stage 2 per-age-group evaluation ..."
 python -m src.stage2.evaluate
 
 echo "[slurm] Refreshing Stage 1+2 end-to-end pipeline evaluation ..."
+echo "[slurm] NOTE: if models/stage3_batch_results.csv is still the old"
+echo "[slurm]   (pre-fix) Stage 3 run, this evaluate_pipeline output mixes"
+echo "[slurm]   corrected Stage 2 with uncorrected Stage 3 -- interim only,"
+echo "[slurm]   rerun this step after the real Stage 3 rerun completes."
 python -m src.model.evaluate_pipeline
 
 echo "[slurm] Running RQ1 comparison (Stage 1 vs Stage 2, notes-covered population) ..."
