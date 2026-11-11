@@ -20,11 +20,21 @@ DISCORDANCE_MODES: tuple[str, ...] = (
 
 
 def _percentile_rank(value: float, population: np.ndarray) -> float:
-    """Return the percentile rank of ``value`` within ``population`` (0-100)."""
+    """Return the mid-rank percentile of ``value`` within ``population`` (0-100).
+
+    Mid-rank (the mean of the strictly-below and at-or-below fractions) is a
+    tie guard: when several admissions share the same score, a plain
+    ``(population <= value)`` rank assigns every tied admission the top of the
+    tie block, biasing the percentile upward. The mid-rank gives all tied
+    admissions the centre of the block instead. Kept even after Stage 1 is
+    ranked by its (tie-free) raw score, so Stage 2 ties stay unbiased too.
+    """
     population = np.asarray(population, dtype=float)
     if population.size == 0:
         return 50.0
-    return float((population <= value).mean() * 100.0)
+    below = (population < value).mean()
+    at_or_below = (population <= value).mean()
+    return float((below + at_or_below) / 2.0 * 100.0)
 
 
 def compute_discordance(
@@ -44,9 +54,13 @@ def compute_discordance(
     that each score is a meaningful risk ordering within its own cohort.
 
     Args:
-        stage1_score:          this patient's Stage 1 probability.
-        stage2_score:          this patient's Stage 2 probability.
-        cohort_stage1_scores:  Stage 1 scores for the flagged+noted cohort.
+        stage1_score:          this patient's Stage 1 score to rank. Callers
+                                pass the RAW (uncalibrated) XGBoost probability
+                                here, not the calibrated one, because the
+                                calibrated score is too heavily tied to rank
+                                (see src/stage3/pipeline._cohort_scores).
+        stage2_score:          this patient's Stage 2 (calibrated) probability.
+        cohort_stage1_scores:  Stage 1 raw scores for the flagged+noted cohort.
         cohort_stage2_scores:  Stage 2 scores for the same cohort.
         displacement_pp:       |displacement| >= this (percentile points)
                                 is classified as discordant.

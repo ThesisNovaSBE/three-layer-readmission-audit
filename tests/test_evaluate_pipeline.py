@@ -134,28 +134,53 @@ def subgroups_20():  # pylint: disable=missing-function-docstring
 
 
 def test_control_arm_matches_target_alert_rate(subgroups_20):  # pylint: disable=redefined-outer-name
-    """The control arm's alert rate must match the target within quantile precision."""
+    """The primary arm selects exactly m = round(rate * n) by raw score, so
+    its realised alert count matches the target to within one admission."""
     rng = np.random.default_rng(0)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
     target_rate = 0.25
 
-    report = _control_arm_report(y, s1_scores, target_rate, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, target_rate, subgroups_20)
 
-    assert report["confirmed_rate"] == pytest.approx(target_rate, abs=0.06)
+    assert report["realised_alert_count"] == 5  # round(0.25 * 20)
+    assert report["realised_alert_rate"] == pytest.approx(0.25)
+    assert report["confirmed_rate"] == pytest.approx(0.25)
     assert report["target_alert_rate"] == target_rate
+    assert report["selection"] == "top_m_by_raw_stage1_score"
+
+
+def test_control_arm_top_m_by_raw_de_ties(subgroups_20):  # pylint: disable=redefined-outer-name
+    """When the calibrated score is tied but the raw score is not, the primary
+    (top-m by raw) arm hits the target exactly while the secondary
+    (quantile on calibrated) overshoots -- the whole reason for the switch."""
+    n = 20
+    y = np.array([i % 2 for i in range(n)])
+    # Calibrated score collapses to two tied blocks; raw score is distinct.
+    calibrated = np.array([0.4] * 10 + [0.6] * 10, dtype=float)
+    raw = np.linspace(0.01, 0.99, n)
+    target_rate = 0.25  # want 5 alerts
+
+    report = _control_arm_report(y, raw, calibrated, target_rate, subgroups_20)
+
+    assert report["realised_alert_count"] == 5
+    # The secondary calibrated-threshold arm cannot hit 5 on a tied block --
+    # it overshoots to the whole top tie block (10).
+    assert report["secondary_threshold_arm_calibrated"]["realised_alert_count"] == 10
 
 
 def test_control_arm_is_pipeline_report_shaped(subgroups_20):  # pylint: disable=redefined-outer-name
-    """Output must have the same shape as _pipeline_report, plus threshold fields."""
+    """Output must have the _pipeline_report shape plus the new selection fields."""
     rng = np.random.default_rng(1)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
 
-    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, 0.5, subgroups_20)
 
     for key in ("n", "pos_rate", "confirmed_rate", "precision", "recall",
-                "f1", "f2", "by_age_band", "threshold", "target_alert_rate"):
+                "f1", "f2", "by_age_band", "threshold", "target_alert_rate",
+                "selection", "realised_alert_count", "realised_alert_rate",
+                "secondary_threshold_arm_calibrated"):
         assert key in report
 
 
@@ -163,11 +188,12 @@ def test_control_arm_full_capacity_flags_everyone(subgroups_20):  # pylint: disa
     """target_alert_rate=1.0 must flag the entire population."""
     rng = np.random.default_rng(2)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
 
-    report = _control_arm_report(y, s1_scores, 1.0, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, 1.0, subgroups_20)
 
     assert report["confirmed_rate"] == pytest.approx(1.0)
+    assert report["realised_alert_count"] == 20
 
 
 # ── precision/recall CI wiring (audit finding 2026-09-18 2.2) ────────────────
@@ -237,10 +263,10 @@ def test_control_arm_report_with_groups_has_ci(subgroups_20):  # pylint: disable
     directly above."""
     rng = np.random.default_rng(6)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
     groups = np.arange(20)
 
-    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20, groups=groups)
+    report = _control_arm_report(y, s1_raw, s1_raw, 0.5, subgroups_20, groups=groups)
 
     assert "precision_ci" in report
     assert "recall_ci" in report

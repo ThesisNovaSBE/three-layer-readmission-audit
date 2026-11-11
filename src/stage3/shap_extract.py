@@ -152,7 +152,7 @@ def extract_shap_features(
                 contrib = float(contribs[j])
                 direction = "↑ risk" if contrib > 0 else "↓ risk"
                 features.append(
-                    f"{_label(col)}: {val_str} ({direction}, SHAP={contrib:+.3f})"
+                    f"{_label(col)}: {val_str} ({direction}, SHAP={contrib:+.3f} log-odds)"
                 )
         else:
             order = np.argsort(gains)[::-1][:top_k]  # type: ignore[arg-type]

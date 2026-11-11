@@ -198,12 +198,13 @@ def _pipeline_report(
 
 def _control_arm_report(
     y_true: np.ndarray,
-    s1_scores: np.ndarray,
+    s1_scores_raw: np.ndarray,
+    s1_scores_calibrated: np.ndarray,
     target_alert_rate: float,
     subgroups: pd.DataFrame,
     groups: np.ndarray | None = None,
 ) -> dict:
-    """Stage 1 alone, thresholded to match the full system's alert volume.
+    """Stage 1 alone, selected to match the full system's alert volume.
 
     The load-bearing comparison for RQ2 (colleague review, 2026-08-27):
     without this, there is no answer to "did the cascade + audit add
@@ -213,25 +214,60 @@ def _control_arm_report(
     flag rate for RQ1 -- this matches Stage 1 to the whole system's
     *post-audit* rate (Stage 3's decision, not Stage 2's threshold) for RQ2.
 
+    Primary selection is the top ``m = round(target_alert_rate * n)``
+    admissions by RAW Stage 1 score (stable descending argsort), NOT a
+    quantile threshold on the calibrated score: the isotonic-calibrated score
+    has only ~47 distinct values at the top, so a quantile threshold lands on
+    a big tie block and flags far more than the target, making the "matched
+    alert volume" comparison not actually matched. The raw probability breaks
+    those ties, so the realised alert count equals the pipeline's to within
+    one admission. The old calibrated-threshold arm is kept as a secondary,
+    clearly-labelled field for comparison.
+
     Args:
-        y_true:             ground-truth labels for the test partition.
-        s1_scores:           Stage 1 scores for the same population.
-        target_alert_rate:  the full system's final alert rate to match
-                             (``pipeline.full_cohort.confirmed_rate``).
-        subgroups:           age-band subgroup dataframe, aligned to y_true.
-        groups:              optional subject_id array -- see
-                             _pipeline_report's groups docstring.
+        y_true:                ground-truth labels for the test partition.
+        s1_scores_raw:         raw (uncalibrated) Stage 1 scores -- the
+                               primary selection ranks on these.
+        s1_scores_calibrated:  calibrated Stage 1 scores -- the secondary
+                               threshold arm uses these.
+        target_alert_rate:     the full system's final alert rate to match
+                               (``pipeline.full_cohort.confirmed_rate``).
+        subgroups:             age-band subgroup dataframe, aligned to y_true.
+        groups:                optional subject_id array -- see
+                               _pipeline_report's groups docstring.
 
     Returns:
-        A `_pipeline_report`-shaped dict, plus ``threshold`` and
-        ``target_alert_rate``, directly comparable to
-        ``pipeline.full_cohort``.
+        A `_pipeline_report`-shaped dict for the primary top-m arm, plus
+        ``selection``, ``target_alert_rate``, ``realised_alert_count``,
+        ``realised_alert_rate``, ``threshold`` (the raw-score cutoff), and
+        ``secondary_threshold_arm_calibrated`` (the old arm).
     """
-    threshold = select_threshold_for_capacity(s1_scores, max(target_alert_rate, 1e-6))
-    pred = (s1_scores >= threshold).astype(int)
+    raw = np.asarray(s1_scores_raw, dtype=float)
+    n = len(y_true)
+    m = round(target_alert_rate * n)
+    order = np.argsort(-raw, kind="stable")
+    pred = np.zeros(n, dtype=int)
+    if m > 0:
+        pred[order[:m]] = 1
     report = _pipeline_report(y_true, pred, subgroups, groups=groups)
-    report["threshold"] = float(threshold)
+    report["selection"] = "top_m_by_raw_stage1_score"
     report["target_alert_rate"] = float(target_alert_rate)
+    report["realised_alert_count"] = int(pred.sum())
+    report["realised_alert_rate"] = float(pred.sum() / n) if n else 0.0
+    report["threshold"] = float(raw[order[m - 1]]) if m > 0 else float("inf")
+
+    # Secondary (old behaviour, kept for comparison): quantile threshold on
+    # the CALIBRATED score. Its realised alert count overshoots the target
+    # when the calibrated score is tied -- that overshoot is exactly why the
+    # primary arm switched to top-m-by-raw.
+    calibrated = np.asarray(s1_scores_calibrated, dtype=float)
+    sec_threshold = select_threshold_for_capacity(calibrated, max(target_alert_rate, 1e-6))
+    sec_pred = (calibrated >= sec_threshold).astype(int)
+    sec = _pipeline_report(y_true, sec_pred, subgroups, groups=groups)
+    sec["threshold"] = float(sec_threshold)
+    sec["realised_alert_count"] = int(sec_pred.sum())
+    sec["realised_alert_rate"] = float(sec_pred.sum() / n) if n else 0.0
+    report["secondary_threshold_arm_calibrated"] = sec
     return report
 
 
@@ -495,7 +531,8 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
     x_test, y_test, sub_test, hadm_test, groups_test = _load_test_partition(artifact, cfg)
-    s1_scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_test)[:, 1])
+    s1_scores_raw = artifact["estimator"].predict_proba(x_test)[:, 1]
+    s1_scores = apply_calibration(artifact, s1_scores_raw)
     s1_report = _stage1_report(y_test, s1_scores, artifact["threshold"], sub_test)
     print(f"\n[pipeline_eval] Stage 1 (test n={s1_report['n']:,}): "
           f"AUROC={s1_report['auroc']:.4f}  "
@@ -538,11 +575,14 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     # would tightening Stage 1's threshold alone have caught as much at the
     # same alert budget?"
     control_report = _control_arm_report(
-        y_test, s1_scores, full_report_["confirmed_rate"], sub_test, groups=groups_test
+        y_test, s1_scores_raw, s1_scores, full_report_["confirmed_rate"],
+        sub_test, groups=groups_test
     )
     _print_pipeline_line(
-        "[pipeline_eval] Control arm (Stage 1 @ matched alert rate="
-        f"{control_report['target_alert_rate']:.1%}, thr={control_report['threshold']:.4f}): ",
+        "[pipeline_eval] Control arm (Stage 1, top-m by raw score @ matched alert rate="
+        f"{control_report['target_alert_rate']:.1%}, realised="
+        f"{control_report['realised_alert_rate']:.1%}, "
+        f"n={control_report['realised_alert_count']:,}): ",
         control_report,
     )
 

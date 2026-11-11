@@ -110,10 +110,11 @@ def _run_batched_control(
     return pd.read_csv(out_path)
 
 
-def _agreement_report(real: pd.DataFrame, control: pd.DataFrame, label: str) -> dict:
-    """Compare a control run's decision_model against the real batch
-    decision for the same admissions."""
-    merged = real[["hadm_id", "decision_model"]].merge(
+def _agreement_report(baseline: pd.DataFrame, control: pd.DataFrame, label: str) -> dict:
+    """Compare a control run's decision_model against a baseline run's
+    (the batched reference arm for the primary figure, or the main run for
+    the secondary) for the same admissions."""
+    merged = baseline[["hadm_id", "decision_model"]].merge(
         control[["hadm_id", "decision_model"]], on="hadm_id",
         suffixes=("_real", f"_{label}"),
     )
@@ -124,6 +125,15 @@ def _agreement_report(real: pd.DataFrame, control: pd.DataFrame, label: str) -> 
         "real_distribution": merged["decision_model_real"].value_counts().to_dict(),
         f"{label}_distribution": merged[f"decision_model_{label}"].value_counts().to_dict(),
     }
+
+
+def _print_agreement(name: str, nested: dict) -> None:
+    """Print a control's primary (vs reference arm) and secondary (vs main
+    run) agreement on one line."""
+    primary = nested["vs_reference_arm"]["decision_model_agreement_vs_real"]
+    secondary = nested["vs_main_run_secondary"]["decision_model_agreement_vs_real"]
+    print(f"[validation_controls] {name} agreement vs reference arm (primary): "
+          f"{primary:.1%}  | vs main run (secondary): {secondary:.1%}", flush=True)
 
 
 def _run_arm_test(n: int, cfg, model_dir: Path) -> None:
@@ -229,30 +239,41 @@ def main() -> None:
     )
     report: dict = {"n_sample": len(sample), "sample_hadm_ids": sample}
 
+    # Batched reference arm = unmanipulated run over the same sample AND batch
+    # composition. This is also D3 run 1. D1/D2 agreement is reported
+    # PRIMARILY against this arm, not the main run: the main run batched these
+    # admissions with different neighbours, so part of any main-run
+    # disagreement is bf16 batch-composition noise rather than the
+    # manipulation. "vs main run" is kept as a clearly-labelled secondary.
+    run1_out = model_dir / "stage3_control_self_agreement_run1.csv"
+    reference_df = _run_batched_control("reference arm (D3 run 1)", sample, cfg, run1_out, setup)
+
     if "d1" in controls:
         out = model_dir / "stage3_control_blind_note.csv"
         control_df = _run_batched_control(
             "D1 blind-note", sample, cfg, out, setup, suppress_note=True,
         )
-        report["d1_blind_note"] = _agreement_report(batch_df, control_df, "blind_note")
-        print(f"[validation_controls] D1 agreement vs real: "
-              f"{report['d1_blind_note']['decision_model_agreement_vs_real']:.1%}", flush=True)
+        report["d1_blind_note"] = {
+            "vs_reference_arm": _agreement_report(reference_df, control_df, "blind_note"),
+            "vs_main_run_secondary": _agreement_report(batch_df, control_df, "blind_note"),
+        }
+        _print_agreement("D1", report["d1_blind_note"])
 
     if "d2" in controls:
         out = model_dir / "stage3_control_no_stage2.csv"
         control_df = _run_batched_control(
             "D2 no-Stage-2", sample, cfg, out, setup, suppress_stage2=True,
         )
-        report["d2_no_stage2"] = _agreement_report(batch_df, control_df, "no_stage2")
-        print(f"[validation_controls] D2 agreement vs real: "
-              f"{report['d2_no_stage2']['decision_model_agreement_vs_real']:.1%}", flush=True)
+        report["d2_no_stage2"] = {
+            "vs_reference_arm": _agreement_report(reference_df, control_df, "no_stage2"),
+            "vs_main_run_secondary": _agreement_report(batch_df, control_df, "no_stage2"),
+        }
+        _print_agreement("D2", report["d2_no_stage2"])
 
     if "d3" in controls:
-        out_a = model_dir / "stage3_control_self_agreement_run1.csv"
-        out_b = model_dir / "stage3_control_self_agreement_run2.csv"
-        run1 = _run_batched_control("D3 self-agreement run 1", sample, cfg, out_a, setup)
-        run2 = _run_batched_control("D3 self-agreement run 2", sample, cfg, out_b, setup)
-        merged = run1.merge(run2, on="hadm_id", suffixes=("_1", "_2"))
+        run2_out = model_dir / "stage3_control_self_agreement_run2.csv"
+        run2 = _run_batched_control("D3 self-agreement run 2", sample, cfg, run2_out, setup)
+        merged = reference_df.merge(run2, on="hadm_id", suffixes=("_1", "_2"))
         report["d3_self_agreement"] = {
             "n": int(len(merged)),
             "decision_model_agreement": float(

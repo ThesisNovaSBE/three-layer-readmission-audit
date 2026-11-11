@@ -102,7 +102,8 @@ def _prepare_population(
 
     Returns:
         DataFrame with columns: hadm_id, subject_id, age_band,
-        readmission_30d, stage1_score, stage1_threshold, age_band_key.
+        readmission_30d, stage1_score, stage1_score_raw, stage1_threshold,
+        age_band_key.
     """
     features = split_xy(matrix)[0]
     test_idx = artifact["test_idx"]
@@ -115,6 +116,15 @@ def _prepare_population(
         ["hadm_id", "subject_id", "age_band", TARGET_COL]
     ].reset_index(drop=True)
     test_meta["stage1_score"] = stage1_scores
+    # Uncalibrated XGBoost probability, kept alongside the calibrated score.
+    # Stage 3's percentile-rank discordance (r1) uses THIS, not stage1_score:
+    # the isotonic-calibrated score collapses to only ~47 distinct values at
+    # or above the flag threshold, so ranks of the ~9,899 flagged admissions
+    # are heavily tied and biased. The raw probability has the same risk
+    # ordering with no ties. The prompt still shows the calibrated score as
+    # the probability (see src/stage3/explain.build_prompt); only the rank
+    # uses the raw score.
+    test_meta["stage1_score_raw"] = raw_scores
     test_meta["stage1_threshold"] = stage1_threshold
     test_meta["age_band_key"] = test_meta["age_band"].apply(band_key)
 
@@ -300,7 +310,8 @@ def _score_core(
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = all_probs
     notes_df = notes_df.merge(
-        population[["hadm_id", "stage1_score", "stage1_threshold", "age_band_key"]],
+        population[["hadm_id", "stage1_score", "stage1_score_raw",
+                    "stage1_threshold", "age_band_key"]],
         on="hadm_id", how="left",
     )
 
@@ -321,7 +332,8 @@ def _score_core(
 
     result_cols = [
         "hadm_id", "subject_id", TARGET_COL,
-        "stage1_score", "stage1_threshold", "stage2_score", "stage2_confirmed",
+        "stage1_score", "stage1_score_raw", "stage1_threshold",
+        "stage2_score", "stage2_confirmed",
     ]
     return notes_df[[c for c in result_cols if c in notes_df.columns]]
 

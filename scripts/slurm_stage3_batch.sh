@@ -81,6 +81,23 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 
 echo "=== All checks passed — starting batch audit ==="
 
+# ── Smoke-run checklist (do this FIRST, before the full run) ──────────────
+# Run a 20-admission smoke batch to its own throwaway file so the real
+# output stays untouched:
+#     python -m src.stage3.batch --limit 20 --out models/stage3_smoke.csv
+# Then check, in the job log and in models/stage3_smoke.csv, that:
+#   - mean(r1) and mean(r2) are each ~50 (percentile ranks of a sample of
+#     the cohort should centre on 50; a mean far from 50 means the ranking
+#     population or the raw/calibrated score wiring is wrong);
+#   - there is NO "[shap_extract] WARNING" line (every SHAP statement came
+#     from the real TreeExplainer, not the gain-importance fallback);
+#   - top_shap_features shows "not recorded" for missing values, never 0;
+#   - each SHAP line contains "log-odds" (the unit is explicit);
+#   - attention_sentences is not empty;
+#   - annotation_failed is 0 across all 20 rows;
+#   - for any admission whose note exceeded 20,000 chars, the prompt's note
+#     block carries the "middle of the discharge note omitted" marker.
+#
 # ── Run ──────────────────────────────────────────────────────
 # --resume: safe to always pass FOR A GIVEN RUN's OWN resubmission chain
 # (timeout/crash -> picks up where it left off instead of redoing, and

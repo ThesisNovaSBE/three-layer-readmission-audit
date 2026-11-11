@@ -76,6 +76,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
 from src.stage3._annotation import PARSE_FAILURE, BatchGenerationError
+from src.stage3._notecap import _note_block, _shown_note_text
 
 # torch/transformers are deliberately NOT imported at module level for the
 # generation path: everything else in this module (prompt building,
@@ -159,11 +160,6 @@ _AGGRAVATING_DESCRIPTIONS: dict[str, str] = {
 # is cited only when it actually drove the decision. Do not collapse these
 # two into one field.
 PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
-
-# Generous safety cap, not a routine truncation. Session 14 measured median
-# MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
-# (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
-_NOTE_MAX_CHARS = 20_000
 
 # Output token budget for call_llm()'s generate() call. 2048 was the
 # original (vLLM-era) value, assumed "generous" but never actually
@@ -268,7 +264,8 @@ _USER_TEMPLATE = textwrap.dedent("""
 
     ── STRUCTURED RISK ESTIMATE (XGBoost) ────────────────────────────────
     Score: {stage1_score:.3f}   Flagged at threshold >= {stage1_threshold:.3f}
-    Top structured risk factors (SHAP-ranked):
+    Top structured risk factors (SHAP-ranked; SHAP values are contributions to
+    the model's log-odds, not probability points):
     {shap_block}
 
     {stage2_evidence_block}
@@ -346,27 +343,6 @@ _USER_TEMPLATE = textwrap.dedent("""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-def is_note_truncated(note_text: str) -> bool:
-    """Whether ``note_text`` exceeds the safety cap applied in the prompt.
-
-    Exposed separately from :func:`_note_block` so callers (pipeline.py,
-    batch.py) can log truncation as structured data, not just prose inside
-    the prompt string.
-    """
-    return len(note_text.strip()) > _NOTE_MAX_CHARS
-
-
-def _note_block(note_text: str) -> str:
-    """Return the discharge note, capped at a generous safety limit."""
-    text = note_text.strip()
-    if not text:
-        return "  (discharge note not available)"
-    if len(text) > _NOTE_MAX_CHARS:
-        text = text[:_NOTE_MAX_CHARS]
-        return f"(discharge note, capped at {_NOTE_MAX_CHARS:,} chars)\n  {text}"
-    return f"(full discharge note, {len(text):,} chars)\n  {text}"
-
 
 def _attention_block(attention_sentences: list[str]) -> str:
     """Return an optional auxiliary hint of what Stage 2 attended to most.
@@ -700,31 +676,53 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
-def _detect_truncated(generated_ids, eos_id: int | None) -> list[bool]:
-    """Per-sequence truncation flag: True if a generated row never produced
-    the EOS token (i.e. generation was cut off by max_new_tokens, not
-    stopped naturally).
+def _detect_truncated(generated_ids, stop_ids) -> list[bool]:
+    """Per-sequence truncation flag: True if a generated row contains NONE of
+    the model's stop tokens (cut off by max_new_tokens, not stopped
+    naturally). Takes the full SET of stop ids (see _stop_token_ids), not
+    just the tokenizer's single ``eos_token_id``: a row that ended cleanly
+    on a secondary stop like ``<end_of_turn>`` must not be over-reported as
+    truncated just because it lacks the primary EOS.
 
-    Extracted as a pure function (2026-09-18, audit finding 2.3) so this
-    logic -- the one genuinely new, previously-untested piece of the
-    2026-09-15 batching rewrite -- is directly unit-testable with
-    hand-built token-ID tensors, without needing a real model, tokenizer,
-    or GPU. Only requires ``generated_ids`` support row iteration + a
-    ``.tolist()`` method per row (true for both real torch tensor slices
-    and the small torch.tensor(...) fixtures tests construct directly).
+    Pure function (2026-09-18, audit finding 2.3) so it is unit-testable
+    with hand-built token-ID tensors, no real model/tokenizer/GPU -- only
+    needs ``generated_ids`` row iteration + a ``.tolist()`` per row.
 
     Args:
         generated_ids: 2D tensor/array, one row per sequence in the batch,
                         already sliced to exclude the prompt (see
                         call_llm_batch).
-        eos_id:         the tokenizer's EOS token id, or None if unknown.
+        stop_ids:       collection of stop-token ids. Empty/None means
+                        "unknown", in which case nothing is flagged truncated.
 
     Returns:
         One bool per row, True meaning "likely truncated by the token cap".
     """
-    if eos_id is None:
+    stop = {s for s in (stop_ids or []) if s is not None}
+    if not stop:
         return [False for _ in generated_ids]
-    return [eos_id not in row.tolist() for row in generated_ids]
+    return [stop.isdisjoint(row.tolist()) for row in generated_ids]
+
+
+def _stop_token_ids(tokenizer, model) -> set[int]:
+    """Collect every token id that ends generation cleanly for this model:
+    the tokenizer's ``eos_token_id``, the id of ``<end_of_turn>`` (a chat
+    model's real turn terminator), and every id in
+    ``model.generation_config.eos_token_id`` (which may be an int or a list).
+    Ids that don't exist for this tokenizer (``<end_of_turn>`` resolving to
+    ``unk``) are dropped."""
+    stop: set[int] = set()
+    if tokenizer.eos_token_id is not None:
+        stop.add(tokenizer.eos_token_id)
+    eot = tokenizer.convert_tokens_to_ids("<end_of_turn>")
+    if eot is not None and eot != tokenizer.unk_token_id:
+        stop.add(eot)
+    gen_eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    if isinstance(gen_eos, int):
+        stop.add(gen_eos)
+    elif isinstance(gen_eos, (list, tuple)):
+        stop.update(int(x) for x in gen_eos)
+    return stop
 
 
 def _trim_incomplete_trailing_sentence(text: str) -> str:
@@ -784,6 +782,11 @@ def _finalize_annotation(
     verification and ``decision_rule`` need each patient's own
     ``note_text``, so this can't be hoisted above the per-item loop.
     """
+    # Verify quotes against the text ACTUALLY SHOWN to the model (head+tail
+    # for a capped note), not the full note: a quote matching only the
+    # omitted middle was never shown, so it must count as unverified. Same
+    # text drives decision_rule's note-length check.
+    shown_text = _shown_note_text(note_text)
     annotation = _parse_response(raw)
     followup_quote = annotation.pop("followup_plan_quote", "")
     caregiver_quote = annotation.pop("named_caregiver_quote", "")
@@ -805,16 +808,16 @@ def _finalize_annotation(
         return annotation
 
     mitigating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        {**g, "quote_verified": verify_quote(g["quote"], shown_text)}
         for g in annotation["mitigating_grounds"]
     ]
     discharge_support = _extract_discharge_support_ground(
-        followup_quote, caregiver_quote, stability_quote, note_text
+        followup_quote, caregiver_quote, stability_quote, shown_text
     )
     if discharge_support is not None:
         mitigating.append(discharge_support)
     aggravating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        {**g, "quote_verified": verify_quote(g["quote"], shown_text)}
         for g in annotation["aggravating_grounds"]
     ]
     annotation["mitigating_grounds"] = mitigating
@@ -826,7 +829,7 @@ def _finalize_annotation(
     verified_mitigating = [g for g in mitigating if g["quote_verified"]]
     verified_aggravating = [g for g in aggravating if g["quote_verified"]]
     annotation["decision_rule"] = compute_decision_rule(
-        verified_mitigating, verified_aggravating, note_text
+        verified_mitigating, verified_aggravating, shown_text
     )
     annotation["clinical_justification"] = _trim_incomplete_trailing_sentence(
         annotation["clinical_justification"]
@@ -930,7 +933,9 @@ def call_llm_batch(
             )
             for p in prompts
         ]
-        inputs = tokenizer(chat_texts, return_tensors="pt", padding=True).to(model.device)
+        inputs = tokenizer(
+            chat_texts, return_tensors="pt", padding=True, add_special_tokens=False
+        ).to(model.device)
         parser = JsonSchemaParser(_LLMOutput.model_json_schema())
         prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
         do_sample = cfg.stage3.temperature > 0
@@ -949,7 +954,7 @@ def call_llm_batch(
         prompt_len = inputs["input_ids"].shape[1]
         generated_ids = output_ids[:, prompt_len:]
         raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        truncated_flags = _detect_truncated(generated_ids, tokenizer.eos_token_id)
+        truncated_flags = _detect_truncated(generated_ids, _stop_token_ids(tokenizer, model))
     except Exception as exc:  # pylint: disable=broad-exception-caught
         if raise_on_generate_error:
             # Batch caller wants to retry each patient individually rather
