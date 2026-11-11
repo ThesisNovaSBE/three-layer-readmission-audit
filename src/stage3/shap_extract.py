@@ -19,6 +19,15 @@ import pandas as pd
 
 _EXPLAINER_CACHE: dict[int, object] = {}
 
+# requirements.txt pins only shap>=0.44 -- the cluster env may resolve a
+# different version than whatever was used to verify the NaN-input fix
+# locally. If TreeExplainer ever fails for any reason (version mismatch
+# or otherwise), every patient silently loses real SHAP attribution in
+# favor of gain-based importances (no direction, no SHAP= value) with no
+# visible signal in a 9,899-patient run unless this is counted and
+# printed loudly as it happens.
+_FALLBACK_COUNT = 0
+
 _FEATURE_LABELS: dict[str, str] = {
     "age": "age (years)",
     "los_days": "length of stay (days)",
@@ -50,6 +59,12 @@ def _label(col: str) -> str:
     return _FEATURE_LABELS.get(col, col.replace("_", " "))
 
 
+def _format_value(val: float) -> str:
+    """Render a feature value for the prompt, labeling true missingness
+    instead of printing a bare 'nan'."""
+    return "not recorded" if np.isnan(val) else f"{val:.3g}"
+
+
 def extract_shap_features(
     artifact: dict,
     patient_rows: pd.DataFrame,
@@ -71,7 +86,14 @@ def extract_shap_features(
     feature_cols: list[str] = artifact["feature_cols"]
 
     available = [c for c in feature_cols if c in patient_rows.columns]
-    x = patient_rows[available].fillna(0).values
+    # Keep missing values as NaN, not 0 -- XGBoost was trained and scores
+    # with missing values left as missing (routed to each split's learned
+    # default branch; see src/data/features.py). Filling with 0 here used
+    # to make SHAP explain a different, fabricated record than the one the
+    # model actually scored (e.g. spo2_last=0 for a patient who was never
+    # on a monitor, not spo2_last=missing) -- confirmed to flip the top-5
+    # driver set for 68% of the 9,899-admission full run.
+    x = patient_rows[available].values
 
     use_shap = False
     shap_vals: np.ndarray | None = None
@@ -95,7 +117,7 @@ def extract_shap_features(
             warnings.simplefilter("ignore")
             shap_vals = explainer.shap_values(x)
         use_shap = True
-    except Exception:  # pylint: disable=broad-exception-caught
+    except Exception as exc:  # pylint: disable=broad-exception-caught
         # Deliberately broad, not just ImportError: verified 2026-09-13 that
         # shap.TreeExplainer raises its own InvalidModelError (not
         # ImportError) for any model type it doesn't support -- narrower
@@ -103,6 +125,15 @@ def extract_shap_features(
         # falling back to gain importances as this function's docstring
         # promises, if the installed shap version ever can't handle the
         # real XGBoost artifact for any reason.
+        global _FALLBACK_COUNT  # pylint: disable=global-statement
+        _FALLBACK_COUNT += len(patient_rows)
+        print(
+            f"[shap_extract] WARNING: TreeExplainer failed ({exc!r}) -- "
+            f"falling back to gain-based importances for {len(patient_rows)} "
+            f"patient(s). Fallback total so far: {_FALLBACK_COUNT}. These "
+            "statements will have no SHAP= value or direction.",
+            flush=True,
+        )
         raw_gains = model.feature_importances_
         gains = np.array([
             raw_gains[feature_cols.index(c)] if c in feature_cols else 0.0
@@ -117,19 +148,19 @@ def extract_shap_features(
             features = []
             for j in order:
                 col = available[j]
-                val = x[i, j]
+                val_str = _format_value(x[i, j])
                 contrib = float(contribs[j])
                 direction = "↑ risk" if contrib > 0 else "↓ risk"
                 features.append(
-                    f"{_label(col)}: {val:.3g} ({direction}, SHAP={contrib:+.3f})"
+                    f"{_label(col)}: {val_str} ({direction}, SHAP={contrib:+.3f})"
                 )
         else:
             order = np.argsort(gains)[::-1][:top_k]  # type: ignore[arg-type]
             features = []
             for j in order:
                 col = available[j]
-                val = x[i, j]
-                features.append(f"{_label(col)}: {val:.3g}")
+                val_str = _format_value(x[i, j])
+                features.append(f"{_label(col)}: {val_str}")
         results.append(features)
 
     return results

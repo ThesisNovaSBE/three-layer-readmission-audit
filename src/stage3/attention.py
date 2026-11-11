@@ -52,11 +52,20 @@ def _sentences_by_attention(
     token_weights: list[float],
     tokenizer,
     top_n: int,
+    max_length: int,
 ) -> list[str]:
     """Return the top-n sentences ranked by summed token attention weights.
 
-    Maps token-level attention scores back to sentences by re-tokenizing each
-    sentence and summing the weights for the tokens it covers.
+    Maps token-level attention scores back to sentences using the
+    tokenizer's real character-to-token offset mapping, not by re-tokenizing
+    each kept sentence in isolation and assuming it sits immediately after
+    the previous one in token-space. That assumption breaks for real
+    clinical notes: `_split_sentences` drops short fragments (e.g. "Sex:
+    F"), and line breaks between sentences tokenize into their own
+    whitespace tokens -- both leave gaps the old offset-accumulation never
+    accounted for, so attention scores drifted onto the wrong sentence
+    after only a handful of sentences (confirmed: a 10-token drift after 12
+    sentences in a real discharge note).
 
     Args:
         text:          original note text.
@@ -64,6 +73,8 @@ def _sentences_by_attention(
                        i.e., the CLS token itself is excluded at index 0).
         tokenizer:     Longformer tokenizer instance.
         top_n:         number of top sentences to return.
+        max_length:    tokenization max length -- must match the encoding
+                       that produced token_weights, so offsets line up.
 
     Returns:
         Up to top_n sentence strings, sorted by attention score descending.
@@ -72,16 +83,26 @@ def _sentences_by_attention(
     if not sentences:
         return []
 
+    enc = tokenizer(text, max_length=max_length, truncation=True, return_offsets_mapping=True)
+    # Exclude index 0 (CLS), matching token_weights' own CLS exclusion.
+    offsets = enc["offset_mapping"][1:]
+
     scored: list[tuple[str, float]] = []
-    offset = 0
+    search_from = 0
     for sent in sentences:
-        toks = tokenizer.tokenize(sent)
-        n_tok = len(toks)
-        if not toks or offset + n_tok > len(token_weights):
-            break
-        avg = sum(token_weights[offset: offset + n_tok]) / n_tok
-        scored.append((sent, avg))
-        offset += n_tok
+        start = text.find(sent, search_from)
+        if start == -1:
+            continue
+        end = start + len(sent)
+        search_from = end
+
+        weights = [
+            token_weights[i] for i, (tok_start, tok_end) in enumerate(offsets)
+            if i < len(token_weights) and tok_end > start and tok_start < end
+        ]
+        if not weights:
+            continue
+        scored.append((sent, sum(weights) / len(weights)))
 
     scored.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in scored[:top_n]]
@@ -182,7 +203,9 @@ def extract_attention_spans(
 
         # Skip position 0 (CLS token itself)
         token_weights = weights[1:]
-        result[hadm_id] = _sentences_by_attention(text, token_weights, tokenizer, top_n)
+        result[hadm_id] = _sentences_by_attention(
+            text, token_weights, tokenizer, top_n, max_length
+        )
 
         if (i + 1) % 100 == 0:
             print(f"  {i + 1}/{len(hadm_ids)}")

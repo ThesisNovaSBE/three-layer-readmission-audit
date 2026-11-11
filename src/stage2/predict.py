@@ -177,25 +177,50 @@ def _run_inference(
 def _apply_calibration(
     notes_df: pd.DataFrame,
     calibration: dict,
-    global_threshold: float,
 ) -> pd.DataFrame:
     """Apply Platt scaling and per-group thresholds to raw stage2_scores.
 
-    Converts raw softmax probabilities to logits, applies the per-band
-    calibration coefficients, converts back to calibrated probabilities,
-    then applies the per-band decision threshold.
+    Converts raw softmax probabilities to logits (recovering z1 - z0, the
+    same quantity src/stage2/calibrate.py now fits the Platt coefficients
+    on), applies the per-band calibration coefficients, converts back to
+    calibrated probabilities, then applies the per-band decision threshold.
 
     Args:
-        notes_df:         DataFrame with ``stage2_score`` and ``age_band_key``.
-        calibration:      calibration dict loaded from JSON.
-        global_threshold: fallback threshold for bands missing from calibration.
+        notes_df:    DataFrame with ``stage2_score`` and ``age_band_key``.
+        calibration: calibration dict loaded from JSON.
 
     Returns:
         Updated DataFrame with calibrated ``stage2_score`` and
         ``stage2_confirmed`` columns.
+
+    Raises:
+        ValueError: if any age band present in the data has no entry in the
+            calibration's per-band calibrators or thresholds. This is
+            deliberate: silently falling back to identity calibration / a
+            global threshold for an unmatched band would quietly ship
+            miscalibrated scores to Stage 3, which is exactly the class of
+            fit/apply bug this rerun exists to remove.
     """
     cal_calibrators = calibration["calibrators"]
     cal_thresholds = calibration["thresholds"]
+
+    data_bands = set(notes_df["age_band_key"].unique())
+    if notes_df["age_band_key"].isna().any():
+        raise ValueError(
+            "Some admissions have no age_band_key; cannot select a per-band "
+            "calibrator for them. Check the feature matrix's age_band column."
+        )
+    missing_cal = data_bands - set(cal_calibrators)
+    missing_thr = data_bands - set(cal_thresholds)
+    if missing_cal or missing_thr:
+        raise ValueError(
+            "Stage 2 calibration is missing age bands present in the data: "
+            f"calibrators missing {sorted(missing_cal)}, thresholds missing "
+            f"{sorted(missing_thr)}. Available calibrator bands: "
+            f"{sorted(cal_calibrators)}. Refusing to fall back to identity "
+            "calibration / a global threshold -- rerun "
+            "`python -m src.stage2.calibrate --force`."
+        )
 
     raw_scores = notes_df["stage2_score"].values
     raw_logits = np.log(
@@ -205,13 +230,13 @@ def _apply_calibration(
 
     cal_probs = np.empty(len(notes_df))
     for i, (logit, band) in enumerate(zip(raw_logits, notes_df["age_band_key"].values)):
-        coef, intercept = cal_calibrators.get(band, [1.0, 0.0])
+        coef, intercept = cal_calibrators[band]
         cal_logit = coef * logit + intercept
         cal_probs[i] = 1.0 / (1.0 + np.exp(-cal_logit))
 
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = cal_probs
-    band_thr = notes_df["age_band_key"].map(cal_thresholds).fillna(global_threshold)
+    band_thr = notes_df["age_band_key"].map(cal_thresholds)
     notes_df["stage2_confirmed"] = (notes_df["stage2_score"] >= band_thr).astype(int)
     print(f"[stage2/predict] Per-group thresholds: {cal_thresholds}")
     return notes_df
@@ -280,7 +305,7 @@ def _score_core(
     )
 
     if calibration is not None:
-        notes_df = _apply_calibration(notes_df, calibration, global_threshold)
+        notes_df = _apply_calibration(notes_df, calibration)
         thr_display = "per-group"
     else:
         notes_df["stage2_confirmed"] = (

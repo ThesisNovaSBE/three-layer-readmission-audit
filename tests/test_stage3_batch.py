@@ -21,6 +21,7 @@ from src.stage3.batch import (
     run_no_stage2_control,
     run_sensitivity_sweep,
 )
+from src.stage3._annotation import BatchGenerationError
 
 
 def _fake_result(hadm_id: int, *, fail: bool = False, decision: str = "override") -> SimpleNamespace:
@@ -30,6 +31,8 @@ def _fake_result(hadm_id: int, *, fail: bool = False, decision: str = "override"
         "hadm_id": hadm_id, "stage1_score": 0.6, "stage1_threshold": 0.35,
         "stage2_score": 0.4, "stage2_confirmed": True, "r1": 70.0, "r2": 40.0,
         "displacement": -30.0, "discordance_mode": "NOTE_MITIGATES",
+        "top_shap_features": [] if fail else ["creatinine (last): 3.2 (up risk, SHAP=+0.18)"],
+        "attention_sentences": [] if fail else ["Comfort care planned."],
         "mitigating_grounds": [] if fail else [
             {"ground": "palliative_intent", "quote": "Comfort care planned.",
              "quote_verified": True}
@@ -159,6 +162,10 @@ def test_grounds_columns_are_json_serialised(tmp_path, results_df):  # pylint: d
     written = pd.read_csv(out)
     grounds = json.loads(written.iloc[0]["mitigating_grounds"])
     assert grounds[0]["ground"] == "palliative_intent"
+    shap_features = json.loads(written.iloc[0]["top_shap_features"])
+    assert shap_features == ["creatinine (last): 3.2 (up risk, SHAP=+0.18)"]
+    attention = json.loads(written.iloc[0]["attention_sentences"])
+    assert attention == ["Comfort care planned."]
 
 
 def test_prep_failure_does_not_stop_the_batch_and_still_writes_a_row(
@@ -250,6 +257,171 @@ def test_chunk_generation_failure_does_not_stop_the_batch(tmp_path, results_df):
     written = pd.read_csv(out)
     assert len(written) == 2
     assert set(written["hadm_id"]) == {12, 13}
+
+
+def test_batch_generation_error_retries_individually_and_recovers(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """A BatchGenerationError on the whole chunk must trigger a per-patient
+    retry; if the batch-of-one succeeds, no patient is lost."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    def call_llm_batch_se(prompts, *_a, **_kw):
+        if len(prompts) > 1:  # the real chunk -- simulate a batch-level OOM
+            raise BatchGenerationError("simulated chunk OOM")
+        return [{"annotation_failed": False}]  # batch-of-one retry fits
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, call_llm_batch_se, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=2), out_path=out)
+
+    written = pd.read_csv(out)
+    assert len(written) == 4
+    assert set(written["hadm_id"]) == {10, 11, 12, 13}
+    assert not written["annotation_failed"].any()
+
+
+def test_batch_generation_error_persistent_writes_failed_row_not_lost(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """If the individual retry also raises, that patient must still get a
+    written annotation_failed row (not silently dropped), while the others
+    in the chunk recover."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    def call_llm_batch_se(prompts, *_a, **_kw):
+        # hadm_id 10 fails at both batch and individual-retry level; all
+        # others succeed (batch of one, or a chunk without prompt-10).
+        if "prompt-10" in prompts:
+            raise BatchGenerationError("persistent OOM for 10")
+        return [{"annotation_failed": False} for _ in prompts]
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, call_llm_batch_se, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=2), out_path=out)
+
+    written = pd.read_csv(out).set_index("hadm_id")
+    assert set(written.index) == {10, 11, 12, 13}  # none lost
+    assert bool(written.loc[10, "annotation_failed"]) is True
+    assert not written.loc[[11, 12, 13], "annotation_failed"].any()
+
+
+# ── Per-patient alignment through the real _process_chunk ─────────────────────
+
+_ALIGN_SCORE = {10: 0.11, 11: 0.22, 12: 0.33, 13: 0.44}
+
+
+def _align_prepared(hadm_id: int):
+    """Prepared stand-in whose prompt AND note each embed this patient's own
+    hadm_id, and whose patient dict carries a distinct stage2_score -- so a
+    prompt/note desync or a wrong-order zip in _process_chunk becomes
+    detectable in the written row."""
+    return SimpleNamespace(
+        prompt=f"AUDIT hadm_id={hadm_id}",
+        prompt_note_text=f"note-of-{hadm_id}",
+        patient={"hadm_id": hadm_id, "stage2_score": _ALIGN_SCORE[hadm_id]},
+        hadm_id=hadm_id,
+    )
+
+
+def _align_assemble(prepared, annotation):
+    """Build a full output row combining the SCORE side (hadm_id + stage2_score
+    from the prepared patient) with the PROMPT/NOTE side (the ids the stub LLM
+    echoed back from what it was actually handed). If _process_chunk paired the
+    wrong annotation with this prepared patient, these disagree."""
+    data = {k: "" for k in _OUTPUT_FIELDS}
+    data.update({
+        "hadm_id": prepared.patient["hadm_id"],
+        "stage2_score": prepared.patient["stage2_score"],
+        "mitigating_grounds": [], "aggravating_grounds": [],
+        "top_shap_features": [], "attention_sentences": [],
+        "clinical_justification":
+            f"prompt={annotation['prompt_hadm_id']};note={annotation['note_hadm_id']}",
+        "annotation_failed": annotation["annotation_failed"],
+    })
+    return SimpleNamespace(model_dump=lambda d=data: dict(d))
+
+
+def _echo_call_llm_batch(prompts, *_a, note_texts=None, **_kw):
+    """Stub LLM: echo, per item, the hadm_id embedded in the PROMPT and the
+    hadm_id embedded in the NOTE this call was handed -- never from list
+    position -- so downstream can prove prompt, note and output stay paired."""
+    out = []
+    for prompt, note in zip(prompts, note_texts):
+        out.append({
+            "annotation_failed": False,
+            "prompt_hadm_id": int(prompt.split("hadm_id=")[1]),
+            "note_hadm_id": int(note.split("note-of-")[1]),
+        })
+    return out
+
+
+def _assert_rows_self_consistent(out_path):
+    """Every row's hadm_id, stage2_score and echoed prompt/note ids must all
+    point at the same patient."""
+    written = pd.read_csv(out_path)
+    assert set(written["hadm_id"]) == {10, 11, 12, 13}
+    for _, row in written.iterrows():
+        hadm_id = int(row["hadm_id"])
+        prompt_part, note_part = row["clinical_justification"].split(";")
+        assert prompt_part == f"prompt={hadm_id}", f"prompt not aligned for {hadm_id}: {row}"
+        assert note_part == f"note={hadm_id}", f"note not aligned for {hadm_id}: {row}"
+        assert row["stage2_score"] == _ALIGN_SCORE[hadm_id]
+
+
+def test_process_chunk_keeps_every_row_aligned_to_its_patient(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """Through the real _process_chunk (chunk of 4), each written row's
+    hadm_id, stage2_score and quote-verification note must belong to the
+    same patient -- a batched-generation misalignment would break this."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _align_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _echo_call_llm_batch, _align_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=4), out_path=out)  # one chunk of 4
+
+    _assert_rows_self_consistent(out)
+
+
+def test_individual_retry_preserves_per_patient_alignment(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """The individual-retry path must preserve the same per-patient pairing:
+    force a whole-chunk BatchGenerationError so every patient is retried in a
+    batch of one, then assert each row is still self-consistent."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _align_prepared(hadm_id)
+
+    def flaky_echo(prompts, *_a, note_texts=None, **_kw):
+        if len(prompts) > 1:  # the whole chunk -- force the retry path
+            raise BatchGenerationError("simulated chunk OOM")
+        return _echo_call_llm_batch(prompts, note_texts=note_texts)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, flaky_echo, _align_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=4), out_path=out)
+
+    _assert_rows_self_consistent(out)
 
 
 def test_resume_skips_already_written_admissions(tmp_path, results_df):  # pylint: disable=redefined-outer-name

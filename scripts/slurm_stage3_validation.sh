@@ -4,27 +4,54 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=08:00:00
+#SBATCH --time=12:00:00
 # D1/D2/D3 validation controls (session 19's run_blind_note_control /
 # run_no_stage2_control / check_self_agreement, never run at scale before
 # this script existed) on a deliberate sample -- NOT a second full batch
-# run. Calls explain_patient ONE admission at a time per control (not
-# batched like the main batch run).
+# run.
 #
-# 2026-10-30: an earlier --n 150 attempt (job 16873264) got stuck for
-# ~4 hours on the first D1 blind-note patient and was cancelled (607.5
-# core-hours, zero patients written) -- but a follow-up isolated,
-# single-patient timing test (job 16947546) ran all three conditions
-# (normal/no-Stage-2/blind-note) cleanly and fast: 212.1s, 109.4s, and
-# 69.5s respectively (NORMAL's figure includes the one-time ~87s model
-# load). Blind-note was the FASTEST of the three and correctly returned
-# insufficient_evidence -- the earlier stall does not reproduce and is
-# most likely a one-off (a flaky node, or one pathological admission in
-# that run's random sample), not a systemic bug in the blind-note path.
-# At ~70-210s/admission, --n 150 across all 4 passes (D1 + D2 + D3 x2)
-# would realistically need 15-25 hours -- scaled down to --n 30 below to
-# fit comfortably inside an 8h budget instead of gambling another
-# all-day run. Safe to resubmit on timeout either way:
+# 2026-11: rewritten to run through the main run's own batched chunk
+# processor (cfg.stage3.generation_batch_size, left-padded), not one
+# admission at a time -- confirmed that single-sequence vs. batched
+# bfloat16 generation can itself produce different decisions, which was
+# confounding the no-Stage-2 control's agreement numbers with "batched vs
+# single" on top of the thing it's meant to isolate ("Stage 2 removed").
+# This makes the 2026-10-30 timing note below (one-at-a-time, 70-210s/
+# admission) stale -- batched throughput should track the main run's
+# ~41.5s/admission at generation_batch_size=4, i.e. noticeably faster for
+# the same --n. Re-time on the first real run below and update this
+# comment with the real number once observed.
+#
+# --n 150 for all four arms (reference, repeated reference, blind-note,
+# no-Stage-2): the old 150/40/30 mix was an accident of the interrupted
+# 2026-10-30 job, not a deliberate choice, and RQ2 leans on these
+# controls' agreement numbers -- the no-Stage-2 control's 7/40 has a ~9-32%
+# 95% CI, no narrower at n=30. Rough cost at the main run's measured
+# ~50s/admission (136 GPU-hours / 9,899 admissions): 150*4 = 600 audits
+# ~= 8 hours of pure generation -- --time above gives real margin over
+# that bare estimate, not a tight fit.
+#
+# The --arm-test step below is a mandatory gate (see
+# scripts/run_validation_controls.py): it reruns the first 8 admissions
+# in the main run's own row order (same batch grouping -- a random
+# sample would pair different neighbours and risk a bf16 false failure)
+# through the unmanipulated batched path and exits non-zero if the
+# decisions don't exactly match the main run. This SLURM script's
+# gpu:A100:1 / 80gb_vram request already matches the main run's GPU type
+# -- do not resubmit this specific script on the kisski-h100 partition,
+# since a different GPU can also change bf16 rounding and would make the
+# arm-test fail for a reason unrelated to the code being tested. The
+# full controls only run if the arm-test passes -- otherwise this job
+# would spend GPU hours producing agreement numbers built on a broken
+# reimplementation of the batched path.
+#
+# 2026-10-30 (pre-rewrite) history, kept for context: an earlier --n 150
+# one-at-a-time attempt (job 16873264) got stuck for ~4 hours on the
+# first D1 blind-note patient and was cancelled (607.5 core-hours, zero
+# patients written) -- a follow-up isolated single-patient timing test
+# (job 16947546) ran all three conditions cleanly and fast (212.1s/109.4s/
+# 69.5s), so the stall did not reproduce and was most likely a one-off,
+# not a systemic bug. Safe to resubmit on timeout either way:
 # scripts/run_validation_controls.py writes each control's CSV
 # incrementally and skips already-done hadm_ids automatically on rerun,
 # no --resume flag needed.
@@ -84,11 +111,14 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 echo "=== All checks passed — starting validation controls ==="
 
 # ── Run ──────────────────────────────────────────────────────
-# --n 30: a deliberate sample (per run_blind_note_control's own
-# docstring: "tens to low hundreds"), not a second full audit. Edit the
-# number below before submitting if you want a different size -- see the
-# timing note above before going much above 30 within an 8h budget.
-python -m scripts.run_validation_controls --n 30
+echo "[slurm] Acceptance test: batched reference arm vs. the main run (8 admissions) ..."
+python -m scripts.run_validation_controls --arm-test 8
+
+# --n 150: one sample size across all four arms (see comment above) --
+# per run_blind_note_control's own docstring this is still "a deliberate
+# sample, tens to low hundreds," not a second full audit.
+echo "[slurm] Arm test passed -- running the full D1/D2/D3 controls (n=150) ..."
+python -m scripts.run_validation_controls --n 150
 
 echo "[slurm] Done at $(date)"
 echo "[slurm] Results saved to models/stage3_control_*.csv and"

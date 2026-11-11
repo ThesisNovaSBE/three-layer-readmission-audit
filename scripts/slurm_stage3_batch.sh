@@ -82,10 +82,17 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 echo "=== All checks passed — starting batch audit ==="
 
 # ── Run ──────────────────────────────────────────────────────
-# --resume: safe to always pass. On a fresh run the output CSV doesn't
-# exist yet, so it behaves identically to a plain run; on a resubmission
-# after a timeout/crash, it picks up where it left off instead of
-# redoing (and re-billing) work already done.
+# --resume: safe to always pass FOR A GIVEN RUN's OWN resubmission chain
+# (timeout/crash -> picks up where it left off instead of redoing, and
+# re-billing, work already done). NOT safe across two different runs that
+# share the same output path: if models/stage3_batch_results.csv already
+# has all 9,899 hadm_ids from a prior run (e.g. before a methodology fix
+# upstream), this silently treats every admission as already done and
+# audits nothing new -- no error, looks like a successful no-op. Before
+# the FIRST submission of a fresh run, move any existing
+# stage3_batch_results.csv out of the way (e.g. to
+# stage3_batch_results_v1.csv) -- only keep --resume active across that
+# one run's own follow-up segments.
 python -m src.stage3.batch --resume
 
 echo "[slurm] Done at $(date)"

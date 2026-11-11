@@ -75,6 +75,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
+from src.stage3._annotation import PARSE_FAILURE, BatchGenerationError
 
 # torch/transformers are deliberately NOT imported at module level for the
 # generation path: everything else in this module (prompt building,
@@ -501,18 +502,6 @@ def compute_decision_rule(
     return "uphold"
 
 
-_PARSE_FAILURE: dict[str, Any] = {
-    "mitigating_grounds": [],
-    "aggravating_grounds": [],
-    "planned_return": None,
-    "clinical_justification": "",
-    "decision_model": None,
-    "decision_rule": None,
-    "all_quotes_verified": None,
-    "annotation_failed": True,
-}
-
-
 def _validate_grounds(
     raw_grounds: list[_GroundHit], allowed: tuple[str, ...]
 ) -> list[dict[str, str]] | None:
@@ -567,7 +556,7 @@ def _parse_response(raw: str) -> dict[str, Any]:
         # chars wasn't enough to tell truncation apart from a genuinely
         # malformed response without re-running the model. 1500 gives real
         # room to see where generation actually broke.
-        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
+        return {**PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
 
     mitigating = _validate_grounds(parsed.mitigating_grounds, MITIGATING_GROUNDS)
     aggravating = _validate_grounds(parsed.aggravating_grounds, AGGRAVATING_GROUNDS)
@@ -580,7 +569,7 @@ def _parse_response(raw: str) -> dict[str, Any]:
         mitigating is None or aggravating is None
         or valid_decision is None or valid_planned_return is None
     ):
-        return {**_PARSE_FAILURE, "clinical_justification": parsed.clinical_justification}
+        return {**PARSE_FAILURE, "clinical_justification": parsed.clinical_justification}
 
     return {
         "mitigating_grounds": mitigating,
@@ -850,6 +839,7 @@ def call_llm_batch(
     cfg: AppConfig,
     model_name: str | None = None,
     note_texts: list[str] | None = None,
+    raise_on_generate_error: bool = False,
 ) -> list[dict[str, Any]]:
     """Call a locally-served model for MULTIPLE patients in one batched
     ``generate()`` call, instead of one call per patient.
@@ -961,8 +951,12 @@ def call_llm_batch(
         raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         truncated_flags = _detect_truncated(generated_ids, tokenizer.eos_token_id)
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        if raise_on_generate_error:
+            # Batch caller wants to retry each patient individually rather
+            # than record the whole chunk as failed in one shot.
+            raise BatchGenerationError(str(exc)) from exc
         return [
-            {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+            {**PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
             for _ in prompts
         ]
 
