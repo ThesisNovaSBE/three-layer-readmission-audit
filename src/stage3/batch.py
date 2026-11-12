@@ -129,10 +129,23 @@ def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFra
 
     No-op when ``out_path`` doesn't exist -- a fresh run, or the arm test
     (which deletes its reference file first), never trips this.
+
+    A header-only file (a job killed during model load, before any row) is
+    allowed to resume. A file whose LAST line was cut off mid-write by a kill
+    (a NaN annotation_failed, or a CSV parse error inside a quoted JSON field)
+    is rejected with a "delete that line and resubmit" message.
     """
     if not out_path.exists():
         return
-    existing = pd.read_csv(out_path)
+    cut_off_tail = ("the last line was likely cut off mid-write by a kill. Delete that "
+                    "last line and resubmit.")
+    try:
+        existing = pd.read_csv(out_path)
+    except pd.errors.ParserError as exc:
+        # A kill inside a quoted JSON field (mitigating_grounds, etc.) leaves an
+        # unterminated record that pandas can't parse -- same remedy as a NaN
+        # last row below.
+        raise SystemExit(f"[stage3/batch] {out_path} failed to parse -- {cut_off_tail}") from exc
     if list(existing.columns) != _OUTPUT_FIELDS:
         raise SystemExit(
             f"[stage3/batch] Refusing to resume into {out_path}: its header "
@@ -140,12 +153,27 @@ def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFra
             f"schema ({len(_OUTPUT_FIELDS)} columns). It is almost certainly from an "
             "earlier run -- move it aside first."
         )
+    if existing.empty:
+        # Header-only file (died during model load, before any patient): nothing
+        # to verify, and resuming is correct -- don't crash.
+        return
+    if existing["annotation_failed"].isna().any():
+        bad = existing.loc[existing["annotation_failed"].isna(), "hadm_id"].tolist()
+        raise SystemExit(
+            f"[stage3/batch] {out_path} has row(s) with no annotation_failed value "
+            f"(hadm_id {bad}); {cut_off_tail}"
+        )
     for col in ("stage2_score", "stage1_score_raw"):
         if col not in results_df.columns:
             raise SystemExit(
                 f"[stage3/batch] Current stage2_results.csv has no '{col}' column; "
                 f"cannot verify {out_path} against it. Re-run src.stage2.predict."
             )
+    if not results_df["hadm_id"].is_unique:
+        raise SystemExit(
+            "[stage3/batch] Current stage2_results.csv has duplicate hadm_ids; cannot "
+            f"verify {out_path} against it. Re-run src.stage2.predict."
+        )
     # An existing hadm_id absent from the current stage2_results.csv means the
     # file is from a different run -- stop with the clear move-aside message
     # rather than letting a lookup raise a bare KeyError.
@@ -160,7 +188,7 @@ def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFra
     for col in ("stage2_score", "stage1_score_raw"):
         out_vals = existing[col].to_numpy(dtype=float)
         cur_vals = current.loc[existing["hadm_id"], col].to_numpy(dtype=float)
-        if np.abs(out_vals - cur_vals).max() > 1e-9:
+        if not np.allclose(out_vals, cur_vals, rtol=0, atol=1e-9, equal_nan=True):
             raise SystemExit(
                 f"[stage3/batch] Refusing to resume into {out_path}: its '{col}' "
                 "values do not match the current stage2_results.csv (to 1e-9). The "

@@ -172,9 +172,18 @@ def _run_arm_test(n: int, cfg, model_dir: Path) -> None:
     files (writes to its own throwaway path).
     """
     real = pd.read_csv(model_dir / "stage3_batch_results.csv")
-    sample = real.head(n)["hadm_id"].astype(int).tolist()
+    sample_df = real.head(n)
+    sample = sample_df["hadm_id"].astype(int).tolist()
+    # Report how many of the sampled rows had no real decision in the main run
+    # (PREP_FAILED or annotation_failed): their decision is NaN, and the arm is
+    # expected to reproduce that same non-decision, so they count as matches
+    # below (NaN == NaN) rather than spurious mismatches.
+    n_prep_failed = int((sample_df["discordance_mode"] == "PREP_FAILED").sum())
+    n_annotation_failed = int(sample_df["annotation_failed"].astype(bool).sum())
     print(f"[arm_test] Testing the first {len(sample)} admissions (real run's row order, "
-          "same batch grouping) against the main run", flush=True)
+          f"same batch grouping) against the main run. Of these, {n_prep_failed} are "
+          f"PREP_FAILED and {n_annotation_failed} are annotation_failed (no real "
+          "decision -- matched as NaN==NaN).", flush=True)
 
     results_df = _load_results(model_dir)
     setup = _BatchSetup(
@@ -188,8 +197,15 @@ def _run_arm_test(n: int, cfg, model_dir: Path) -> None:
         out_path.unlink()  # always fresh -- this is a quick live check, never resumed
     control = _run_batched_control("arm_test", sample, cfg, out_path, setup)
 
+    # Compare decisions with NaN treated as a value: a PREP_FAILED /
+    # annotation_failed admission has decision_model == NaN in both the main
+    # run and the reference arm, which is a MATCH, not a mismatch. A plain
+    # `!=` would count NaN != NaN as a mismatch and fail the arm test on a
+    # prep-failure that both runs reproduce identically.
     merged = real.merge(control, on="hadm_id", suffixes=("_real", "_arm"))
-    mismatches = merged[merged["decision_model_real"] != merged["decision_model_arm"]]
+    real_dec = merged["decision_model_real"].fillna("<none>")
+    arm_dec = merged["decision_model_arm"].fillna("<none>")
+    mismatches = merged[real_dec != arm_dec]
     print(f"\n[arm_test] {len(merged) - len(mismatches)}/{len(merged)} decisions match "
           "the main run exactly.", flush=True)
     if len(mismatches):
