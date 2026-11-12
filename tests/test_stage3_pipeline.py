@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from src.stage3.discordance import _percentile_rank, compute_discordance
-from src.stage3.pipeline import _cohort_scores, _lookup_patient
+from src.stage3.pipeline import _cohort_scores, _lookup_patient, _prepare_patient
 
 
 def _results_with_raw() -> pd.DataFrame:
@@ -72,3 +72,27 @@ def test_cohort_scores_raises_without_raw_column():
     """Same guard on the cohort side."""
     with pytest.raises(KeyError, match="stage1_score_raw"):
         _cohort_scores(_results_without_raw())
+
+
+def test_prepare_patient_raises_on_empty_note():
+    """Fix 2: a whitespace-only note (and not the blind-note control) must
+    raise before any SHAP/attention work -- cfg is never touched, so pass
+    None."""
+    with pytest.raises(ValueError, match="no discharge note"):
+        _prepare_patient(
+            1, None, results_df=_results_with_raw(), artifact={},
+            feature_matrix=pd.DataFrame(), note_text="   ",
+        )
+
+
+def test_prepare_patient_empty_note_allowed_under_suppress_note():
+    """The blind-note control (suppress_note=True) intentionally passes no
+    note, so the empty-note guard must NOT fire -- it should get past the
+    note check and fail later (here, on the empty artifact), never on the
+    note itself."""
+    with pytest.raises(Exception) as exc_info:  # pylint: disable=broad-except
+        _prepare_patient(
+            1, None, results_df=_results_with_raw(), artifact={"feature_cols": []},
+            feature_matrix=pd.DataFrame(), note_text="", suppress_note=True,
+        )
+    assert "no discharge note" not in str(exc_info.value)
