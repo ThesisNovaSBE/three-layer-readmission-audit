@@ -427,10 +427,36 @@ def _apply_stage3_decisions(
     return pred, info
 
 
+# Conditional-triggering rule for CONCORDANT cases: under discordant-only
+# triggering the auditor is never called on a concordant case, so its alert is
+# left standing (Stage 1's flag = positive). Decided from discordance_mode
+# alone, never from what the auditor happened to return. The team may later
+# switch this to the Stage 2 decision.
+_CONCORDANT_ALERT_STANDS = 1
+
+
+def _conditional_predictions(
+    mode_arr: np.ndarray, pred_with_stage3: np.ndarray, flagged: np.ndarray
+) -> np.ndarray:
+    """Per-admission prediction under discordant-only Stage 3 triggering.
+
+    CONCORDANT (decided from ``discordance_mode`` alone) -> Stage 1's alert
+    stands (``_CONCORDANT_ALERT_STANDS``), regardless of what the auditor
+    returned. Everything else -- discordant, PREP_FAILED, or no Stage 3 row --
+    keeps ``pred_with_stage3``, the array AFTER Stage 3 was applied, so a
+    discordant case keeps its real decision (uphold -> 1, override -> 0,
+    insufficient_evidence / failed -> that admission's Stage 2 decision via
+    the pipeline's fallback chain). Not flagged -> 0.
+    """
+    is_concordant = mode_arr == "CONCORDANT"
+    pred = np.where(is_concordant, _CONCORDANT_ALERT_STANDS, pred_with_stage3)
+    return np.where(flagged, pred, 0)
+
+
 def _conditional_triggering_report(
     model_dir: object,
     hadm_test: np.ndarray,
-    pipeline_pred_full: np.ndarray,
+    pred_with_stage3: np.ndarray,
     flagged: np.ndarray,
     y_test: np.ndarray,
     sub_test: pd.DataFrame,
@@ -443,12 +469,16 @@ def _conditional_triggering_report(
     discordant cases was an open, undecided question, and committing to it
     as the execution mode would mean never learning what auditing concordant
     cases would have found. This answers the question empirically instead —
-    for every admission the blanket run actually covered, a CONCORDANT case
-    is treated as if Stage 3 had never been called (Stage 1's flag simply
-    stands); a discordant case keeps its real Stage 3 decision. The
-    resulting metric delta vs. the real (blanket) pipeline, alongside the
-    LLM-call count saved, is the cost/benefit trade-off conditional
-    triggering would have bought.
+    a CONCORDANT case (by discordance_mode alone, not gated by what the
+    auditor returned) is treated as if Stage 3 had never been called (Stage
+    1's flag stands); every other admission keeps ``pred_with_stage3``.
+
+    ``pred_with_stage3`` MUST be the prediction array AFTER Stage 3 was
+    applied (``_apply_stage3_decisions``), not the Stage-2-only array
+    ``_eval_stage2`` returns under the same name. The caller currently passes
+    the post-Stage-3 array; if that call is ever moved above
+    ``_apply_stage3_decisions``, the auditor's decisions would silently vanish
+    from the discordant rows of this analysis.
 
     Args:
         groups: optional subject_id array -- see ``_pipeline_report``'s
@@ -459,7 +489,10 @@ def _conditional_triggering_report(
 
     Returns:
         None if no batch Stage 3 result exists yet. Otherwise a dict with
-        ``blanket_llm_calls``, ``conditional_llm_calls``, ``llm_calls_saved``,
+        ``blanket_llm_calls`` (every call the blanket run made: all admissions
+        with a real discordance mode, incl. insufficient/failed, excl.
+        PREP_FAILED), ``conditional_llm_calls`` (discordant only),
+        ``llm_calls_saved`` (concordant only; blanket == conditional + saved),
         and ``report`` (a ``_pipeline_report``-shaped dict under the
         conditional policy, directly comparable to ``pipeline.full_cohort``).
     """
@@ -469,36 +502,24 @@ def _conditional_triggering_report(
 
     s3_all = pd.read_csv(s3_path)
     s3_rows = s3_all.set_index("hadm_id")
-    decisions = (
-        s3_rows["decision_model"] if "decision_model" in s3_rows.columns
-        else pd.Series(dtype=object)
-    )
     modes = (
         s3_rows["discordance_mode"] if "discordance_mode" in s3_rows.columns
         else pd.Series(dtype=object)
     )
-
-    decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
     mode_arr = np.array([modes.get(h, None) for h in hadm_test], dtype=object)
-    has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
+
+    # Concordant vs discordant from discordance_mode ALONE. PREP_FAILED and
+    # admissions with no Stage 3 row (mode None) are neither -- no real
+    # discordance was computed and (for PREP_FAILED) no LLM call was made.
     is_concordant = mode_arr == "CONCORDANT"
+    is_discordant = np.isin(mode_arr, ["NOTE_MITIGATES", "NOTE_AMPLIFIES"])
 
-    covered_discordant = has_s3 & ~is_concordant
-    covered_concordant = has_s3 & is_concordant
-
-    # Concordant + covered -> Stage 1's flag stands (as if Stage 3 skipped it).
-    # Discordant + covered -> keep the real Stage 3 decision.
-    # Not covered by the blanket run -> unchanged existing (C9-corrected) prediction.
-    conditional_pred = np.where(
-        covered_discordant, (decision_arr == "uphold").astype(int),
-        np.where(covered_concordant, 1, pipeline_pred_full),
-    )
-    conditional_pred = np.where(flagged, conditional_pred, 0)
+    conditional_pred = _conditional_predictions(mode_arr, pred_with_stage3, flagged)
 
     return {
-        "blanket_llm_calls": int(has_s3.sum()),
-        "conditional_llm_calls": int(covered_discordant.sum()),
-        "llm_calls_saved": int(covered_concordant.sum()),
+        "blanket_llm_calls": int(is_concordant.sum() + is_discordant.sum()),
+        "conditional_llm_calls": int(is_discordant.sum()),
+        "llm_calls_saved": int(is_concordant.sum()),
         "report": _pipeline_report(y_test, conditional_pred, sub_test, groups=groups),
     }
 

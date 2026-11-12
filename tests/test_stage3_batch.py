@@ -289,6 +289,73 @@ def test_stale_output_guard_rejects_unknown_hadm_id(tmp_path, results_df):  # py
         _assert_output_matches_current_inputs(out, results_df)
 
 
+def test_stale_output_guard_allows_header_only(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A header-only file (job died during model load) must pass -- resuming
+    into it is correct, not a crash."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame(columns=_OUTPUT_FIELDS).to_csv(out, index=False)
+    _assert_output_matches_current_inputs(out, results_df)  # no raise
+
+
+def test_header_only_file_resumes(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """run_batch_audit(resume=True) into a header-only file must proceed and
+    write all rows, not crash on the empty body."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame(columns=_OUTPUT_FIELDS).to_csv(out, index=False)
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out, resume=True)
+
+    assert set(pd.read_csv(out)["hadm_id"]) == {10, 11, 12, 13}
+
+
+def test_stale_output_guard_rejects_nan_stage2_score(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A stored NaN stage2_score against a real current value must SystemExit
+    (allclose with equal_nan=True still rejects NaN-vs-number)."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame([_full_output_row(10, float("nan"), 0.45)])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="stage2_score"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_cutoff_last_row(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A row with no annotation_failed value (last line cut off by a kill)
+    must SystemExit telling the user to delete that line."""
+    out = tmp_path / "out.csv"
+    row = _full_output_row(10, 0.3, 0.45)
+    row["annotation_failed"] = float("nan")
+    pd.DataFrame([row])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="cut off"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_unparseable_last_line(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A kill inside a quoted JSON field leaves an unterminated record that
+    pandas can't parse -- caught and turned into the same cut-off message."""
+    out = tmp_path / "out.csv"
+    header = ",".join(_OUTPUT_FIELDS)
+    # Second field opens a quote that never closes before EOF.
+    out.write_text(f"{header}\n10,\"[{{\"ground\":\n")
+    with pytest.raises(SystemExit, match="cut off"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_duplicate_results(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """Duplicate hadm_ids in the current stage2_results.csv must SystemExit
+    (set_index would otherwise misalign the comparison)."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame([_full_output_row(10, 0.3, 0.45)])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    dup = pd.concat([results_df, results_df.iloc[[0]]], ignore_index=True)
+    with pytest.raises(SystemExit, match="duplicate hadm_ids"):
+        _assert_output_matches_current_inputs(out, dup)
+
+
 def test_resume_does_not_retry_a_prep_failure(
     tmp_path, results_df  # pylint: disable=redefined-outer-name
 ):

@@ -13,6 +13,7 @@ import pytest
 
 from src.model.evaluate_pipeline import (
     _apply_stage3_decisions,
+    _conditional_predictions,
     _conditional_triggering_report,
     _control_arm_report,
     _pipeline_report,
@@ -299,13 +300,16 @@ def test_conditional_triggering_concordant_cases_default_to_flag_stands(tmp_path
     }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
 
     hadm_test = np.array([1, 2])
-    pipeline_pred_full = np.array([1, 1])
+    # pred_with_stage3 = the array AFTER Stage 3 applied: admission 2 is a
+    # discordant override -> 0. The conditional arm keeps that for the
+    # discordant case and forces the concordant case to alert-stands (1).
+    pred_with_stage3 = np.array([0, 0])
     flagged = np.array([True, True])
     y_test = np.array([0, 1])
     sub_test = pd.DataFrame({"age_band": ["18-40", "18-40"]})
 
     result = _conditional_triggering_report(
-        tmp_path, hadm_test, pipeline_pred_full, flagged, y_test, sub_test
+        tmp_path, hadm_test, pred_with_stage3, flagged, y_test, sub_test
     )
 
     assert result is not None
@@ -313,7 +317,7 @@ def test_conditional_triggering_concordant_cases_default_to_flag_stands(tmp_path
     assert result["conditional_llm_calls"] == 1  # the discordant case
     assert result["blanket_llm_calls"] == 2
     # admission 1 (concordant, flag stands) -> predicted positive despite "override"
-    # admission 2 (discordant, real decision kept) -> "override" -> predicted negative
+    # admission 2 (discordant, real decision kept) -> pred_with_stage3[1]=0 -> negative
     assert result["report"]["confirmed_rate"] == pytest.approx(0.5)
 
 
@@ -339,3 +343,61 @@ def test_conditional_triggering_uncovered_admissions_keep_prior_prediction(tmp_p
     assert result["blanket_llm_calls"] == 1
     assert result["llm_calls_saved"] == 0  # the one covered case was discordant, not saved
     assert result["conditional_llm_calls"] == 1
+
+
+def test_conditional_triggering_concordant_insufficient_still_alert_stands(tmp_path):
+    """A CONCORDANT case whose auditor returned insufficient_evidence (no
+    uphold/override) must still be treated as alert-stands and counted as a
+    saved call -- decided from discordance_mode alone, NOT gated by whether a
+    real decision came back. And blanket == conditional + saved must hold even
+    though one covered case has no uphold/override decision."""
+    pd.DataFrame({
+        "hadm_id": [1, 2],
+        "decision_model": ["insufficient_evidence", "override"],
+        "discordance_mode": ["CONCORDANT", "NOTE_MITIGATES"],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+
+    hadm_test = np.array([1, 2])
+    pred_with_stage3 = np.array([0, 0])  # blanket pipeline's applied predictions
+    flagged = np.array([True, True])
+    y_test = np.array([1, 0])
+    sub_test = pd.DataFrame({"age_band": ["18-40", "18-40"]})
+
+    result = _conditional_triggering_report(
+        tmp_path, hadm_test, pred_with_stage3, flagged, y_test, sub_test
+    )
+
+    assert result["llm_calls_saved"] == 1        # concordant counted as saved...
+    assert result["conditional_llm_calls"] == 1  # ...the discordant one as a call...
+    assert result["blanket_llm_calls"] == 2      # ...and blanket == saved + conditional
+    assert (result["blanket_llm_calls"]
+            == result["conditional_llm_calls"] + result["llm_calls_saved"])
+    # concordant insufficient -> alert stands (1) despite pred_with_stage3[0]=0;
+    # discordant override -> keeps pred_with_stage3[1]=0 -> conditional_pred=[1,0].
+    assert result["report"]["confirmed_rate"] == pytest.approx(0.5)
+
+
+def test_conditional_predictions_discordant_keeps_stage3_mapping():
+    """Locks the discordant mapping: a discordant row keeps pred_with_stage3,
+    which the pipeline builds as uphold->1, override->0, insufficient->that
+    row's stage2_confirmed. A concordant row is forced to alert-stands (1)."""
+    def _stage3_applied(decision, stage2_confirmed):
+        if decision == "uphold":
+            return 1
+        if decision == "override":
+            return 0
+        return int(stage2_confirmed)  # insufficient_evidence / failed -> Stage 2 fallback
+
+    rows = [  # (decision, stage2_confirmed, discordance_mode)
+        ("uphold", 0, "NOTE_MITIGATES"),
+        ("override", 1, "NOTE_AMPLIFIES"),
+        ("insufficient_evidence", 1, "NOTE_MITIGATES"),  # -> stage2_confirmed == 1
+        ("override", 1, "CONCORDANT"),                   # concordant -> alert stands
+    ]
+    mode_arr = np.array([r[2] for r in rows], dtype=object)
+    pred_with_stage3 = np.array([_stage3_applied(r[0], r[1]) for r in rows])
+    flagged = np.array([True, True, True, True])
+
+    out = _conditional_predictions(mode_arr, pred_with_stage3, flagged)
+
+    assert list(out) == [1, 0, 1, 1]
