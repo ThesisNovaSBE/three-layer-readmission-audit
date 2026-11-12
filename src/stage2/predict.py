@@ -279,15 +279,19 @@ def _score_core(
     max_length = cfg.stage2.max_seq_length
 
     cal_json_path = model_dir / "stage2_calibration.json"
-    calibration: dict | None = None
-    if cal_json_path.exists():
-        calibration = json.loads(cal_json_path.read_text())
-        print(f"[stage2/predict] Loaded calibration from {cal_json_path}")
-    else:
-        print(
-            f"[stage2/predict] No calibration found — "
-            f"using global threshold={global_threshold:.3f}"
+    if not cal_json_path.exists():
+        # Raise, don't fall back to a global threshold: a missing calibration
+        # file means calibrate.py never ran (or its output was moved aside),
+        # and scoring on a single global threshold would ship miscalibrated
+        # probabilities AND a wrong per-band operating point to Stage 3 --
+        # silently, exactly the failure this rerun exists to remove.
+        raise FileNotFoundError(
+            f"{cal_json_path} not found. Run `python -m src.stage2.calibrate --force` "
+            "first (slurm_stage2_finish.sh does this). Refusing to fall back to a "
+            "global threshold."
         )
+    calibration: dict | None = json.loads(cal_json_path.read_text())
+    print(f"[stage2/predict] Loaded calibration from {cal_json_path}")
 
     if artifact is None:
         artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")

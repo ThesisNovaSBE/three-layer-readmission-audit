@@ -89,12 +89,13 @@ echo "=== All checks passed — starting batch audit ==="
 #   - mean(r1) and mean(r2) are each ~50 (percentile ranks of a sample of
 #     the cohort should centre on 50; a mean far from 50 means the ranking
 #     population or the raw/calibrated score wiring is wrong);
-#   - there is NO "[shap_extract] WARNING" line (every SHAP statement came
-#     from the real TreeExplainer, not the gain-importance fallback);
+#   - each SHAP line reads "name: val (↑/↓ risk, SHAP=±x.xxx log-odds)" --
+#     XGBoost native pred_contribs always runs; there is no gain fallback and
+#     no "[shap_extract]" log line, because a SHAP integrity failure now
+#     RAISES (the admission becomes a PREP_FAILED row instead);
 #   - top_shap_features shows "not recorded" for missing values, never 0;
-#   - each SHAP line contains "log-odds" (the unit is explicit);
 #   - attention_sentences is not empty;
-#   - annotation_failed is 0 across all 20 rows;
+#   - annotation_failed is 0 and no row has discordance_mode == "PREP_FAILED";
 #   - for any admission whose note exceeded 20,000 chars, the prompt's note
 #     block carries the "middle of the discharge note omitted" marker.
 #

@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.config import get_model_dir, load_config
@@ -112,6 +113,60 @@ def _already_done(out_path: Path) -> set[int]:
         return set()
     existing = pd.read_csv(out_path, usecols=["hadm_id"])
     return set(existing["hadm_id"].astype(int).tolist())
+
+
+def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFrame) -> None:
+    """Guard against resuming/appending into an output file from a DIFFERENT
+    run. If ``out_path`` exists, require:
+
+      (a) its header equals the current ``_OUTPUT_FIELDS``, and
+      (b) every existing row's ``stage2_score`` and ``stage1_score_raw``
+          match the CURRENT ``stage2_results.csv`` (``results_df``) to 1e-9.
+
+    Otherwise ``SystemExit`` -- the file is almost certainly from an earlier
+    run (e.g. before a recalibration regenerated stage2_results.csv) and must
+    be moved aside, or resuming would silently blend two incompatible runs.
+
+    No-op when ``out_path`` doesn't exist -- a fresh run, or the arm test
+    (which deletes its reference file first), never trips this.
+    """
+    if not out_path.exists():
+        return
+    existing = pd.read_csv(out_path)
+    if list(existing.columns) != _OUTPUT_FIELDS:
+        raise SystemExit(
+            f"[stage3/batch] Refusing to resume into {out_path}: its header "
+            f"({len(existing.columns)} columns) does not match the current output "
+            f"schema ({len(_OUTPUT_FIELDS)} columns). It is almost certainly from an "
+            "earlier run -- move it aside first."
+        )
+    for col in ("stage2_score", "stage1_score_raw"):
+        if col not in results_df.columns:
+            raise SystemExit(
+                f"[stage3/batch] Current stage2_results.csv has no '{col}' column; "
+                f"cannot verify {out_path} against it. Re-run src.stage2.predict."
+            )
+    # An existing hadm_id absent from the current stage2_results.csv means the
+    # file is from a different run -- stop with the clear move-aside message
+    # rather than letting a lookup raise a bare KeyError.
+    current = results_df.set_index("hadm_id")
+    missing = sorted(set(existing["hadm_id"]) - set(current.index))
+    if missing:
+        raise SystemExit(
+            f"[stage3/batch] Refusing to resume into {out_path}: it contains "
+            f"{len(missing)} hadm_id(s) absent from the current stage2_results.csv "
+            f"(e.g. {missing[:5]}). It is from an earlier run -- move it aside first."
+        )
+    for col in ("stage2_score", "stage1_score_raw"):
+        out_vals = existing[col].to_numpy(dtype=float)
+        cur_vals = current.loc[existing["hadm_id"], col].to_numpy(dtype=float)
+        if np.abs(out_vals - cur_vals).max() > 1e-9:
+            raise SystemExit(
+                f"[stage3/batch] Refusing to resume into {out_path}: its '{col}' "
+                "values do not match the current stage2_results.csv (to 1e-9). The "
+                "Stage 2 results were regenerated since this file was written -- move "
+                "the old output aside before (re)running."
+            )
 
 
 def _preload_notes(
@@ -402,15 +457,11 @@ def run_batch_audit(
         The output path written to.
     """
     out_path = out_path or (get_model_dir() / "stage3_batch_results.csv")
-    if resume and out_path.exists():
-        existing_header = pd.read_csv(out_path, nrows=0).columns.tolist()
-        if existing_header != _OUTPUT_FIELDS:
-            raise SystemExit(
-                f"[stage3/batch] Refusing to --resume into {out_path}: its header "
-                f"({len(existing_header)} columns) does not match the current output "
-                f"schema ({len(_OUTPUT_FIELDS)} columns). This is almost certainly "
-                "an output file from an earlier run -- move it aside first."
-            )
+    if resume:
+        # Fail before the (expensive) note preload if the existing output is
+        # from a different run -- header + per-row stage2_score/stage1_score_raw
+        # must match the current stage2_results.csv.
+        _assert_output_matches_current_inputs(out_path, _load_results(get_model_dir()))
     setup = _setup_batch(
         cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path
     )

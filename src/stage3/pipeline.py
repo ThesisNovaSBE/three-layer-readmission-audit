@@ -284,16 +284,24 @@ def _prepare_patient(
     df = results_df if results_df is not None else _load_results(get_model_dir())
     patient = _lookup_patient(hadm_id, df)
 
+    note_text = (
+        note_text if note_text is not None
+        else _load_note_text(hadm_id, patient["subject_id"], cfg)
+    )
+    # A real audit needs a note. An empty/whitespace-only note (admission not
+    # in notes_lookup, or no discharge summary on file) must not be audited as
+    # if the note were simply uninformative -- raise so batch.py records a
+    # PREP_FAILED row. Checked before SHAP/attention so a note-less admission
+    # fails fast. The blind-note control (suppress_note) is the one case where
+    # an empty note is intentional, so it is exempt.
+    if not suppress_note and not note_text.strip():
+        raise ValueError(f"no discharge note for hadm_id {hadm_id}")
+
     feature_row = _get_patient_feature_row(
         hadm_id, loaded_artifact, cfg, feature_matrix
     )
     shap_strings = extract_shap_for_patient(
         loaded_artifact, feature_row, top_k=cfg.stage3.top_shap_features
-    )
-
-    note_text = (
-        note_text if note_text is not None
-        else _load_note_text(hadm_id, patient["subject_id"], cfg)
     )
     attention_sentences = _get_attention(hadm_id, note_text, cfg)
 

@@ -51,6 +51,7 @@ from src.stage3.batch import (
     _OUTPUT_FIELDS,
     _BatchSetup,
     _already_done,
+    _assert_output_matches_current_inputs,
     _load_artifact,
     _load_results,
     _preload_notes,
@@ -85,6 +86,11 @@ def _run_batched_control(
     """Run one control over hadm_ids through the main run's own batched
     chunk processor (``_process_chunk``), writing incrementally (crash-safe,
     resumable). ``setup`` is the same bundle the real run passes."""
+    # Same stale-output guard the main run uses: if this control CSV already
+    # exists but is from an earlier run (header or stage2_score/stage1_score_raw
+    # drift), stop rather than blend two runs. The arm test deletes its file
+    # first, so it never trips this.
+    _assert_output_matches_current_inputs(out_path, setup.results_df)
     done = _already_done(out_path)
     pending = [h for h in hadm_ids if h not in done]
     print(f"[validation_controls] {name}: {len(hadm_ids)} target, "

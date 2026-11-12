@@ -15,6 +15,7 @@ import pytest
 
 from src.stage3.batch import (
     _OUTPUT_FIELDS,
+    _assert_output_matches_current_inputs,
     check_self_agreement,
     run_batch_audit,
     run_blind_note_control,
@@ -23,14 +24,25 @@ from src.stage3.batch import (
 )
 from src.stage3._annotation import BatchGenerationError
 
+# hadm_id -> (stage1_score, stage1_score_raw, stage2_score), mirroring the
+# results_df fixture below.
+_FIXTURE_SCORES = {
+    10: (0.5, 0.45, 0.3), 11: (0.6, 0.55, 0.5),
+    12: (0.4, 0.35, 0.2), 13: (0.7, 0.65, 0.6),
+}
+
 
 def _fake_result(hadm_id: int, *, fail: bool = False, decision: str = "override") -> SimpleNamespace:
     """Build a stand-in for ExplanationResult -- exposes both attribute access
     (as check_self_agreement uses) and .model_dump() (as run_batch_audit uses)."""
+    # Match the results_df fixture per hadm_id so the stale-output guard (which
+    # compares written stage2_score/stage1_score_raw against stage2_results.csv)
+    # passes on a legitimate --resume. _FIXTURE_SCORES mirrors the fixture below.
+    s1, s1_raw, s2 = _FIXTURE_SCORES.get(hadm_id, (0.6, 0.55, 0.4))
     data = {
-        "hadm_id": hadm_id, "stage1_score": 0.6, "stage1_score_raw": 0.55,
+        "hadm_id": hadm_id, "stage1_score": s1, "stage1_score_raw": s1_raw,
         "stage1_threshold": 0.35,
-        "stage2_score": 0.4, "stage2_confirmed": True, "r1": 70.0, "r2": 40.0,
+        "stage2_score": s2, "stage2_confirmed": True, "r1": 70.0, "r2": 40.0,
         "displacement": -30.0, "discordance_mode": "NOTE_MITIGATES",
         "top_shap_features": [] if fail else ["creatinine (last): 3.2 (up risk, SHAP=+0.18)"],
         "attention_sentences": [] if fail else ["Comfort care planned."],
@@ -202,6 +214,79 @@ def test_prep_failure_does_not_stop_the_batch_and_still_writes_a_row(
     assert "PREP FAILED" in row["clinical_justification"]
     # basic Stage 1/2 fields must still come from results_df, not be blanked
     assert row["stage1_score"] == pytest.approx(0.6)
+
+
+def test_missing_note_becomes_prep_failed_row(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """Fix 2: an admission with no note (absent from notes_lookup) must be
+    recorded by the REAL _prepare_patient as a PREP_FAILED row, never audited.
+    Only the loaders are mocked; _prepare_patient and _prep_failure_row run
+    for real, so the empty-note guard actually fires."""
+    out = tmp_path / "out.csv"
+    with patch("src.stage3.batch._load_artifact",
+               return_value={"estimator": None, "feature_cols": []}), \
+         patch("src.stage3.batch._load_results", return_value=results_df), \
+         patch("src.stage3.batch.load_feature_matrix", return_value=pd.DataFrame()), \
+         patch("src.stage3.batch._preload_notes", return_value={}):  # no notes for anyone
+        run_batch_audit(cfg=_cfg(), out_path=out, limit=1)
+
+    written = pd.read_csv(out)
+    assert len(written) == 1
+    row = written.iloc[0]
+    assert row["discordance_mode"] == "PREP_FAILED"
+    assert bool(row["annotation_failed"]) is True
+    assert "no discharge note" in row["clinical_justification"]
+
+
+# ── Fix 4: stale-output guard ─────────────────────────────────────────────────
+
+def _full_output_row(hadm_id, stage2_score, stage1_score_raw):
+    """A complete _OUTPUT_FIELDS row with the two guard-checked columns set."""
+    row = {c: 0 for c in _OUTPUT_FIELDS}
+    row.update({"hadm_id": hadm_id, "stage2_score": stage2_score,
+                "stage1_score_raw": stage1_score_raw})
+    return row
+
+
+def test_stale_output_guard_noop_when_absent(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """No existing file -> the guard does nothing (fresh run / arm test)."""
+    _assert_output_matches_current_inputs(tmp_path / "missing.csv", results_df)
+
+
+def test_stale_output_guard_passes_when_matching(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """An existing file whose rows match the current results must pass."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame([_full_output_row(10, 0.3, 0.45)])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    _assert_output_matches_current_inputs(out, results_df)  # hadm 10 fixture: s2=0.3, raw=0.45
+
+
+def test_stale_output_guard_rejects_header_mismatch(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A file missing a current column (e.g. stage1_score_raw) must SystemExit."""
+    out = tmp_path / "out.csv"
+    cols = [c for c in _OUTPUT_FIELDS if c != "stage1_score_raw"]
+    pd.DataFrame(columns=cols).to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="header"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_value_drift(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """Correct header but a stage2_score that drifted from the current
+    stage2_results.csv (regenerated since) must SystemExit."""
+    out = tmp_path / "out.csv"
+    # hadm 10's current stage2_score is 0.3; write 0.999 to simulate a stale run.
+    pd.DataFrame([_full_output_row(10, 0.999, 0.45)])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="stage2_score"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_unknown_hadm_id(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """An existing row whose hadm_id isn't in the current stage2_results.csv
+    must stop with the clear move-aside message, not a bare KeyError."""
+    out = tmp_path / "out.csv"
+    pd.DataFrame([_full_output_row(9999, 0.3, 0.45)])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="absent from the current"):
+        _assert_output_matches_current_inputs(out, results_df)
 
 
 def test_resume_does_not_retry_a_prep_failure(
