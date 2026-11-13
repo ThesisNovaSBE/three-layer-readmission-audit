@@ -4,11 +4,14 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=06:00:00
-# Bumped from 3h 2026-09-09: a real run measured calibration=1h19m, cascade
-# predict=17m, population-wide predict=~1h41m (79% done at cutoff) -- total
-# ~3.3h needed, and none of these steps are resumable/cached, so a timeout
-# means redoing the whole thing. 6h gives real headroom, not another guess.
+#SBATCH --time=12:00:00
+# Bumped to 12h 2026-11: this scores the fp32 Clinical-Longformer over the
+# ~126k notes-covered test admissions (cascade + population-wide predict),
+# none of it resumable/cached, so a timeout wastes the whole GPU slot. The
+# earlier 6h was sized before the population-wide (--all) scoring over the
+# full test partition was added; 12h is real headroom over the measured
+# per-step times (calibration ~1h19m, cascade predict ~17m, population-wide
+# predict a few hours), not another tight guess.
 #SBATCH --job-name=thesis-stage2-finish
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err

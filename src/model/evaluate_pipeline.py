@@ -384,10 +384,20 @@ def _apply_stage3_decisions(
     for", never silently drops or miscounts coverage.
 
     Returns:
-        (pipeline_pred_with_stage3, info) — ``info`` reports coverage and
-        separately how many admissions had an ``insufficient_evidence``
-        verdict; if no batch Stage 3 result exists yet, ``pipeline_pred_full``
-        is returned unchanged and ``info["available"]`` is ``False``.
+        (pipeline_pred_with_stage3, info) — ``info`` reports coverage and the
+        four mutually-exclusive outcome categories, counted over ``hadm_test``
+        (the thesis reports test-partition numbers): ``n_test_with_stage3_decision``
+        (decided: uphold/override), ``n_insufficient_evidence``,
+        ``n_llm_annotation_failed`` (the LLM was called but returned
+        unparseable output; excludes PREP_FAILED), and ``n_prep_failed`` (prep
+        failed before any call). These four sum to the number of Stage 3 rows,
+        ON THE ASSUMPTION that every Stage 3 row's hadm_id is in the test
+        partition -- true because the batch only scores flagged test
+        admissions with a note. ``n_stage3_rows_outside_test`` counts any that
+        aren't (should be 0; a loud warning fires if not, since the four
+        categories would then stop summing to the CSV row count). If no batch
+        Stage 3 result exists yet, ``pipeline_pred_full`` is returned unchanged
+        and ``info["available"]`` is ``False``.
     """
     s3_path = model_dir / "stage3_batch_results.csv"
     if not s3_path.exists():
@@ -406,13 +416,34 @@ def _apply_stage3_decisions(
         s3_rows["decision_model"] if "decision_model" in s3_rows.columns
         else pd.Series(dtype=object)
     )
+    modes = (
+        s3_rows["discordance_mode"] if "discordance_mode" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
+    annotation_failed = (
+        s3_rows["annotation_failed"] if "annotation_failed" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
 
     decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
+    mode_arr = np.array([modes.get(h, None) for h in hadm_test], dtype=object)
+    failed_arr = np.array([bool(annotation_failed.get(h, False)) for h in hadm_test])
     has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
     is_insufficient = decision_arr == "insufficient_evidence"
+    is_prep_failed = mode_arr == "PREP_FAILED"
+    is_llm_failed = failed_arr & ~is_prep_failed  # LLM called but output unparseable
 
     pred = np.where(has_s3, (decision_arr == "uphold").astype(int), pipeline_pred_full)
     pred = np.where(flagged, pred, 0)  # never-flagged admissions always stay negative
+
+    # Stage 3 rows whose hadm_id isn't in the test partition (should be 0).
+    hadm_set = {int(h) for h in hadm_test}
+    n_outside = int(sum(1 for h in s3_rows.index if int(h) not in hadm_set))
+    if n_outside:
+        print(f"[pipeline_eval] WARNING: {n_outside} Stage 3 row(s) have a hadm_id NOT in "
+              "the test partition. The decided/insufficient/LLM-failed/prep-failed counts "
+              "will not sum to the Stage 3 CSV row count. This should be 0 -- the batch "
+              "only scores flagged test admissions with a note.")
 
     coverage = float(has_s3.sum() / flagged.sum()) if flagged.sum() else 0.0
     info = {
@@ -420,10 +451,15 @@ def _apply_stage3_decisions(
         "n_test_with_stage3_decision": int(has_s3.sum()),
         "coverage_of_flagged": coverage,
         "n_insufficient_evidence": int(is_insufficient.sum()),
+        "n_llm_annotation_failed": int(is_llm_failed.sum()),
+        "n_prep_failed": int(is_prep_failed.sum()),
+        "n_stage3_rows_outside_test": n_outside,
     }
     print(f"[pipeline_eval] Stage 3 decisions applied to {has_s3.sum():,} / "
-          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage; "
-          f"{int(is_insufficient.sum()):,} insufficient_evidence, not counted as coverage)")
+          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage). "
+          f"Outcomes: {int(has_s3.sum()):,} decided, {int(is_insufficient.sum()):,} "
+          f"insufficient_evidence, {int(is_llm_failed.sum()):,} LLM-failed, "
+          f"{int(is_prep_failed.sum()):,} prep-failed.")
     return pred, info
 
 

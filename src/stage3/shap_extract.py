@@ -57,6 +57,17 @@ def _format_value(val: float) -> str:
     return "not recorded" if np.isnan(val) else f"{val:.3g}"
 
 
+def _direction(contrib: float) -> str:
+    """A SHAP contribution's sign as a readable risk direction: a feature that
+    didn't move this patient's log-odds at all (contrib exactly 0, e.g. a
+    value the model never split on) reads 'no effect', not a false direction."""
+    if contrib > 0:
+        return "↑ risk"
+    if contrib < 0:
+        return "↓ risk"
+    return "no effect"
+
+
 def _is_xgboost(model: object) -> bool:
     """True for an XGBoost sklearn estimator (XGBClassifier/XGBRegressor).
 
@@ -166,9 +177,9 @@ def extract_shap_features(
                 col = available[j]
                 val_str = _format_value(x[i, j])
                 contrib = float(contribs[j])
-                direction = "↑ risk" if contrib > 0 else "↓ risk"
                 features.append(
-                    f"{_label(col)}: {val_str} ({direction}, SHAP={contrib:+.3f} log-odds)"
+                    f"{_label(col)}: {val_str} "
+                    f"({_direction(contrib)}, SHAP={contrib:+.3f} log-odds)"
                 )
         else:
             order = np.argsort(gains)[::-1][:top_k]  # type: ignore[arg-type]

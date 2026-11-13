@@ -175,14 +175,18 @@ def _run_arm_test(n: int, cfg, model_dir: Path) -> None:
     sample_df = real.head(n)
     sample = sample_df["hadm_id"].astype(int).tolist()
     # Report how many of the sampled rows had no real decision in the main run
-    # (PREP_FAILED or annotation_failed): their decision is NaN, and the arm is
-    # expected to reproduce that same non-decision, so they count as matches
-    # below (NaN == NaN) rather than spurious mismatches.
-    n_prep_failed = int((sample_df["discordance_mode"] == "PREP_FAILED").sum())
-    n_annotation_failed = int(sample_df["annotation_failed"].astype(bool).sum())
+    # (PREP_FAILED or an LLM annotation_failure): their decision is NaN, and the
+    # arm is expected to reproduce that same non-decision, so they count as
+    # matches below (NaN == NaN) rather than spurious mismatches. Count the two
+    # separately -- a PREP_FAILED row also has annotation_failed=True, so
+    # counting them together would double-count it.
+    is_prep_failed = sample_df["discordance_mode"] == "PREP_FAILED"
+    n_prep_failed = int(is_prep_failed.sum())
+    is_llm_failed = sample_df["annotation_failed"].astype(bool) & ~is_prep_failed
+    n_llm_annotation_failed = int(is_llm_failed.sum())
     print(f"[arm_test] Testing the first {len(sample)} admissions (real run's row order, "
           f"same batch grouping) against the main run. Of these, {n_prep_failed} are "
-          f"PREP_FAILED and {n_annotation_failed} are annotation_failed (no real "
+          f"PREP_FAILED and {n_llm_annotation_failed} are LLM annotation_failed (no real "
           "decision -- matched as NaN==NaN).", flush=True)
 
     results_df = _load_results(model_dir)

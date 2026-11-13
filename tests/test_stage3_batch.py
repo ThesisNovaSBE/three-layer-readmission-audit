@@ -242,10 +242,11 @@ def test_missing_note_becomes_prep_failed_row(
 # ── Fix 4: stale-output guard ─────────────────────────────────────────────────
 
 def _full_output_row(hadm_id, stage2_score, stage1_score_raw):
-    """A complete _OUTPUT_FIELDS row with the two guard-checked columns set."""
+    """A complete _OUTPUT_FIELDS row with the two guard-checked columns set.
+    annotation_failed is a real bool so it stringifies to "True"/"False"."""
     row = {c: 0 for c in _OUTPUT_FIELDS}
     row.update({"hadm_id": hadm_id, "stage2_score": stage2_score,
-                "stage1_score_raw": stage1_score_raw})
+                "stage1_score_raw": stage1_score_raw, "annotation_failed": False})
     return row
 
 
@@ -330,6 +331,17 @@ def test_stale_output_guard_rejects_cutoff_last_row(tmp_path, results_df):  # py
     out = tmp_path / "out.csv"
     row = _full_output_row(10, 0.3, 0.45)
     row["annotation_failed"] = float("nan")
+    pd.DataFrame([row])[_OUTPUT_FIELDS].to_csv(out, index=False)
+    with pytest.raises(SystemExit, match="cut off"):
+        _assert_output_matches_current_inputs(out, results_df)
+
+
+def test_stale_output_guard_rejects_truncated_bool(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """A last line cut off inside the bool (e.g. "Fals") is malformed, even
+    though it isn't NaN -- must SystemExit with the cut-off message."""
+    out = tmp_path / "out.csv"
+    row = _full_output_row(10, 0.3, 0.45)
+    row["annotation_failed"] = "Fals"  # kill truncated "False" mid-token
     pd.DataFrame([row])[_OUTPUT_FIELDS].to_csv(out, index=False)
     with pytest.raises(SystemExit, match="cut off"):
         _assert_output_matches_current_inputs(out, results_df)
