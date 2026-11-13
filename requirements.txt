@@ -1,4 +1,8 @@
 # Core
+# NOTE (13 Nov 2026): the KISSKI thesis-env actually runs numpy 2.3.5 (outside
+# this <2.0 pin) and has NO shap package installed; the old Stage 3 run's SHAP
+# evidence was therefore gain-based, not per-patient (see MODEL_CARD.md
+# Limitations). Pins left unchanged for now -- reconcile before the next rerun.
 numpy>=1.24,<2.0
 pandas>=2.0
 scikit-learn>=1.4   # HistGradientBoostingClassifier(class_weight=...) needs >=1.4

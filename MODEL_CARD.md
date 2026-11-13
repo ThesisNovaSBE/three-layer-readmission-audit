@@ -26,6 +26,7 @@
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
 - **Model type:** Three-stage LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
+- **Total compute:** 221.37 GPU-hours including every failed and superseded run, of which the single old Stage 3 batch run was 136.29 GPU-hours (~6 days wall-clock) [sacct AllocTRES, computed 2026-11-04, `sessions/2026-11-04_session-36.md`]
 
 ## Intended Use
 
@@ -79,6 +80,26 @@ point is only 19.0% vs. 35–45% for the other three bands. This is the
 documented "v1 recall gap" that Stage 2's age-group oversampling exists to
 address — see `config.yaml`'s `stage2.age_group_train_targets` comment.
 
+The isotonic calibrator has **47 distinct output levels at or above the
+0.3235 flag threshold** [`np.unique(IsotonicRegression.y_thresholds_) >=
+0.3235` on the calibrator in `models/stage1_xgboost.joblib`]. It is **not** a
+47-value step function, though: scikit-learn's `IsotonicRegression`
+interpolates linearly between those levels (`out_of_bounds="clip"`), so the
+calibrated scores at or above 0.3235 actually take **51 distinct values on
+the out-of-fold training predictions** [recomputed with
+`src.model.cv.oof_predict` using the stored params/seed/3 folds then
+`fit_isotonic_calibrator` — CPU reproduction, so *(approximate: the original
+folds trained on cuda)*] and **58 distinct values on the held-out test
+partition** [`apply_calibration` over `artifact["test_idx"]`]. The scores are
+nonetheless heavily tied: on the test partition the **largest group of
+flagged admissions sharing a single calibrated score is 2,535** (all at
+0.3459) [`value_counts()` on the flagged calibrated scores]. This heavy tying
+is why Stage 3's discordance ranking uses the raw (uncalibrated) score
+instead. The model was trained with early stopping:
+**best_iteration 1,386 (zero-indexed) of 1,437 boosted rounds, i.e. 1,387
+trees used for prediction** [`models/stage1_xgboost.joblib`:
+`estimator.best_iteration` and `get_booster().num_boosted_rounds()`].
+
 ### Stage 2 — Clinical-Longformer (real retrain, completed 2026-09-09/10, target=unplanned readmission)
 
 Trained on 141,767 age-stratified notes (real per-band availability came in
@@ -127,6 +148,27 @@ remain, worth digging into further for the fairness discussion.
 | Batch size | 8 (effective 16 with grad. accum. ×2) |
 | Gradient checkpointing | disabled (80 GB VRAM sufficient) |
 | Sequence length | 4096 tokens (raised from 2048 on 2026-08-25) |
+
+**Realised training sample** [`stage2_15761348.log`; reported by the authors,
+13 Nov 2026 — *(unverified: log not in repo)*]: 141,767 summaries, 20.5%
+readmitted. Per age band: 18-40 24,407 (19.0%), 41-55 33,685 (20.4%), 56-70
+46,402 (20.2%), 70+ 37,273 (22.0%). Six age×label cells fell short of their
+configured target counts: all four readmitted cells by 41-42%, 41-55_0 by
+8%, and 56-70_0 by 6%. Cause: the targets were derived from the whole Stage 1
+training partition (`sessions/2026-09-04_session-22.md`), but sampling draws
+only from the 60% fine-tuning split, so the intended 28.6–32.6% readmitted
+share was never reachable and the realised share is 20.5%.
+
+**Validation set**: 49,855 summaries [`stage2_15761348.log` — *(unverified:
+log not in repo)*]. **Class weight**: 3.88 — the negative:positive ratio,
+which re-derives exactly from the 20.5% readmitted share: (1 − 0.205) / 0.205
+= 3.88 [computed]. **Optimiser** `adamw_torch`, **LR schedule** `linear` (lr
+1e-5, warmup_ratio 0.1) [`models/stage2_longformer_best/training_args.bin`:
+`optim`, `lr_scheduler_type`].
+
+**Compute**: final run ~15.7 h [`stage2_15761348.log` — *(unverified: log not
+in repo)*]; ~44 GPU-hours including failed runs (43.66 h) [sacct AllocTRES,
+computed 2026-11-04, `sessions/2026-11-04_session-36.md`].
 
 ### RQ1 — Does the note text add signal beyond structured data?
 
@@ -429,6 +471,23 @@ have been.
 - Truncation asymmetry between Stage 2 (4096-token window) and Stage 3
   (20,000-character safety cap) is much smaller than in earlier designs
   but not eliminated for pathologically long notes.
+- **The old Stage 3 run's SHAP evidence was gain-based, not per-patient.**
+  The KISSKI `thesis-env` runs Python 3.11.9, numpy 2.3.5, xgboost 3.2.0,
+  transformers 4.57.6 (plus the torch and `lm-format-enforcer` versions
+  reported by `pip show`) and has **no `shap` package** [reported by the
+  authors, 13 Nov 2026 — *(inferred; verify against `conda list
+  --revisions` on the cluster)*]. On `main`, `shap_extract` therefore took
+  its exception fallback to global **gain importances**: the same five
+  features for every patient, formatted `"feature: value"`, missing values
+  shown as `0`, and no up/down direction [inferred from the gain-fallback
+  branch of `src/stage3/shap_extract.py` as it stood during the 2026-10-06
+  run]. The native-`pred_contribs` rewrite (this branch) removes the
+  `shap` dependency so the rerun gets real per-patient attribution.
+- **Prompt-development peeking risk.** The Stage 3 prompt was developed
+  iteratively on ~50-admission samples drawn from the *flagged test*
+  admissions; the authors cannot confirm or rule out that readmission
+  outcomes were looked at during that iteration [reported by the authors,
+  13 Nov 2026].
 
 ## Ethical Considerations
 
