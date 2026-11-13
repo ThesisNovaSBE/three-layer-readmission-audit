@@ -149,26 +149,27 @@ remain, worth digging into further for the fairness discussion.
 | Gradient checkpointing | disabled (80 GB VRAM sufficient) |
 | Sequence length | 4096 tokens (raised from 2048 on 2026-08-25) |
 
-**Realised training sample** [`stage2_15761348.log`; reported by the authors,
-13 Nov 2026 — *(unverified: log not in repo)*]: 141,767 summaries, 20.5%
-readmitted. Per age band: 18-40 24,407 (19.0%), 41-55 33,685 (20.4%), 56-70
-46,402 (20.2%), 70+ 37,273 (22.0%). Six age×label cells fell short of their
-configured target counts: all four readmitted cells by 41-42%, 41-55_0 by
-8%, and 56-70_0 by 6%. Cause: the targets were derived from the whole Stage 1
-training partition (`sessions/2026-09-04_session-22.md`), but sampling draws
-only from the 60% fine-tuning split, so the intended 28.6–32.6% readmitted
-share was never reachable and the realised share is 20.5%.
+**Realised training sample** [`results/stage2_training_log_excerpt.txt`]:
+141,767 summaries, 20.5% readmitted. Per age band: 18-40 24,407 (19.0%),
+41-55 33,685 (20.4%), 56-70 46,402 (20.2%), 70+ 37,273 (22.0%). Six age×label
+cells fell short of their configured target counts: all four readmitted cells
+by 41-42%, 41-55_0 by 8%, and 56-70_0 by 6%. Cause: the targets were derived
+from the whole Stage 1 training partition (`sessions/2026-09-04_session-22.md`),
+but sampling draws only from the 60% fine-tuning split, so the intended
+28.6–32.6% readmitted share was never reachable and the realised share is
+20.5%.
 
-**Validation set**: 49,855 summaries [`stage2_15761348.log` — *(unverified:
-log not in repo)*]. **Class weight**: 3.88 — the negative:positive ratio,
-which re-derives exactly from the 20.5% readmitted share: (1 − 0.205) / 0.205
-= 3.88 [computed]. **Optimiser** `adamw_torch`, **LR schedule** `linear` (lr
-1e-5, warmup_ratio 0.1) [`models/stage2_longformer_best/training_args.bin`:
-`optim`, `lr_scheduler_type`].
+**Validation set**: 49,855 summaries [`results/stage2_training_log_excerpt.txt`].
+**Class weight**: 3.88 — the negative:positive ratio
+[`results/stage2_training_log_excerpt.txt`: `neg=1.0 pos=3.88`; also
+re-derives from the 20.5% readmitted share: (1 − 0.205) / 0.205 = 3.88].
+**Optimiser** `adamw_torch`, **LR schedule** `linear` (lr 1e-5, warmup_ratio
+0.1) [`models/stage2_longformer_best/training_args.bin`: `optim`,
+`lr_scheduler_type`].
 
-**Compute**: final run ~15.7 h [`stage2_15761348.log` — *(unverified: log not
-in repo)*]; ~44 GPU-hours including failed runs (43.66 h) [sacct AllocTRES,
-computed 2026-11-04, `sessions/2026-11-04_session-36.md`].
+**Compute**: final run ~15.7 h [`sessions/2026-09-13_session-23.md`]; ~44
+GPU-hours including failed runs (43.66 h) [sacct AllocTRES, computed
+2026-11-04, `sessions/2026-11-04_session-36.md`].
 
 ### RQ1 — Does the note text add signal beyond structured data?
 

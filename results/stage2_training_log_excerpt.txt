@@ -1,0 +1,16 @@
+Excerpt from KISSKI log stage2_15761348.log (final Stage 2 training run), aggregate counts only
+  [stage2/train] WARNING: cell 18-40_1 short by 41% -- 4,635 available vs 7,909 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+  [stage2/train] WARNING: cell 41-55_0 short by 8% -- 26,814 available vs 29,053 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+  [stage2/train] WARNING: cell 41-55_1 short by 42% -- 6,871 available vs 11,777 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+  [stage2/train] WARNING: cell 56-70_0 short by 6% -- 37,047 available vs 39,388 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+  [stage2/train] WARNING: cell 56-70_1 short by 41% -- 9,355 available vs 15,755 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+  [stage2/train] WARNING: cell 70+_1 short by 42% -- 8,205 available vs 14,065 targeted (using all available). If this is large and unexpected, age_group_train_targets in config.yaml may need re-deriving against the current data/label (see the comment above that config block).
+[stage2/train] Age-stratified sample: 141,767 notes (readmission rate: 20.5%)
+  18-40    24,407  (19.0% readmit)
+  41-55    33,685  (20.4% readmit)
+  56-70    46,402  (20.2% readmit)
+  70+      37,273  (22.0% readmit)
+[stage2/train] Train: 141,767  |  Val: 49,855
+[stage2/train] Class weights: neg=1.0  pos=3.88
+[stage2/train] Device: cuda  fp16=False  bf16=True  checkpoint every 500 steps
+[stage2/train] Val AUPRC=0.3720  AUROC=0.7038
