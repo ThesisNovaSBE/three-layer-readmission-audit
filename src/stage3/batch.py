@@ -157,11 +157,14 @@ def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFra
         # Header-only file (died during model load, before any patient): nothing
         # to verify, and resuming is correct -- don't crash.
         return
-    if existing["annotation_failed"].isna().any():
-        bad = existing.loc[existing["annotation_failed"].isna(), "hadm_id"].tolist()
+    # annotation_failed is the last column, so a line cut off mid-write shows a
+    # malformed value there (NaN, or a truncated "Fals"). A clean bool column
+    # stringifies to exactly "True"/"False"; anything else is a cut-off row.
+    bad = ~existing["annotation_failed"].astype(str).isin(["True", "False"])
+    if bad.any():
         raise SystemExit(
-            f"[stage3/batch] {out_path} has row(s) with no annotation_failed value "
-            f"(hadm_id {bad}); {cut_off_tail}"
+            f"[stage3/batch] {out_path} has row(s) with a malformed annotation_failed "
+            f"value (hadm_id {existing.loc[bad, 'hadm_id'].tolist()}); {cut_off_tail}"
         )
     for col in ("stage2_score", "stage1_score_raw"):
         if col not in results_df.columns:

@@ -63,6 +63,7 @@ def main() -> None:
 
     comparable = readmitted[~readmitted["llm_not_stated"]].copy()
     n_comparable = len(comparable)
+    n_not_stated = int(readmitted["llm_not_stated"].sum())
     agree = (comparable["structured_planned"] == comparable["llm_planned"]).mean()
     # Sanity benchmark: structured_planned is a rare class (~4%), so a
     # trivial "always predict unplanned" baseline already scores high on
@@ -109,12 +110,14 @@ def main() -> None:
         "structured_planned_rate": float(comparable["structured_planned"].mean()),
         "llm_planned_rate": float(comparable["llm_planned"].mean()),
         "cross_tab": cross.to_dict(),
+        "n_llm_not_stated_excluded": n_not_stated,
         "note": (
             "Restricted to patients who were actually readmitted within 30 "
             "days (readmission_30d==1) -- only for them does 'was the "
             "readmission planned' have a structured answer at all. Excludes "
-            "annotation_failed rows (no valid planned_return) and the single "
-            "LLM 'not_stated' row (neither agreement nor disagreement)."
+            "annotation_failed rows (no valid planned_return) and the "
+            f"{n_not_stated} LLM 'not_stated' row(s) (neither agreement nor "
+            "disagreement)."
         ),
     }
     out_path = model_dir / "planned_return_crosscheck.json"

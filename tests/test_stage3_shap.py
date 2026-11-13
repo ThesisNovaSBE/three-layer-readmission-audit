@@ -8,7 +8,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.stage3.shap_extract import _label, extract_shap_features, extract_shap_for_patient
+from src.stage3.shap_extract import (
+    _direction,
+    _label,
+    extract_shap_features,
+    extract_shap_for_patient,
+)
 
 
 # ── Label helper ─────────────────────────────────────────────────────────────
@@ -223,3 +228,34 @@ def test_xgb_shap_raises_when_feature_schema_incomplete():
     patients = pd.DataFrame(x_arr[:2], columns=FEATURE_COLS).drop(columns=["age"])
     with pytest.raises(ValueError, match="full Stage 1 feature schema"):
         extract_shap_features(artifact, patients, top_k=2)
+
+
+# ── SHAP direction (incl. exactly-zero contribution) ─────────────────────────
+
+def test_direction_sign_including_zero():
+    """Deterministic, version-independent: negative -> down, zero -> no effect,
+    positive -> up."""
+    assert _direction(-0.5) == "↓ risk"
+    assert _direction(0.0) == "no effect"
+    assert _direction(0.5) == "↑ risk"
+
+
+def test_xgb_shap_zero_contribution_feature_reads_no_effect():
+    """A feature XGBoost never splits on (a constant column) has an exactly-zero
+    pred_contribs value in every xgboost version, so its prompt line must read
+    'no effect' -- confirming the label reaches the string. top_k spans all
+    features so the constant column is guaranteed to be included."""
+    import xgboost as xgb  # pylint: disable=import-outside-toplevel
+    from sklearn.datasets import make_classification  # pylint: disable=import-outside-toplevel
+    x_arr, y_arr = make_classification(n_samples=80, n_features=5, random_state=1)
+    x_arr[:, 0] = 7.0  # FEATURE_COLS[0] constant -> never split -> contrib == 0
+    model = xgb.XGBClassifier(n_estimators=8, max_depth=2, random_state=1)
+    model.fit(pd.DataFrame(x_arr, columns=FEATURE_COLS), y_arr)
+
+    artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
+    patients = pd.DataFrame(x_arr[:2], columns=FEATURE_COLS)
+    results = extract_shap_features(artifact, patients, top_k=len(FEATURE_COLS))
+
+    const_label = _label(FEATURE_COLS[0])  # "creatinine (last)"
+    const_lines = [s for s in results[0] if s.startswith(const_label)]
+    assert const_lines and "no effect" in const_lines[0]

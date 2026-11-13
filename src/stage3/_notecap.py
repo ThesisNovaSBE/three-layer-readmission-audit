@@ -10,8 +10,9 @@ _shown_note_text; pipeline.py logs is_note_truncated).
 from __future__ import annotations
 
 # Generous safety cap, not a routine truncation. Session 14 measured median
-# MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
-# (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
+# MIMIC discharge notes at ~2,649 tokens; at a measured ~3.06 chars/token on
+# MIMIC-IV discharge notes, the 20,000-char cap is ~6,500 tokens, comfortably
+# above the median note and above Stage 2's 4096-token window.
 # Over the cap, the note is shown head + tail (not head-only): a discharge
 # summary's end carries the disposition, discharge instructions and
 # follow-up, exactly the content an auditor needs and exactly what a

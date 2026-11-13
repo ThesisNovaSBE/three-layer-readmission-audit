@@ -127,6 +127,50 @@ def test_coverage_fraction_computed_correctly(tmp_path):
     assert info["coverage_of_flagged"] == 2 / 3
 
 
+def test_apply_stage3_decisions_outcome_categories_sum_to_stage3_rows(tmp_path):
+    """The four outcome categories (decided / insufficient / LLM-failed /
+    prep-failed) must partition the Stage 3 rows and sum to their count."""
+    pd.DataFrame({
+        "hadm_id": [1, 2, 3, 4],
+        "decision_model": ["uphold", "insufficient_evidence", np.nan, np.nan],
+        "discordance_mode": ["CONCORDANT", "NOTE_MITIGATES", "NOTE_AMPLIFIES", "PREP_FAILED"],
+        "annotation_failed": [False, False, True, True],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+    hadm_test = np.array([1, 2, 3, 4])
+
+    _pred, info = _apply_stage3_decisions(
+        tmp_path, hadm_test, np.array([1, 1, 1, 1]), np.array([True, True, True, True])
+    )
+
+    assert info["n_test_with_stage3_decision"] == 1   # hadm 1 uphold
+    assert info["n_insufficient_evidence"] == 1       # hadm 2
+    assert info["n_llm_annotation_failed"] == 1       # hadm 3 (failed, not prep)
+    assert info["n_prep_failed"] == 1                 # hadm 4
+    assert info["n_stage3_rows_outside_test"] == 0
+    total = (info["n_test_with_stage3_decision"] + info["n_insufficient_evidence"]
+             + info["n_llm_annotation_failed"] + info["n_prep_failed"])
+    assert total == 4  # == number of Stage 3 rows
+
+
+def test_apply_stage3_decisions_warns_on_rows_outside_test(tmp_path, capsys):
+    """A Stage 3 row whose hadm_id isn't in the test partition must be counted
+    and warned about loudly (it should never happen)."""
+    pd.DataFrame({
+        "hadm_id": [1, 999],  # 999 not in hadm_test
+        "decision_model": ["uphold", "uphold"],
+        "discordance_mode": ["CONCORDANT", "CONCORDANT"],
+        "annotation_failed": [False, False],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+    hadm_test = np.array([1, 2])
+
+    _pred, info = _apply_stage3_decisions(
+        tmp_path, hadm_test, np.array([1, 1]), np.array([True, True])
+    )
+
+    assert info["n_stage3_rows_outside_test"] == 1
+    assert "WARNING" in capsys.readouterr().out
+
+
 # ── _control_arm_report ───────────────────────────────────────────────────────
 
 @pytest.fixture
