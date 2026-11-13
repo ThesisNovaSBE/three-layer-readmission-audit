@@ -5,13 +5,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
-# Bumped to 12h 2026-11: this scores the fp32 Clinical-Longformer over the
-# ~126k notes-covered test admissions (cascade + population-wide predict),
-# none of it resumable/cached, so a timeout wastes the whole GPU slot. The
-# earlier 6h was sized before the population-wide (--all) scoring over the
-# full test partition was added; 12h is real headroom over the measured
-# per-step times (calibration ~1h19m, cascade predict ~17m, population-wide
-# predict a few hours), not another tight guess.
+# 12h (was 6h): measured on a previous run, calibration ~1h19m, cascade
+# predict ~17m, population-wide predict ~2h (~3.3h total). None of it is
+# resumable, so the limit is set well above that; the job ends when done.
 #SBATCH --job-name=thesis-stage2-finish
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err
