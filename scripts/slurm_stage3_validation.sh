@@ -111,6 +111,30 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 echo "=== All checks passed — starting validation controls ==="
 
 # ── Run ──────────────────────────────────────────────────────
+# Completeness guard: the controls sample from the Stage 3 batch run, so it
+# must exist AND cover exactly the Stage 2 cohort. A partial/aborted batch
+# would silently make the controls run on an incomplete, biased sample.
+echo "[slurm] Completeness guard: Stage 3 batch vs. Stage 2 cohort ..."
+python - <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd
+s2, s3 = Path("models/stage2_results.csv"), Path("models/stage3_batch_results.csv")
+if not s3.exists():
+    print(f"ERROR: {s3} not found -- run the Stage 3 batch before the controls.")
+    sys.exit(1)
+ids2 = set(pd.read_csv(s2, usecols=["hadm_id"])["hadm_id"].astype(int))
+ids3 = set(pd.read_csv(s3, usecols=["hadm_id"])["hadm_id"].astype(int))
+if ids2 != ids3:
+    print("ERROR: Stage 3 batch hadm_ids differ from Stage 2's.")
+    print(f"  stage2_results.csv:        {len(ids2):,} hadm_ids")
+    print(f"  stage3_batch_results.csv:  {len(ids3):,} hadm_ids")
+    print(f"  in Stage 2 but not Stage 3: {len(ids2 - ids3):,}")
+    print(f"  in Stage 3 but not Stage 2: {len(ids3 - ids2):,}")
+    sys.exit(1)
+print(f"  OK -- Stage 3 batch covers exactly the {len(ids2):,} Stage 2 admissions.")
+PY
+
 echo "[slurm] Acceptance test: batched reference arm vs. the main run (8 admissions) ..."
 python -m scripts.run_validation_controls --arm-test 8
 
