@@ -4,17 +4,10 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-# Real measured throughput as of 2026-09-21 (job 16119168, --limit 50
-# --batch-size 4): 34m37s for 50 patients = ~41.5s/admission. At ~9,899
-# target admissions that is ~114 hours (~4.75 days) of pure generation
-# time, i.e. this script WILL hit its 24h limit and need ~5 resubmissions
-# minimum, not counting queue wait between them (30+ hours once this
-# project, when kisski was congested). This is safe to run into: batch.py
-# writes each admission's result to the output CSV incrementally (not one
-# save at the end), and --resume skips hadm_ids already written -- a
-# timeout here loses at most the one in-flight chunk (<= generation_batch_
-# size admissions), not the whole run.
+#SBATCH --time=2-00:00:00
+# 48h = partition maximum; the run takes ~137 GPU-h, so 3 segments with
+# --resume instead of 6, because each resubmission queues again at our low
+# fair-share priority.
 #SBATCH --job-name=thesis-stage3-batch
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_batch_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_batch_%j.err
