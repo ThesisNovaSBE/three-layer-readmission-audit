@@ -4,10 +4,9 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
-# 12h (was 6h): measured on a previous run, calibration ~1h19m, cascade
-# predict ~17m, population-wide predict ~2h (~3.3h total). None of it is
-# resumable, so the limit is set well above that; the job ends when done.
+#SBATCH --time=06:00:00
+# 6h: measured on a previous run ~3.3h (calibration ~1h19m, cascade predict ~17m,
+# population-wide predict ~2h); limit kept short so the job can backfill.
 #SBATCH --job-name=thesis-stage2-finish
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err
