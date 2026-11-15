@@ -19,9 +19,9 @@ it can batch the middle step across a whole chunk of patients.
 This is required, not optional, for two things the on-demand path cannot
 produce on its own:
 
-- RQ2 metrics at scale (net reclassification improvement of the auditor
-  over Stage 1 alone) — needs a decision for every flagged+noted admission,
-  not one at a time.
+- RQ2 metrics at scale (precision and recall at matched alert volume for
+  the auditor over Stage 1 alone) — needs a decision for every flagged+noted
+  admission, not one at a time.
 - ``evaluate_pipeline.py``'s final-prediction column, which per
   docs/ARCHITECTURE.md should be Stage 3's decision, not Stage 2's
   threshold, once this file exists.
@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -66,7 +67,14 @@ from src.schemas import MODEL_TARGET_COL
 from src.stage3.discordance import sweep_discordance_thresholds
 from src.stage3._annotation import BatchGenerationError, generation_failure_annotation
 from src.stage3.explain import call_llm_batch
-from src.stage3.pipeline import _assemble_result, _lookup_patient, _prepare_patient, explain_patient
+from src.stage3.pipeline import (
+    _assemble_result,
+    _lookup_patient,
+    _prepare_patient,
+    explain_patient,
+    get_prep_timings,
+    reset_prep_timings,
+)
 
 _OUTPUT_FIELDS = [
     "hadm_id", "stage1_score", "stage1_score_raw", "stage1_threshold", "stage2_score",
@@ -311,13 +319,60 @@ def _retry_chunk_individually(
     return annotations, n_retried, n_retry_failed
 
 
+def _log_chunk_timing(n_prepared: int, gen_s: float) -> None:
+    """Log per-chunk average SHAP/attention/generation ms per patient plus the
+    CUDA peak memory (N7). SHAP/attention come from pipeline's accumulator."""
+    if n_prepared <= 0:
+        return
+    prep = get_prep_timings()
+    print(f"[stage3/batch] [timing] chunk n={n_prepared}: "
+          f"shap {prep['shap'] / n_prepared * 1000:.0f}ms/pt, "
+          f"attention {prep['attention'] / n_prepared * 1000:.0f}ms/pt, "
+          f"generation {gen_s / n_prepared * 1000:.0f}ms/pt"
+          f"{_cuda_peak_mem_str()}", flush=True)
+
+
+def _cuda_peak_mem_str() -> str:
+    """', cuda_peak <X.X>GB' if torch+CUDA are available, else '' (N7). Reads
+    torch.cuda.max_memory_allocated() only -- no device changes, no reset."""
+    try:
+        import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+        if torch.cuda.is_available():
+            return f", cuda_peak {torch.cuda.max_memory_allocated() / 1024 ** 3:.1f}GB"
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return ""
+
+
+class _ChunkWriter(NamedTuple):
+    """Where _process_chunk writes: the CSV writer/handle, and (optionally) the
+    raw-output sidecar path for N5 plus whether to include the prompt in it."""
+
+    writer: "csv.DictWriter"
+    fh: object
+    raw_path: Path | None = None
+    include_prompt: bool = False
+
+
+def _append_raw(out: "_ChunkWriter", hadm_id: int, annotation: dict, prompt: str) -> None:
+    """Append one line to the <out>.raw.jsonl sidecar (N5): the raw model
+    response per admission, plus the prompt when --limit is set. Append mode
+    so --resume keeps earlier segments' lines. No-op when raw logging is off."""
+    if out.raw_path is None:
+        return
+    record = {"hadm_id": int(hadm_id), "raw_response": annotation.get("raw_response", "")}
+    if out.include_prompt:
+        record["prompt"] = prompt
+    with open(out.raw_path, "a", encoding="utf-8") as rf:
+        rf.write(json.dumps(record) + "\n")
+
+
 def _process_chunk(
     chunk: list[int],
     cfg: AppConfig,
     setup: "_BatchSetup",
+    out: "_ChunkWriter",
     *,
-    writer: "csv.DictWriter",
-    fh,
     suppress_note: bool = False,
     suppress_stage2: bool = False,
 ) -> tuple[int, int, int, int, int]:
@@ -340,6 +395,7 @@ def _process_chunk(
     """
     results_df = setup.results_df
     n_ok = n_failed = n_annotation_failed = 0
+    reset_prep_timings()  # accumulate this chunk's SHAP/attention time (N7)
     prepared: list[tuple[int, object]] = []
     for hadm_id in chunk:
         try:
@@ -355,8 +411,8 @@ def _process_chunk(
             # not kill the whole batch -- and must still get a row (see
             # _prep_failure_row) so --resume doesn't retry it forever.
             print(f"[stage3/batch] [prep] hadm_id={hadm_id} FAILED: {exc}")
-            writer.writerow(_prep_failure_row(hadm_id, results_df, exc, cfg.stage3.model_name))
-            fh.flush()
+            out.writer.writerow(_prep_failure_row(hadm_id, results_df, exc, cfg.stage3.model_name))
+            out.fh.flush()
             n_failed += 1
 
     if not prepared:
@@ -365,6 +421,7 @@ def _process_chunk(
     prompts = [p.prompt for _, p in prepared]
     note_texts = [p.prompt_note_text for _, p in prepared]
     n_retried = n_retry_failed = 0
+    _t_gen = time.perf_counter()
     try:
         annotations = call_llm_batch(
             prompts, cfg, note_texts=note_texts, raise_on_generate_error=True
@@ -390,19 +447,21 @@ def _process_chunk(
               flush=True)
         return n_ok, n_failed + len(prepared), n_annotation_failed, n_retried, n_retry_failed
 
-    for (_, prep), annotation in zip(prepared, annotations):
+    for (hadm_id, prep), annotation in zip(prepared, annotations):
         result = _assemble_result(prep, annotation)
         row = result.model_dump()
         row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
         row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
         row["top_shap_features"] = json.dumps(row["top_shap_features"])
         row["attention_sentences"] = json.dumps(row["attention_sentences"])
-        writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
-        fh.flush()
+        out.writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
+        out.fh.flush()
+        _append_raw(out, hadm_id, annotation, prep.prompt)
         n_ok += 1
         if row["annotation_failed"]:
             n_annotation_failed += 1
 
+    _log_chunk_timing(len(prepared), time.perf_counter() - _t_gen)
     return n_ok, n_failed, n_annotation_failed, n_retried, n_retry_failed
 
 
@@ -464,6 +523,39 @@ def _setup_batch(
     )
 
 
+_FAILFAST_MIN_PROCESSED = 100
+_FAILFAST_RATE = 0.2
+
+
+def _trigger_failfast(out_path: Path, processed: int, failed_total: int) -> None:
+    """Fail-fast (N6): too many admissions are failing, so stop the whole run
+    rather than burn GPU hours producing a mostly-broken output. Writes
+    ``<out dir>/stage3_FAILFAST`` with the counts (the SLURM script refuses to
+    start while that file exists) and raises SystemExit after printing the
+    first three error justifications from the rows written so far."""
+    errs: list[str] = []
+    try:
+        done = pd.read_csv(out_path)
+        bad = done[done["annotation_failed"].astype(bool)]["clinical_justification"].head(3)
+        errs = [str(x) for x in bad]
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # diagnostics only -- never let the error readout mask the abort
+    rate = failed_total / processed
+    failfast = out_path.parent / "stage3_FAILFAST"
+    failfast.write_text(
+        f"processed={processed}\nfailed_or_annotation_failed={failed_total}\n"
+        f"failure_rate={rate:.4f}\n" + "".join(f"error: {e}\n" for e in errs)
+    )
+    print(f"[stage3/batch] FAIL-FAST: {failed_total}/{processed} failed ({rate:.1%} > "
+          f"{_FAILFAST_RATE:.0%}). First errors:", flush=True)
+    for e in errs:
+        print(f"  {e}", flush=True)
+    raise SystemExit(
+        f"[stage3/batch] Aborting: failure rate {rate:.1%} over {processed} admissions. "
+        f"Wrote {failfast}; investigate before resubmitting (and delete it to proceed)."
+    )
+
+
 def run_batch_audit(
     cfg: AppConfig,
     *,
@@ -499,6 +591,14 @@ def run_batch_audit(
 
     write_header = not (resume and out_path.exists())
     mode = "a" if resume and out_path.exists() else "w"
+    # Raw-output sidecar (N5): <out>.raw.jsonl, one line per audited admission.
+    # Cleared on a fresh run (same condition as the CSV header); appended on
+    # --resume so earlier segments' lines survive. Prompt included only under
+    # --limit (a smoke/dev run). Not part of _OUTPUT_FIELDS and *.raw.jsonl is
+    # gitignored (contains note text).
+    raw_path = out_path.with_name(out_path.stem + ".raw.jsonl")
+    if write_header:
+        raw_path.unlink(missing_ok=True)
     n_ok = n_failed = n_annotation_failed = 0
     n_retried = n_retry_failed = 0
     # Patients per batched generate() call, not per-row CSV write -- rows
@@ -513,11 +613,10 @@ def run_batch_audit(
         writer = csv.DictWriter(fh, fieldnames=_OUTPUT_FIELDS)
         if write_header:
             writer.writeheader()
-
+        chunk_out = _ChunkWriter(writer, fh, raw_path, include_prompt=limit is not None)
         for chunk_start in range(0, len(setup.pending), chunk_size):
-            chunk = setup.pending[chunk_start:chunk_start + chunk_size]
             d_ok, d_failed, d_annotation_failed, d_retried, d_retry_failed = _process_chunk(
-                chunk, cfg, setup, writer=writer, fh=fh,
+                setup.pending[chunk_start:chunk_start + chunk_size], cfg, setup, chunk_out,
             )
             n_ok += d_ok
             n_failed += d_failed
@@ -525,7 +624,12 @@ def run_batch_audit(
             n_retried += d_retried
             n_retry_failed += d_retry_failed
 
-            i_done = chunk_start + len(chunk)
+            # Fail-fast (N6): after >=100 processed, abort if >20% failed.
+            if ((n_ok + n_failed) >= _FAILFAST_MIN_PROCESSED
+                    and (n_failed + n_annotation_failed) / (n_ok + n_failed) > _FAILFAST_RATE):
+                _trigger_failfast(out_path, n_ok + n_failed, n_failed + n_annotation_failed)
+
+            i_done = min(chunk_start + chunk_size, len(setup.pending))
             print(f"[stage3/batch] [{i_done}/{len(setup.pending)}] "
                   f"ok={n_ok} failed={n_failed} annotation_failed={n_annotation_failed}")
 
@@ -569,7 +673,8 @@ def run_sensitivity_sweep(
     out_path.write_text(json.dumps({
         "n_patients": int(len(scored)),
         "n_excluded_prep_failed": int(n_excluded),
-        "current_config_value_pp": 20.0,
+        # The provisional threshold the real run used, read from config (L2).
+        "current_config_value_pp": float(load_config().stage3.discordance_displacement_pp),
         "sweep": sweep,
     }, indent=2))
     if n_excluded:

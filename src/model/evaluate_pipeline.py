@@ -560,6 +560,61 @@ def _conditional_triggering_report(
     }
 
 
+def _both_agree_report(
+    model_dir: object,
+    hadm_test: np.ndarray,
+    pred_with_stage3: np.ndarray,
+    flagged: np.ndarray,
+    y_test: np.ndarray,
+    sub_test: pd.DataFrame,
+    *,
+    s1_scores_raw: np.ndarray,
+    s1_scores: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> dict | None:
+    """Secondary, stricter withdrawal policy: an alert is withdrawn ONLY when
+    the LLM's ``decision_model`` AND the code-computed ``decision_rule`` both
+    say ``override``. A model override that ``decision_rule`` doesn't confirm
+    (its quote-verified grounds don't actually justify the override) leaves
+    the alert standing. Every other admission follows the primary chain
+    (``pred_with_stage3``): uphold stays, insufficient/no-decision keeps the
+    Stage 2 fallback.
+
+    Recomputed from the batch CSV (needs both decision columns), not derived
+    from ``pred_with_stage3`` alone. Comes with its OWN top-m-by-raw control
+    arm matched to this policy's realised alert volume, so it is comparable
+    to Stage 1 alone on the same terms the primary policy is.
+
+    Returns None if no batch Stage 3 result exists yet.
+    """
+    s3_path = model_dir / "stage3_batch_results.csv"
+    if not s3_path.exists():
+        return None
+    s3 = pd.read_csv(s3_path).set_index("hadm_id")
+    dec = s3["decision_model"] if "decision_model" in s3.columns else pd.Series(dtype=object)
+    rule = s3["decision_rule"] if "decision_rule" in s3.columns else pd.Series(dtype=object)
+    decision_arr = np.array([dec.get(h, None) for h in hadm_test], dtype=object)
+    rule_arr = np.array([rule.get(h, None) for h in hadm_test], dtype=object)
+
+    has_s3 = np.isin(decision_arr, ["uphold", "override"])
+    both_override = (decision_arr == "override") & (rule_arr == "override")
+    # Covered admissions: alert stands (1) unless BOTH decisions say override
+    # (0). Everything else keeps the primary chain.
+    pred = np.where(has_s3, (~both_override).astype(int), pred_with_stage3)
+    pred = np.where(flagged, pred, 0)
+
+    report = _pipeline_report(y_test, pred, sub_test, groups=groups)
+    control = _control_arm_report(
+        y_test, s1_scores_raw, s1_scores, report["confirmed_rate"], sub_test, groups=groups
+    )
+    return {
+        "policy": "withdraw_only_if_decision_model_and_decision_rule_both_override",
+        "n_alerts_withdrawn": int((both_override & flagged).sum()),
+        "report": report,
+        "control_arm_stage1_matched": control,
+    }
+
+
 def _print_pipeline_line(prefix: str, report: dict) -> None:
     """Print a pipeline/control-arm report line, with precision/recall CIs
     if the report carries them (see _add_precision_recall_ci). ``prefix``
@@ -571,6 +626,29 @@ def _print_pipeline_line(prefix: str, report: dict) -> None:
           f"[{p_ci['ci_lower']:.3f}, {p_ci['ci_upper']:.3f}]  "
           f"recall={report['recall']:.3f} [{r_ci['ci_lower']:.3f}, {r_ci['ci_upper']:.3f}]  "
           f"F1={report['f1']:.3f}  F2={report['f2']:.3f}")
+
+
+def _print_stage3_policy_reports(conditional_report: dict | None, both_agree: dict | None) -> None:
+    """Print the two post-hoc Stage 3 policy reports (conditional triggering,
+    and the N4 both-agree secondary policy with its matched control arm), each
+    only if its batch result exists."""
+    if conditional_report is not None:
+        cr = conditional_report["report"]
+        print(f"[pipeline_eval] Conditional triggering (discordant-only, post-hoc): "
+              f"{conditional_report['conditional_llm_calls']:,} LLM calls "
+              f"({conditional_report['llm_calls_saved']:,} saved vs. blanket "
+              f"{conditional_report['blanket_llm_calls']:,}) -> "
+              f"precision={cr['precision']:.3f}  recall={cr['recall']:.3f}")
+    if both_agree is not None:
+        ba, ba_ctrl = both_agree["report"], both_agree["control_arm_stage1_matched"]
+        _print_pipeline_line(
+            "[pipeline_eval] Secondary policy (withdraw only if model+rule both "
+            f"override; {both_agree['n_alerts_withdrawn']:,} withdrawn): ", ba,
+        )
+        _print_pipeline_line(
+            "[pipeline_eval]   its matched control arm (Stage 1 top-m by raw @ "
+            f"{ba_ctrl['realised_alert_rate']:.1%}): ", ba_ctrl,
+        )
 
 
 # ── main evaluation ───────────────────────────────────────────────────────────
@@ -650,13 +728,14 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
         model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test,
         groups=groups_test,
     )
-    if conditional_report is not None:
-        cr = conditional_report["report"]
-        print(f"[pipeline_eval] Conditional triggering (discordant-only, post-hoc): "
-              f"{conditional_report['conditional_llm_calls']:,} LLM calls "
-              f"({conditional_report['llm_calls_saved']:,} saved vs. blanket "
-              f"{conditional_report['blanket_llm_calls']:,}) -> "
-              f"precision={cr['precision']:.3f}  recall={cr['recall']:.3f}")
+    # Secondary policy (N4): withdraw an alert only when decision_model AND
+    # decision_rule both say override. Stricter than the primary chain, with
+    # its own volume-matched control arm.
+    both_agree_report = _both_agree_report(
+        model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test,
+        s1_scores_raw=s1_scores_raw, s1_scores=s1_scores, groups=groups_test,
+    )
+    _print_stage3_policy_reports(conditional_report, both_agree_report)
 
     report = {
         "note": (
@@ -689,6 +768,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "notes_cohort": notes_report,
             "control_arm_stage1_matched": control_report,
             "conditional_triggering": conditional_report,
+            "secondary_both_agree": both_agree_report,
         },
     }
     _print_band_table(s1_report, s2_report, full_report_)

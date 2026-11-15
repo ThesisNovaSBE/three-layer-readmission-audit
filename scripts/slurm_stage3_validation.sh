@@ -138,6 +138,14 @@ PY
 echo "[slurm] Acceptance test: batched reference arm vs. the main run (8 admissions) ..."
 python -m scripts.run_validation_controls --arm-test 8
 
+# Batch-size sensitivity check (N11): re-audit the first 20 admissions at
+# batch-size 1 and compare to the main (batch-size 4) run, to quantify how
+# much bf16 batched generation moves the decisions. Diagnostic only -- never
+# let it stop the controls job (|| true).
+echo "[slurm] Batch-size-1 re-audit of the first 20 admissions ..."
+python -m src.stage3.batch --limit 20 --batch-size 1 --out models/stage3_bs1_check.csv || true
+python -m scripts.compare_batch_size || true
+
 # --n 150: one sample size across all four arms (see comment above) --
 # per run_blind_note_control's own docstring this is still "a deliberate
 # sample, tens to low hundreds," not a second full audit.

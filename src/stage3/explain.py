@@ -70,13 +70,14 @@ from __future__ import annotations
 
 import re
 import textwrap
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
 from src.stage3._annotation import PARSE_FAILURE, BatchGenerationError
 from src.stage3._notecap import _note_block, _shown_note_text
+from src.stage3._stopping import _detect_truncated, _stop_token_ids
 
 # torch/transformers are deliberately NOT imported at module level for the
 # generation path: everything else in this module (prompt building,
@@ -134,8 +135,10 @@ AGGRAVATING_GROUNDS: tuple[str, ...] = (
 _MITIGATING_DESCRIPTIONS: dict[str, str] = {
     "palliative_intent": "hospice, palliative, or comfort-focused care documented — "
                           "readmission isn't the relevant outcome",
-    "planned_return": "a scheduled return is documented (chemo cycle, staged "
-                       "procedure, planned dialysis admission)",
+    "planned_return": "a specific, scheduled inpatient admission within the next 30 days is "
+        "documented (e.g. an elective admission for a chemotherapy cycle or a staged "
+        "operation, with a date or concrete plan). Outpatient dialysis sessions, "
+        "outpatient infusions, clinic appointments and lab checks are not planned returns.",
     "structured_driver_contradicted": "the note explicitly contradicts what "
                                        "drove the structured model's alert",
 }
@@ -189,6 +192,22 @@ class _GroundHit(BaseModel):
     quote: str
 
 
+# Enum-typed variants used for the generation schema: lm-format-enforcer
+# enforces JSON-schema "enum", so an off-taxonomy ground / decision /
+# planned_return can no longer be generated at all (it previously failed the
+# whole response in _parse_response). _validate_grounds still re-checks.
+class _MitigatingHit(_GroundHit):
+    """A mitigating ground; ``ground`` restricted to MITIGATING_GROUNDS."""
+
+    ground: Literal[MITIGATING_GROUNDS]  # type: ignore[valid-type]
+
+
+class _AggravatingHit(_GroundHit):
+    """An aggravating ground; ``ground`` restricted to AGGRAVATING_GROUNDS."""
+
+    ground: Literal[AGGRAVATING_GROUNDS]  # type: ignore[valid-type]
+
+
 class _LLMOutput(BaseModel):
     """Raw shape of the LLM's JSON response, before taxonomy/decision validation.
 
@@ -211,8 +230,8 @@ class _LLMOutput(BaseModel):
     # just a prompt instruction the model can ignore -- matches this
     # project's existing top-k evidence caps elsewhere (top_shap_features,
     # top_attention_sentences).
-    mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
-    aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
+    mitigating_grounds: list[_MitigatingHit] = Field(default=[], max_length=3)
+    aggravating_grounds: list[_AggravatingHit] = Field(default=[], max_length=3)
     # Three atomic discharge-support signals (module docstring item 4), each
     # its own quote-or-"" field so they don't compete with palliative_
     # intent/planned_return/structured_driver_contradicted for one of
@@ -224,7 +243,7 @@ class _LLMOutput(BaseModel):
     followup_plan_quote: str = Field(default="", max_length=400)
     named_caregiver_quote: str = Field(default="", max_length=400)
     clinically_stable_quote: str = Field(default="", max_length=400)
-    planned_return: str
+    planned_return: Literal[PLANNED_RETURN_ANSWERS]  # type: ignore[valid-type]
     # max_length=800 chars (2026-09-17): same fix, next field. Capping
     # grounds alone didn't fix truncation -- overflow just moved here. The
     # prompt already asks for "2-4 sentences" (~570 chars in a genuine
@@ -234,7 +253,22 @@ class _LLMOutput(BaseModel):
     # mid-sentence. 800 gives real headroom over a compliant response
     # while still being a hard ceiling, not just an ignorable instruction.
     clinical_justification: str = Field(max_length=800)
-    decision: str
+    decision: Literal[DECISIONS]  # type: ignore[valid-type]
+
+
+def _generation_schema() -> dict:
+    """JSON schema handed to lm-format-enforcer for generation.
+
+    Same as ``_LLMOutput``'s schema, but with EVERY property required, in
+    declaration order. Parsing stays lenient (defaults kept on the model), but
+    generation must emit every field, and -- with ``force_json_field_order`` --
+    in this order: evidence first, ``decision`` last. Without this, the
+    defaulted fields are optional and the enforcer lets the model skip them or
+    emit ``decision`` first.
+    """
+    schema = _LLMOutput.model_json_schema()
+    schema["required"] = list(schema["properties"])
+    return schema
 
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
@@ -322,10 +356,12 @@ _USER_TEMPLATE = textwrap.dedent("""
     "clinically_stable_quote": verbatim quote for discharge support evidence
       item 3 above, or "" if not documented.
 
-    "planned_return": does the note mention a planned return — a scheduled
-      chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
-      regardless of whether it affected your decision? One of
-      {planned_return_options}.
+    "planned_return": does the note document a specific, scheduled inpatient
+      admission within the next 30 days (e.g. an elective admission for a
+      chemotherapy cycle or a staged operation, with a date or concrete
+      plan)? Outpatient dialysis sessions, outpatient infusions, clinic
+      appointments and lab checks are NOT planned returns. Answer regardless
+      of whether it affected your decision. One of {planned_return_options}.
 
     "clinical_justification": 2-4 sentences, written AFTER you have
       identified the grounds above. Synthesise what you found — do not
@@ -359,6 +395,12 @@ def _attention_block(attention_sentences: list[str]) -> str:
         "attention concentrated on, not a faithful explanation of its score:)\n"
         f"{lines}"
     )
+
+
+def _ordinal(value: float) -> str:
+    """English ordinal for a percentile (1st, 2nd, 3rd, 4th; 11th-13th -> th) (N13)."""
+    n = int(round(value))
+    return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
 def _grounds_block(grounds: tuple[str, ...], descriptions: dict[str, str]) -> str:
@@ -398,8 +440,8 @@ def _stage2_evidence_block(
 
         ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
         Within the cohort of flagged, note-covered patients, this patient ranks
-        at the {discordance["r1"]:.0f}th percentile on the structured estimate and the
-        {discordance["r2"]:.0f}th percentile on the note-based estimate (displacement:
+        at the {_ordinal(discordance["r1"])} percentile on the structured estimate and the
+        {_ordinal(discordance["r2"])} percentile on the note-based estimate (displacement:
         {discordance["displacement"]:+.0f} percentile points -> {discordance["mode"]}).
           NOTE_MITIGATES -> the note-based estimate ranks this patient markedly
                              lower risk than the structured estimate alone.
@@ -676,55 +718,6 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
-def _detect_truncated(generated_ids, stop_ids) -> list[bool]:
-    """Per-sequence truncation flag: True if a generated row contains NONE of
-    the model's stop tokens (cut off by max_new_tokens, not stopped
-    naturally). Takes the full SET of stop ids (see _stop_token_ids), not
-    just the tokenizer's single ``eos_token_id``: a row that ended cleanly
-    on a secondary stop like ``<end_of_turn>`` must not be over-reported as
-    truncated just because it lacks the primary EOS.
-
-    Pure function (2026-09-18, audit finding 2.3) so it is unit-testable
-    with hand-built token-ID tensors, no real model/tokenizer/GPU -- only
-    needs ``generated_ids`` row iteration + a ``.tolist()`` per row.
-
-    Args:
-        generated_ids: 2D tensor/array, one row per sequence in the batch,
-                        already sliced to exclude the prompt (see
-                        call_llm_batch).
-        stop_ids:       collection of stop-token ids. Empty/None means
-                        "unknown", in which case nothing is flagged truncated.
-
-    Returns:
-        One bool per row, True meaning "likely truncated by the token cap".
-    """
-    stop = {s for s in (stop_ids or []) if s is not None}
-    if not stop:
-        return [False for _ in generated_ids]
-    return [stop.isdisjoint(row.tolist()) for row in generated_ids]
-
-
-def _stop_token_ids(tokenizer, model) -> set[int]:
-    """Collect every token id that ends generation cleanly for this model:
-    the tokenizer's ``eos_token_id``, the id of ``<end_of_turn>`` (a chat
-    model's real turn terminator), and every id in
-    ``model.generation_config.eos_token_id`` (which may be an int or a list).
-    Ids that don't exist for this tokenizer (``<end_of_turn>`` resolving to
-    ``unk``) are dropped."""
-    stop: set[int] = set()
-    if tokenizer.eos_token_id is not None:
-        stop.add(tokenizer.eos_token_id)
-    eot = tokenizer.convert_tokens_to_ids("<end_of_turn>")
-    if eot is not None and eot != tokenizer.unk_token_id:
-        stop.add(eot)
-    gen_eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
-    if isinstance(gen_eos, int):
-        stop.add(gen_eos)
-    elif isinstance(gen_eos, (list, tuple)):
-        stop.update(int(x) for x in gen_eos)
-    return stop
-
-
 def _trim_incomplete_trailing_sentence(text: str) -> str:
     """If ``text`` doesn't end with sentence-ending punctuation, trim back
     to the end of the last complete sentence.
@@ -788,6 +781,7 @@ def _finalize_annotation(
     # text drives decision_rule's note-length check.
     shown_text = _shown_note_text(note_text)
     annotation = _parse_response(raw)
+    annotation["raw_response"] = raw  # for the <out>.raw.jsonl sidecar (N5); not in CSV
     followup_quote = annotation.pop("followup_plan_quote", "")
     caregiver_quote = annotation.pop("named_caregiver_quote", "")
     stability_quote = annotation.pop("clinically_stable_quote", "")
@@ -914,6 +908,7 @@ def call_llm_batch(
     # so this only works with the cluster's transformers==4.57.6 -- do not
     # upgrade transformers past that without re-verifying this import chain.
     from lmformatenforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        CharacterLevelParserConfig,
         JsonSchemaParser,
     )
     from lmformatenforcer.integrations.transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
@@ -936,7 +931,12 @@ def call_llm_batch(
         inputs = tokenizer(
             chat_texts, return_tensors="pt", padding=True, add_special_tokens=False
         ).to(model.device)
-        parser = JsonSchemaParser(_LLMOutput.model_json_schema())
+        # force_json_field_order: emit fields in schema order (evidence first,
+        # decision last). Only applies to REQUIRED keys, hence no defaults above.
+        parser = JsonSchemaParser(
+            _generation_schema(),
+            config=CharacterLevelParserConfig(force_json_field_order=True),
+        )
         prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
         do_sample = cfg.stage3.temperature > 0
         with torch.no_grad():
@@ -961,7 +961,8 @@ def call_llm_batch(
             # than record the whole chunk as failed in one shot.
             raise BatchGenerationError(str(exc)) from exc
         return [
-            {**PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+            {**PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]",
+             "raw_response": f"[HF generate error: {exc}]"}
             for _ in prompts
         ]
 

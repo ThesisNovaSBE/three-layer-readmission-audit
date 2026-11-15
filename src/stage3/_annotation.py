@@ -38,4 +38,5 @@ def generation_failure_annotation(detail: str) -> dict[str, Any]:
     so it flows through _assemble_result into a normal annotation_failed row
     (rather than being silently dropped)."""
     return {**PARSE_FAILURE,
-            "clinical_justification": f"[HF generate error after individual retry: {detail}]"}
+            "clinical_justification": f"[HF generate error after individual retry: {detail}]",
+            "raw_response": f"[HF generate error after individual retry: {detail}]"}

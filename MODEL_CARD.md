@@ -425,6 +425,46 @@ and it still underperforms Stage 1 alone at matched alert volume. That
 is a materially stronger claim than an unvalidated negative result would
 have been.
 
+## Changes between the old run and the rerun
+
+The Stage 3 batch was re-run after a code review. The changes split into two
+kinds. Bug fixes correct a defect — the old number was wrong, and the rerun's
+is right. Post-hoc changes alter a judgement call that was defensible either
+way — the old run was not wrong, but the rerun uses a definition settled after
+seeing the first results, so its numbers are not directly comparable to the
+old run's on those two axes.
+
+**Bug fixes** (the old output was incorrect):
+
+- SHAP contributions are now extracted with `iteration_range` matched to the
+  model's `best_iteration`, so the structured risk factors shown to the
+  auditor come from the same trees early stopping actually kept.
+- The feature row handed to the auditor is now asserted to match the Stage 1
+  raw score it was computed from (`_assert_feature_row_matches_score`),
+  catching any row/score misalignment before generation.
+- Truncation detection and stop-token handling moved to a shared `_stopping`
+  module and are applied consistently, so a truncated generation is no longer
+  silently scored as a complete one.
+- Missing `days_since_last_discharge` now renders as "no prior admission"
+  rather than "not recorded", so the auditor no longer reads an absent prior
+  admission as missing data.
+
+**Post-hoc changes** (a definition or policy settled after the first run; the
+old run was defensible, but its numbers on these axes are not comparable):
+
+- `planned_return` was redefined to require a specific, scheduled inpatient
+  admission within 30 days (e.g. an elective chemotherapy cycle or a staged
+  operation with a date or concrete plan). Outpatient dialysis, outpatient
+  infusions, clinic appointments and lab checks no longer count as planned
+  returns. The old run used a broader reading, so its `planned_return` rate
+  is not comparable to the rerun's.
+- A secondary alert-withdrawal policy was added to the RQ2 reporting: an
+  alert is withdrawn only when the model's own decision **and** the
+  rule-recomputed decision both say `override`, with its own alert-volume-
+  matched Stage 1 control arm. The primary single-chain policy is unchanged;
+  this is an additional, more conservative report alongside it, not a
+  replacement.
+
 ## Limitations
 
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)

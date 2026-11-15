@@ -50,6 +50,7 @@ from src.data.features import load_feature_matrix
 from src.stage3.batch import (
     _OUTPUT_FIELDS,
     _BatchSetup,
+    _ChunkWriter,
     _already_done,
     _assert_output_matches_current_inputs,
     _load_artifact,
@@ -104,10 +105,11 @@ def _run_batched_control(
             writer = csv.DictWriter(fh, fieldnames=_OUTPUT_FIELDS)
             if write_header:
                 writer.writeheader()
+            chunk_out = _ChunkWriter(writer, fh)  # controls: no raw sidecar
             for i in range(0, len(pending), chunk_size):
                 chunk = pending[i:i + chunk_size]
                 _process_chunk(
-                    chunk, cfg, setup, writer=writer, fh=fh,
+                    chunk, cfg, setup, chunk_out,
                     suppress_note=suppress_note, suppress_stage2=suppress_stage2,
                 )
                 done_n = min(i + chunk_size, len(pending))

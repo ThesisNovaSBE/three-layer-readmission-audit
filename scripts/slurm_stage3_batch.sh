@@ -39,6 +39,15 @@ echo "[slurm] Git: $(git rev-parse --short HEAD)"
 
 # ── Pre-flight checks ────────────────────────────────────────
 echo "=== Pre-flight checks ==="
+# Fail-fast interlock (N6): a previous segment aborted with >20% failures and
+# left this marker. Refuse to burn another slot until it is investigated and
+# the file is deleted.
+if [ -f models/stage3_FAILFAST ]; then
+    echo "ERROR: models/stage3_FAILFAST exists -- a prior run aborted on a high"
+    echo "  failure rate. Investigate, then delete the file to resubmit:"
+    cat models/stage3_FAILFAST
+    exit 1
+fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 echo "Checking Stage 1 artifact..."

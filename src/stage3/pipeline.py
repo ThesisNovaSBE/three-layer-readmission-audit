@@ -30,6 +30,7 @@ Usage::
 
 from __future__ import annotations
 
+import time
 from typing import NamedTuple
 
 import joblib
@@ -47,6 +48,23 @@ from src.stage3._notecap import is_note_truncated
 from src.stage3.explain import build_prompt, call_llm
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
+
+# Per-call SHAP/attention wall-clock, accumulated by _prepare_patient (N7).
+# batch.py resets this before each chunk and reads it after, to log per-chunk
+# averages. A module-level accumulator (not a _prepare_patient parameter)
+# keeps that function within the argument limit; single-threaded, so safe.
+_PREP_TIMINGS: dict[str, float] = {"shap": 0.0, "attention": 0.0}
+
+
+def reset_prep_timings() -> None:
+    """Zero the SHAP/attention timing accumulator (call before a chunk)."""
+    _PREP_TIMINGS["shap"] = 0.0
+    _PREP_TIMINGS["attention"] = 0.0
+
+
+def get_prep_timings() -> dict[str, float]:
+    """Accumulated SHAP/attention seconds since the last reset_prep_timings()."""
+    return dict(_PREP_TIMINGS)
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
@@ -154,6 +172,40 @@ def _get_patient_feature_row(
     return match.iloc[0][available]
 
 
+# Max allowed |re-scored raw Stage 1 probability - stage1_score_raw in
+# stage2_results.csv|. Both come from the same estimator on the same features
+# (float32 inside XGBoost), so a genuine match agrees to ~1e-7; anything
+# larger means the feature row is not the record Stage 1 actually scored.
+_RAW_SCORE_TOL = 1e-5
+
+
+def _assert_feature_row_matches_score(
+    hadm_id: int, artifact: dict, feature_row: pd.Series, patient: dict
+) -> None:
+    """Raise if the feature row SHAP is about to explain does not reproduce
+    this admission's Stage 1 raw score from stage2_results.csv.
+
+    SHAP's own integrity check (sum of contributions == model margin) only
+    proves the attribution is internally consistent for WHATEVER row it was
+    given. It cannot detect that the row itself differs from the one scored
+    in Stage 2 (e.g. features.csv rebuilt since, a different hadm_id match,
+    a quick-mode matrix). This closes that gap: Stage 2 -> Stage 3 handoff
+    must refer to the same patient record. In batch, a mismatch becomes a
+    PREP_FAILED row.
+    """
+    estimator = artifact.get("estimator")
+    if estimator is None or not hasattr(estimator, "predict_proba"):
+        return
+    frame = pd.DataFrame([feature_row])[list(artifact["feature_cols"])]
+    rescored = float(estimator.predict_proba(frame)[:, 1][0])
+    if abs(rescored - patient["stage1_score_raw"]) > _RAW_SCORE_TOL:
+        raise ValueError(
+            f"hadm_id {hadm_id}: feature row re-scores to {rescored:.6f} but "
+            f"stage2_results.csv has stage1_score_raw={patient['stage1_score_raw']:.6f}. "
+            "The feature matrix Stage 3 reads is not the one Stage 2 scored."
+        )
+
+
 def _load_note_text(hadm_id: int, subject_id: int, cfg: AppConfig) -> str:
     """Load the discharge note text for one patient. Returns '' on failure."""
     # pylint: disable=import-outside-toplevel  # deferred: importing dataset.py
@@ -234,6 +286,11 @@ def _prepare_patient(
     """Assemble one patient's evidence and build their prompt -- everything
     :func:`explain_patient` does up to (not including) the LLM call.
 
+    Wall-clock seconds spent on SHAP and attention are ACCUMULATED into the
+    module-level :data:`_PREP_TIMINGS` (N7 per-chunk profiling in batch.py,
+    which calls :func:`reset_prep_timings` / :func:`get_prep_timings` around
+    each chunk). Harmless for the single-patient API path, which ignores it.
+
     All heavy objects (artifact, results_df, feature_matrix, note_text) can be
     pre-loaded by the caller and passed in as keyword arguments — the API
     server does this at startup so each explanation request does not pay the
@@ -300,10 +357,15 @@ def _prepare_patient(
     feature_row = _get_patient_feature_row(
         hadm_id, loaded_artifact, cfg, feature_matrix
     )
+    _assert_feature_row_matches_score(hadm_id, loaded_artifact, feature_row, patient)
+    _t = time.perf_counter()
     shap_strings = extract_shap_for_patient(
         loaded_artifact, feature_row, top_k=cfg.stage3.top_shap_features
     )
+    _PREP_TIMINGS["shap"] += time.perf_counter() - _t
+    _t = time.perf_counter()
     attention_sentences = _get_attention(hadm_id, note_text, cfg)
+    _PREP_TIMINGS["attention"] += time.perf_counter() - _t
 
     # r1 ranks on the RAW Stage 1 score (tie-free); r2 on the calibrated
     # Stage 2 score. Both cohort arrays come from _cohort_scores accordingly.

@@ -44,6 +44,12 @@ _FEATURE_LABELS: dict[str, str] = {
     "spo2_last": "SpO2 (last)",
     "discharged_to_facility": "discharged to SNF / facility",
     "admission_type_emergency": "emergency admission",
+    # Administrative / data-provenance features, not clinical findings -- marked
+    # so the auditor doesn't read them as medical risk drivers (N8).
+    "has_discharge_note": "has discharge note (administrative)",
+    "admit_hour": "admission hour (administrative)",
+    "admit_is_weekend": "weekend admission (administrative)",
+    "admit_is_night": "night admission (administrative)",
 }
 
 
@@ -51,10 +57,14 @@ def _label(col: str) -> str:
     return _FEATURE_LABELS.get(col, col.replace("_", " "))
 
 
-def _format_value(val: float) -> str:
+def _format_value(val: float, col: str) -> str:
     """Render a feature value for the prompt, labeling true missingness
-    instead of printing a bare 'nan'."""
-    return "not recorded" if np.isnan(val) else f"{val:.3g}"
+    instead of printing a bare 'nan'. A missing days_since_last_discharge
+    means there was no prior admission, so it reads 'no prior admission'
+    rather than the generic 'not recorded' (N8)."""
+    if np.isnan(val):
+        return "no prior admission" if col == "days_since_last_discharge" else "not recorded"
+    return f"{val:.3g}"
 
 
 def _direction(contrib: float) -> str:
@@ -175,7 +185,7 @@ def extract_shap_features(
             features = []
             for j in order:
                 col = available[j]
-                val_str = _format_value(x[i, j])
+                val_str = _format_value(x[i, j], col)
                 contrib = float(contribs[j])
                 features.append(
                     f"{_label(col)}: {val_str} "
@@ -186,7 +196,7 @@ def extract_shap_features(
             features = []
             for j in order:
                 col = available[j]
-                val_str = _format_value(x[i, j])
+                val_str = _format_value(x[i, j], col)
                 features.append(f"{_label(col)}: {val_str}")
         results.append(features)
 

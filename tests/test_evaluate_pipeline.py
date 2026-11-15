@@ -13,6 +13,7 @@ import pytest
 
 from src.model.evaluate_pipeline import (
     _apply_stage3_decisions,
+    _both_agree_report,
     _conditional_predictions,
     _conditional_triggering_report,
     _control_arm_report,
@@ -419,6 +420,46 @@ def test_conditional_triggering_concordant_insufficient_still_alert_stands(tmp_p
     # concordant insufficient -> alert stands (1) despite pred_with_stage3[0]=0;
     # discordant override -> keeps pred_with_stage3[1]=0 -> conditional_pred=[1,0].
     assert result["report"]["confirmed_rate"] == pytest.approx(0.5)
+
+
+def test_both_agree_withdraws_only_when_model_and_rule_override(tmp_path):
+    """N4 secondary policy: an alert is withdrawn only when decision_model AND
+    decision_rule both say override; a model override that the rule doesn't
+    confirm leaves the alert standing (unlike the primary chain)."""
+    pd.DataFrame({
+        "hadm_id": [1, 2, 3],
+        "decision_model": ["override", "override", "uphold"],
+        "decision_rule":  ["override", "uphold",   "uphold"],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+
+    hadm_test = np.array([1, 2, 3])
+    pred_with_stage3 = np.array([0, 0, 1])  # primary withdrew both overrides (1 and 2)
+    flagged = np.array([True, True, True])
+    y = np.array([0, 1, 1])
+    sub = pd.DataFrame({"age_band": ["18-40", "18-40", "18-40"]})
+    raw = np.array([0.9, 0.8, 0.7])
+
+    res = _both_agree_report(
+        tmp_path, hadm_test, pred_with_stage3, flagged, y, sub,
+        s1_scores_raw=raw, s1_scores=raw,
+    )
+
+    # hadm1 both-override -> withdrawn (0); hadm2 model-override/rule-uphold ->
+    # alert stands (1); hadm3 uphold -> 1. Secondary rate = 2/3 (primary was 1/3).
+    assert res["n_alerts_withdrawn"] == 1
+    assert res["report"]["confirmed_rate"] == pytest.approx(2 / 3)
+    # Its control arm is volume-matched to the secondary's realised rate.
+    ctrl = res["control_arm_stage1_matched"]
+    assert abs(ctrl["realised_alert_count"] - round(res["report"]["confirmed_rate"] * 3)) <= 1
+
+
+def test_both_agree_returns_none_without_batch_results(tmp_path):
+    """No batch Stage 3 result yet -> None, not a crash."""
+    assert _both_agree_report(
+        tmp_path, np.array([1]), np.array([1]), np.array([True]), np.array([0]),
+        pd.DataFrame({"age_band": ["18-40"]}),
+        s1_scores_raw=np.array([0.5]), s1_scores=np.array([0.5]),
+    ) is None
 
 
 def test_conditional_predictions_discordant_keeps_stage3_mapping():

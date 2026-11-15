@@ -10,6 +10,7 @@ import pytest
 
 from src.stage3.shap_extract import (
     _direction,
+    _format_value,
     _label,
     extract_shap_features,
     extract_shap_for_patient,
@@ -26,6 +27,21 @@ def test_label_known_column():
 def test_label_unknown_column_replaces_underscores():
     """Unknown columns fall back to underscore-replaced name."""
     assert _label("my_custom_col") == "my custom col"
+
+
+def test_administrative_features_marked_in_label():
+    """N8: administrative/provenance features are labelled 'administrative' so
+    the auditor doesn't read them as clinical risk drivers."""
+    for col in ("has_discharge_note", "admit_hour", "admit_is_weekend", "admit_is_night"):
+        assert "administrative" in _label(col)
+
+
+def test_format_value_missing_days_since_discharge_reads_no_prior_admission():
+    """N8: a missing days_since_last_discharge means no prior admission, not a
+    generic 'not recorded'. Other missing features keep 'not recorded'."""
+    assert _format_value(float("nan"), "days_since_last_discharge") == "no prior admission"
+    assert _format_value(float("nan"), "spo2_last") == "not recorded"
+    assert _format_value(3.2, "creatinine_last") == "3.2"
 
 
 # ── Mock artifact ─────────────────────────────────────────────────────────────

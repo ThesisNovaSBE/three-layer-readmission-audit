@@ -28,6 +28,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import sys
 
 import joblib
 import numpy as np
@@ -113,6 +114,62 @@ def _band_metrics(sub: pd.DataFrame, thr: float, recall_cal: float) -> dict:
     }
 
 
+# Acceptance gates (N9). BLOCKING failures exit 1 (do not start Stage 3);
+# REPORTED thresholds are tighter and only printed/saved, never blocking.
+_BLOCK_RECALL_GAP = 0.10   # any band |recall_test - recall_cal| above this blocks
+_BLOCK_OVERALL_ECE = 0.10  # overall ECE above this blocks
+_REPORT_RECALL_GAP = 0.05
+_REPORT_CAL_IN_LARGE = 0.03  # |mean calibrated prob - observed rate| per band
+_REPORT_OVERALL_ECE = 0.03
+
+
+def _gate_flags(report: dict) -> dict:
+    """Compute the blocking and reported-only acceptance flags from a built
+    report (bands + overall). Pure function so it is directly testable."""
+    bands = report["bands"]
+    overall_ece = report["overall"]["ece"]
+    blocking_bands = [b for b, m in bands.items()
+                      if abs(m["recall_gap"]) > _BLOCK_RECALL_GAP]
+    overall_ece_blocks = overall_ece > _BLOCK_OVERALL_ECE
+    return {
+        "blocking": {
+            "bands_recall_gap_over_0.10": blocking_bands,
+            "overall_ece_over_0.10": overall_ece_blocks,
+            "failed": bool(blocking_bands) or overall_ece_blocks,
+        },
+        "reported": {
+            "all_bands_recall_gap_within_0.05": all(
+                abs(m["recall_gap"]) <= _REPORT_RECALL_GAP for m in bands.values()),
+            "all_bands_calibration_in_large_within_0.03": all(
+                abs(m["mean_calibrated_prob"] - m["observed_readmission_rate"])
+                <= _REPORT_CAL_IN_LARGE for m in bands.values()),
+            "overall_ece_within_0.03": overall_ece <= _REPORT_OVERALL_ECE,
+        },
+    }
+
+
+def _print_gate_results(flags: dict, overall_ece: float) -> None:
+    """Print the BLOCKING and REPORTED PASS/FAIL lines."""
+    block = flags["blocking"]
+    if block["failed"]:
+        reasons = []
+        if block["bands_recall_gap_over_0.10"]:
+            reasons.append(f"bands with |recall gap| > 0.10: {block['bands_recall_gap_over_0.10']}")
+        if block["overall_ece_over_0.10"]:
+            reasons.append(f"overall ECE {overall_ece:.4f} > 0.10")
+        print(f"[acceptance] BLOCKING: FAIL -- {'; '.join(reasons)}. Do NOT start Stage 3.")
+    else:
+        print("[acceptance] BLOCKING: PASS (no band |recall gap| > 0.10; overall ECE <= 0.10).")
+    rep = flags["reported"]
+    def _pf(ok: bool) -> str:
+        return "PASS" if ok else "FAIL"
+    print(f"[acceptance] REPORTED-only: recall gap <= 0.05 all bands: "
+          f"{_pf(rep['all_bands_recall_gap_within_0.05'])}; "
+          f"|mean_prob - obs_rate| <= 0.03 all bands: "
+          f"{_pf(rep['all_bands_calibration_in_large_within_0.03'])}; "
+          f"overall ECE <= 0.03: {_pf(rep['overall_ece_within_0.03'])}")
+
+
 def main() -> None:
     """Load population-wide Stage 2 results, attach age bands, and report the
     per-band acceptance metrics against the stored calibration."""
@@ -156,13 +213,14 @@ def main() -> None:
     print(f"{'OVERALL':<8} {len(df):>7,} {'':>6} {'':>12} {'':>11} {'':>8} "
           f"{overall_probs.mean():>10.3f} {overall_labels.mean():>9.3f} {overall_ece:>7.4f}")
 
+    flags = _gate_flags(report)
+    report["flags"] = flags
     out_path = model_dir / "stage2_acceptance_check.json"
     out_path.write_text(json.dumps(report, indent=2))
     print(f"\n[acceptance] Saved -> {out_path}")
-    print("[acceptance] PASS criteria: per-band recall_test close to recall_cal "
-          "(not ~0.97 vs 0.80-0.89), mean_prob close to obs_rate, and ECE well "
-          "below the pre-fix 0.196. If recall_test is far above recall_cal or "
-          "ECE stays high, the calibration is still wrong -- do not start Stage 3.")
+    _print_gate_results(flags, overall_ece)
+    if flags["blocking"]["failed"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

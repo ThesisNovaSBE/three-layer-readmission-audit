@@ -878,3 +878,30 @@ def test_parse_response_dedupes_ground_cited_twice():
     assert result["annotation_failed"] is False
     assert len(result["aggravating_grounds"]) == 1
     assert result["aggravating_grounds"][0]["quote"] == "First confusion quote."
+
+
+# ── Generation schema: every field required, taxonomies as enums ─────────────
+
+def test_generation_schema_requires_every_field_in_order():
+    """lm-format-enforcer only enforces order (force_json_field_order) over
+    REQUIRED keys, so every field must be required, decision last."""
+    from src.stage3.explain import _generation_schema
+    schema = _generation_schema()
+    assert schema["required"] == list(schema["properties"])
+    assert schema["required"][-1] == "decision"
+    assert schema["required"][:2] == ["mitigating_grounds", "aggravating_grounds"]
+
+
+def test_generation_schema_constrains_taxonomies_to_enums():
+    """decision / planned_return / ground values are enums, so an
+    off-taxonomy value cannot be generated."""
+    from src.stage3.explain import (
+        AGGRAVATING_GROUNDS, DECISIONS, MITIGATING_GROUNDS, PLANNED_RETURN_ANSWERS,
+        _generation_schema,
+    )
+    schema = _generation_schema()
+    assert schema["properties"]["decision"]["enum"] == list(DECISIONS)
+    assert schema["properties"]["planned_return"]["enum"] == list(PLANNED_RETURN_ANSWERS)
+    defs = schema["$defs"]
+    assert defs["_MitigatingHit"]["properties"]["ground"]["enum"] == list(MITIGATING_GROUNDS)
+    assert defs["_AggravatingHit"]["properties"]["ground"]["enum"] == list(AGGRAVATING_GROUNDS)

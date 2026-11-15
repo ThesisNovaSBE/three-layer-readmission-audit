@@ -141,6 +141,92 @@ def _ok_assemble(prepared, annotation):
     return _fake_result(prepared.hadm_id, fail=annotation["annotation_failed"])
 
 
+def _raw_call_llm_batch(prompts, *_a, **_kw):
+    """call_llm_batch stand-in that carries a raw_response per prompt (N5)."""
+    return [{"annotation_failed": False, "raw_response": f"RAW-{p}"} for p in prompts]
+
+
+def test_failfast_aborts_and_writes_marker_on_high_failure_rate(tmp_path):
+    """N6: once >=100 admissions are processed and >20% failed, the run aborts
+    with SystemExit and writes a stage3_FAILFAST marker with the counts."""
+    out = tmp_path / "out.csv"
+    n = 150
+    big = pd.DataFrame({
+        "hadm_id": list(range(n)),
+        "subject_id": list(range(n)),
+        "readmission_30d": [0] * n,
+        "stage1_score": [0.5] * n,
+        "stage1_score_raw": [0.45] * n,
+        "stage1_threshold": [0.35] * n,
+        "stage2_score": [0.3] * n,
+        "stage2_confirmed": [0] * n,
+    })
+
+    def prepare_se(_hadm_id, *_a, **_kw):
+        raise RuntimeError("simulated prep failure")  # every admission fails prep
+
+    with patch("src.stage3.batch._load_artifact", return_value={}), \
+         patch("src.stage3.batch._load_results", return_value=big), \
+         patch("src.stage3.batch.load_feature_matrix", return_value=pd.DataFrame()), \
+         patch("src.stage3.batch._preload_notes", return_value={}), \
+         patch("src.stage3.batch._prepare_patient", side_effect=prepare_se), \
+         pytest.raises(SystemExit, match="failure rate"):
+        run_batch_audit(cfg=_cfg(batch_size=60), out_path=out)
+
+    marker = tmp_path / "stage3_FAILFAST"
+    assert marker.exists()
+    text = marker.read_text()
+    assert "processed=120" in text  # aborts at the chunk crossing 100 (60+60)
+    assert "failed_or_annotation_failed=120" in text
+    assert "simulated prep failure" in text  # first errors captured
+
+
+def test_raw_jsonl_sidecar_written_with_prompt_under_limit(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """N5: <out>.raw.jsonl gets one line per audited admission with hadm_id +
+    raw_response (+ prompt when --limit set), appended across chunks, and
+    raw_response never leaks into the CSV."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _raw_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        # batch_size=1 -> 4 chunks, so a present-and-complete sidecar also
+        # proves it is appended per chunk, not truncated each time.
+        run_batch_audit(cfg=_cfg(batch_size=1), out_path=out, limit=4)
+
+    raw_path = tmp_path / "out.raw.jsonl"
+    assert raw_path.exists()
+    lines = [json.loads(line) for line in raw_path.read_text().splitlines()]
+    assert len(lines) == 4
+    assert {r["hadm_id"] for r in lines} == {10, 11, 12, 13}
+    for r in lines:
+        assert r["raw_response"] == f"RAW-prompt-{r['hadm_id']}"
+        assert "prompt" in r  # --limit was set
+    # raw_response must not be a CSV column
+    assert "raw_response" not in pd.read_csv(out).columns
+
+
+def test_raw_jsonl_omits_prompt_without_limit(tmp_path, results_df):  # pylint: disable=redefined-outer-name
+    """Without --limit, the sidecar records hadm_id + raw_response only."""
+    out = tmp_path / "out.csv"
+
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _raw_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(), out_path=out)  # no limit
+
+    lines = [json.loads(line) for line in (tmp_path / "out.raw.jsonl").read_text().splitlines()]
+    assert lines and all("prompt" not in r for r in lines)
+
+
 def test_writes_one_row_per_admission(tmp_path, results_df):  # pylint: disable=redefined-outer-name
     """A clean run must write exactly one row per target admission."""
     out = tmp_path / "out.csv"

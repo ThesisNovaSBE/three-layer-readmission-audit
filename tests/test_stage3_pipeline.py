@@ -96,3 +96,34 @@ def test_prepare_patient_empty_note_allowed_under_suppress_note():
             feature_matrix=pd.DataFrame(), note_text="", suppress_note=True,
         )
     assert "no discharge note" not in str(exc_info.value)
+
+
+# ── Stage 2 -> Stage 3 handoff: feature row must reproduce the scored raw score ──
+
+class _FixedProbaModel:
+    """Stand-in estimator returning a fixed positive-class probability."""
+
+    def __init__(self, p):
+        self.p = p
+
+    def predict_proba(self, frame):
+        import numpy as np  # pylint: disable=import-outside-toplevel
+        return np.tile([1 - self.p, self.p], (len(frame), 1))
+
+
+def test_feature_row_score_check_passes_on_match():
+    """A row that re-scores to stage1_score_raw passes silently."""
+    from src.stage3.pipeline import _assert_feature_row_matches_score
+    art = {"estimator": _FixedProbaModel(0.9), "feature_cols": ["a"]}
+    _assert_feature_row_matches_score(1, art, pd.Series({"a": 1.0}), {"stage1_score_raw": 0.9})
+
+
+def test_feature_row_score_check_raises_on_mismatch():
+    """A row that re-scores differently means Stage 3 would explain a
+    different record than Stage 2 scored -- must raise (-> PREP_FAILED)."""
+    from src.stage3.pipeline import _assert_feature_row_matches_score
+    art = {"estimator": _FixedProbaModel(0.4), "feature_cols": ["a"]}
+    with pytest.raises(ValueError, match="re-scores"):
+        _assert_feature_row_matches_score(
+            1, art, pd.Series({"a": 1.0}), {"stage1_score_raw": 0.9}
+        )
