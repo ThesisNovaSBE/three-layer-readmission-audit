@@ -22,6 +22,7 @@ from src.stage3.batch import (
     run_no_stage2_control,
     run_sensitivity_sweep,
 )
+from src.stage3._ranges import select_range, validate_range
 from src.stage3._annotation import BatchGenerationError
 
 # hadm_id -> (stage1_score, stage1_score_raw, stage2_score), mirroring the
@@ -602,6 +603,140 @@ def _align_assemble(prepared, annotation):
         "annotation_failed": annotation["annotation_failed"],
     })
     return SimpleNamespace(model_dump=lambda d=data: dict(d))
+
+
+# ── Parallel range jobs: _select_range / _validate_range ─────────────────────
+
+def test_select_range_matches_sequential_chunking_when_aligned():
+    """A batch-aligned range's chunks are exactly the matching chunks of a
+    single sequential run over the full list -- the property that keeps bf16
+    batch composition identical."""
+    targets = list(range(100, 116))  # 16 ordered targets
+    bs = 4
+    seq_chunks = [targets[i:i + bs] for i in range(0, len(targets), bs)]
+    pending = select_range(targets, 4, 12, set())
+    assert pending == targets[4:12]
+    range_chunks = [pending[i:i + bs] for i in range(0, len(pending), bs)]
+    assert range_chunks == seq_chunks[1:3]  # the 2nd and 3rd sequential chunks
+
+
+def test_select_range_excludes_admissions_outside_range():
+    """No admission before range_start or at/after range_end is selected."""
+    targets = list(range(100, 116))
+    pending = select_range(targets, 4, 12, set())
+    assert all(104 <= h < 112 for h in pending)
+    assert 103 not in pending and 112 not in pending
+
+
+def test_select_range_resume_within_range_skips_done():
+    """A --resume within a range drops already-done hadm_ids, order preserved."""
+    targets = list(range(100, 116))
+    pending = select_range(targets, 4, 12, done={104, 106})
+    assert pending == [105, 107, 108, 109, 110, 111]
+
+
+def test_gap_job_resumes_at_batch_aligned_boundary():
+    """The gap job (range covering the start, --out the main file, --resume)
+    picks up only admissions missing from the main file; when the main file was
+    filled sequentially from index 0 to a batch-aligned boundary, the first
+    pending chunk begins exactly at that boundary."""
+    targets = list(range(1000, 1064))  # 64 ordered targets stand-in
+    bs = 4
+    done = set(targets[:40])  # main file filled sequentially through index 39
+    pending = select_range(targets, 0, 48, done)
+    assert pending == targets[40:48]          # only the missing admissions, in order
+    assert pending[0] == targets[40]          # first chunk starts at the resume boundary
+    assert len(pending) % bs == 0             # and that boundary is batch-aligned
+
+
+def test_validate_range_rejects_unaligned_start():
+    with pytest.raises(SystemExit, match="multiple of"):
+        validate_range(3, 8, 100, 4)
+
+
+def test_validate_range_rejects_unaligned_end_below_total():
+    with pytest.raises(SystemExit, match="multiple of"):
+        validate_range(0, 10, 100, 4)
+
+
+def test_validate_range_allows_unaligned_end_when_it_is_the_total():
+    """The final range may end at the total target count even if that is not a
+    multiple of the batch size."""
+    validate_range(96, 99, 99, 4)  # must not raise
+
+
+def test_validate_range_requires_both_bounds():
+    with pytest.raises(SystemExit, match="given together"):
+        validate_range(4, None, 100, 4)
+
+
+def test_validate_range_rejects_start_not_below_end():
+    with pytest.raises(SystemExit, match="Invalid range"):
+        validate_range(8, 4, 100, 4)
+
+
+def test_range_audits_only_slice_and_cohort_df_stays_full(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """A range audits only targets[S:E], but the cohort DataFrame handed to
+    _prepare_patient (and therefore the r1/r2/discordance population) is the
+    FULL flagged cohort, exactly as with --limit."""
+    out = tmp_path / "out.csv"
+    prepared_ids: list[int] = []
+    cohort_dfs: list[pd.DataFrame] = []
+
+    def prepare_se(hadm_id, *_a, **kw):
+        prepared_ids.append(hadm_id)
+        cohort_dfs.append(kw.get("results_df"))
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=2), out_path=out, range_start=2, range_end=4)
+
+    assert prepared_ids == [12, 13]                       # only the slice audited
+    assert set(pd.read_csv(out)["hadm_id"]) == {12, 13}
+    for df in cohort_dfs:                                 # cohort is the full 4, not the slice
+        assert set(df["hadm_id"]) == {10, 11, 12, 13}
+
+
+def test_range_default_output_name(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """With no --out, a range writes to stage3_batch_results.range{S}-{E}.csv."""
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with patch("src.stage3.batch.get_model_dir", return_value=tmp_path), \
+         p1, p2, p3, p4, p5, p6, p7:
+        run_batch_audit(cfg=_cfg(batch_size=2), range_start=0, range_end=2)
+
+    expected = tmp_path / "stage3_batch_results.range0-2.csv"
+    assert expected.exists()
+    assert set(pd.read_csv(expected)["hadm_id"]) == {10, 11}
+
+
+def test_range_and_limit_are_mutually_exclusive(
+    tmp_path, results_df  # pylint: disable=redefined-outer-name
+):
+    """--limit and a range together must raise, not silently pick one."""
+    def prepare_se(hadm_id, *_a, **_kw):
+        return _fake_prepared(hadm_id)
+
+    p1, p2, p3, p4, p5, p6, p7 = _patched_batch(
+        results_df, prepare_se, _ok_call_llm_batch, _ok_assemble
+    )
+    with p1, p2, p3, p4, p5, p6, p7, \
+         pytest.raises(SystemExit, match="cannot be combined"):
+        run_batch_audit(
+            cfg=_cfg(batch_size=2), out_path=tmp_path / "out.csv",
+            limit=2, range_start=0, range_end=2,
+        )
 
 
 def _echo_call_llm_batch(prompts, *_a, note_texts=None, **_kw):

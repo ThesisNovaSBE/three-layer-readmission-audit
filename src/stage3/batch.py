@@ -45,6 +45,9 @@ Usage::
     python -m src.stage3.batch --limit 10        # smoke test
     python -m src.stage3.batch --resume          # skip hadm_ids already written
     python -m src.stage3.batch --sweep           # sensitivity sweep only, no LLM calls
+    python -m src.stage3.batch --resume --range-start 5200 --range-end 9600
+                                                 # one parallel range job (see
+                                                 # scripts/slurm_stage3_range.sh)
 """
 
 from __future__ import annotations
@@ -65,6 +68,7 @@ from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
 from src.stage3.discordance import sweep_discordance_thresholds
+from src.stage3._ranges import select_range, validate_range
 from src.stage3._annotation import BatchGenerationError, generation_failure_annotation
 from src.stage3.explain import call_llm_batch
 from src.stage3.pipeline import (
@@ -482,23 +486,48 @@ def _setup_batch(
     limit: int | None,
     resume: bool,
     out_path: Path,
+    range_start: int | None = None,
+    range_end: int | None = None,
 ) -> _BatchSetup:
     """Load artifact/results/feature-matrix/notes and resolve the target
     admission list -- extracted (2026-09-15) alongside _process_chunk to
-    fix a pylint too-many-locals on run_batch_audit."""
+    fix a pylint too-many-locals on run_batch_audit.
+
+    ``range_start``/``range_end`` (parallel range jobs) select the slice
+    ``targets[start:end]`` of the ordered target list instead of the whole
+    list; mutually exclusive with ``limit``. The cohort used for r1/r2 and the
+    discordance category is always the FULL flagged cohort (``results_df``),
+    independent of this slice -- the range only narrows WHICH admissions are
+    audited, not the population they are ranked against."""
     # Artifact MUST load before torch — see src/stage3/pipeline.py.
     artifact = _load_artifact(cfg)
     results_df = _load_results(get_model_dir())
     feature_matrix = load_feature_matrix(cfg, "full")
 
     targets = hadm_ids if hadm_ids is not None else results_df["hadm_id"].astype(int).tolist()
-    if limit is not None:
-        targets = targets[:limit]
-
     done = _already_done(out_path) if resume else set()
-    pending = [h for h in targets if h not in done]
+
+    range_requested = range_start is not None or range_end is not None
+    if range_requested:
+        if limit is not None:
+            raise SystemExit(
+                "[stage3/batch] --limit cannot be combined with "
+                "--range-start/--range-end."
+            )
+        validate_range(
+            range_start, range_end, len(targets), cfg.stage3.generation_batch_size
+        )
+        n_in_scope = range_end - range_start
+        pending = select_range(targets, range_start, range_end, done)
+        scope_note = f" [range {range_start}:{range_end}]"
+    else:
+        if limit is not None:
+            targets = targets[:limit]
+        n_in_scope = len(targets)
+        pending = [h for h in targets if h not in done]
+        scope_note = ""
     print(
-        f"[stage3/batch] {len(targets):,} target admissions, "
+        f"[stage3/batch] {n_in_scope:,} target admissions{scope_note}, "
         f"{len(done):,} already done, {len(pending):,} pending"
     )
 
@@ -563,6 +592,8 @@ def run_batch_audit(
     limit: int | None = None,
     resume: bool = False,
     out_path: Path | None = None,
+    range_start: int | None = None,
+    range_end: int | None = None,
 ) -> Path:
     """Run Stage 3 over every Stage 1-flagged, note-covered admission.
 
@@ -570,23 +601,41 @@ def run_batch_audit(
         cfg:      validated project config.
         hadm_ids: explicit list of admissions to audit. If ``None``, audits
                   every admission in ``models/stage2_results.csv``.
-        limit:    audit only the first N admissions (smoke-testing).
+        limit:    audit only the first N admissions (smoke-testing). Mutually
+                  exclusive with ``range_start``/``range_end``.
         resume:   skip hadm_ids already present in ``out_path`` and append
                   rather than overwrite.
         out_path: output CSV path. Defaults to
-                  ``models/stage3_batch_results.csv``.
+                  ``models/stage3_batch_results.csv``, or -- when a range is
+                  set and no path is given --
+                  ``models/stage3_batch_results.range{S}-{E}.csv``.
+        range_start / range_end: audit only ``targets[start:end]`` of the
+                  ordered target list (a parallel range job). Both must be
+                  multiples of the generation batch size, except ``end`` may
+                  equal the total target count; see
+                  :func:`src.stage3._ranges.validate_range`.
+                  The r1/r2 ranks and discordance category are still computed
+                  against the FULL flagged cohort, not this slice.
 
     Returns:
         The output path written to.
     """
-    out_path = out_path or (get_model_dir() / "stage3_batch_results.csv")
+    if out_path is None:
+        if range_start is not None:
+            out_path = (
+                get_model_dir()
+                / f"stage3_batch_results.range{range_start}-{range_end}.csv"
+            )
+        else:
+            out_path = get_model_dir() / "stage3_batch_results.csv"
     if resume:
         # Fail before the (expensive) note preload if the existing output is
         # from a different run -- header + per-row stage2_score/stage1_score_raw
         # must match the current stage2_results.csv.
         _assert_output_matches_current_inputs(out_path, _load_results(get_model_dir()))
     setup = _setup_batch(
-        cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path
+        cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path,
+        range_start=range_start, range_end=range_end,
     )
 
     write_header = not (resume and out_path.exists())
@@ -615,22 +664,25 @@ def run_batch_audit(
             writer.writeheader()
         chunk_out = _ChunkWriter(writer, fh, raw_path, include_prompt=limit is not None)
         for chunk_start in range(0, len(setup.pending), chunk_size):
-            d_ok, d_failed, d_annotation_failed, d_retried, d_retry_failed = _process_chunk(
+            # deltas = (ok, failed, annotation_failed, retried, retry_failed) for
+            # this chunk -- kept as one tuple (not five locals) to stay within
+            # pylint's per-function local limit.
+            deltas = _process_chunk(
                 setup.pending[chunk_start:chunk_start + chunk_size], cfg, setup, chunk_out,
             )
-            n_ok += d_ok
-            n_failed += d_failed
-            n_annotation_failed += d_annotation_failed
-            n_retried += d_retried
-            n_retry_failed += d_retry_failed
+            n_ok += deltas[0]
+            n_failed += deltas[1]
+            n_annotation_failed += deltas[2]
+            n_retried += deltas[3]
+            n_retry_failed += deltas[4]
 
             # Fail-fast (N6): after >=100 processed, abort if >20% failed.
             if ((n_ok + n_failed) >= _FAILFAST_MIN_PROCESSED
                     and (n_failed + n_annotation_failed) / (n_ok + n_failed) > _FAILFAST_RATE):
                 _trigger_failfast(out_path, n_ok + n_failed, n_failed + n_annotation_failed)
 
-            i_done = min(chunk_start + chunk_size, len(setup.pending))
-            print(f"[stage3/batch] [{i_done}/{len(setup.pending)}] "
+            print(f"[stage3/batch] "
+                  f"[{min(chunk_start + chunk_size, len(setup.pending))}/{len(setup.pending)}] "
                   f"ok={n_ok} failed={n_failed} annotation_failed={n_annotation_failed}")
 
     print(f"[stage3/batch] Done. Saved -> {out_path} "
@@ -903,6 +955,18 @@ def main() -> None:
              "run (e.g. --limit 20 --out models/stage3_smoke.csv) so the real "
              "output file stays untouched.",
     )
+    parser.add_argument(
+        "--range-start", type=int, default=None,
+        help="Start index (inclusive) into the ordered target list for a "
+             "parallel range job. Must be a multiple of the generation batch "
+             "size. Use with --range-end; mutually exclusive with --limit.",
+    )
+    parser.add_argument(
+        "--range-end", type=int, default=None,
+        help="End index (exclusive) into the ordered target list. Must be a "
+             "multiple of the generation batch size, or equal the total target "
+             "count. Use with --range-start.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -911,7 +975,10 @@ def main() -> None:
     if args.sweep:
         run_sensitivity_sweep()
     else:
-        run_batch_audit(cfg, limit=args.limit, resume=args.resume, out_path=args.out)
+        run_batch_audit(
+            cfg, limit=args.limit, resume=args.resume, out_path=args.out,
+            range_start=args.range_start, range_end=args.range_end,
+        )
 
 
 if __name__ == "__main__":

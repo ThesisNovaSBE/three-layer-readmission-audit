@@ -465,6 +465,20 @@ old run was defensible, but its numbers on these axes are not comparable):
   this is an additional, more conservative report alongside it, not a
   replacement.
 
+**How the rerun was executed.** To fit the run inside the cluster's wall-clock
+limits, the final audit was produced as one sequential `--resume` job plus
+several parallel range jobs, each auditing a contiguous slice
+(`--range-start`/`--range-end`) of the ordered target list, then merged into
+the single canonical results file (`scripts/merge_stage3_parts.py`, main-file
+precedence on any overlap). Every range boundary is a multiple of the
+generation batch size, so each slice is chunked into exactly the same batched
+`generate()` groups a single sequential run would have used — batch composition
+is identical to one uninterrupted run. This controls the one batching effect we
+know matters (bfloat16 batched generation is sensitive to which admissions
+share a batch); it does **not** make the merged output bit-identical to a
+single run, since generation on different GPU nodes is not guaranteed to be
+bit-for-bit reproducible.
+
 ## Limitations
 
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)
