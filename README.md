@@ -1,23 +1,28 @@
-# LLM-Augmented Hospital Readmission Prediction
+# Triage and Verify: A Large Language Model as Auditor of Structured 30-Day Readmission Alerts in MIMIC-IV
 
 > **LLMs/agents working in this repo MUST read `PROJECT_TLDR.md`, `docs/ARCHITECTURE.md`, and the latest file in `sessions/` before starting work.**
 
-A Master's thesis project at Nova SBE (M.Sc. Business Analytics) testing
-whether LLMs add real value over classical ML for hospital readmission
-prediction. Full design rationale: **`docs/ARCHITECTURE.md`**.
+A Master's thesis project at Nova SBE (M.Sc. Business Analytics) asking
+whether a language model can improve 30-day readmission screening by
+reviewing the alerts of a structured model — acting as an auditor — rather
+than producing a risk score of its own. Full design rationale:
+**`docs/ARCHITECTURE.md`**.
 
 ## The Idea
 
 About one in five hospital patients is readmitted within 30 days. That is
 costly for hospitals and harmful for patients. Hospitals already predict
 this with algorithms trained on structured data: diagnoses, labs, length
-of stay. The open question is whether large language models that read
-doctors' free-text notes add real value on top of that, or whether it is
-mostly hype.
+of stay. But the practical problem is rarely discrimination — it is that
+most alerts at a useful threshold are false, and clinicians who get too
+many of them stop paying attention (alert fatigue). The question this
+project asks is whether a language model that reads the discharge note can
+**improve screening by reviewing those alerts — as an auditor — rather than
+producing a risk score of its own.**
 
 This project stacks three tools the way a hospital would actually deploy
-them, and asks the same question at every step: **does adding more AI
-add value?**
+them, and benchmarks the audited pipeline against the structured screen
+alone at the **same number of alerts.**
 
 1. **Screen:** a classical ML model flags high-risk patients from
    structured data alone, at an alert volume a hospital could actually
@@ -80,8 +85,8 @@ presentations.
 > silently used all-cause, despite that always being the project's stated
 > scope. See `docs/ARCHITECTURE.md` §6). See `MODEL_CARD.md` for the full
 > breakdown, including per-age-group fairness metrics. Stage 3
-> (MedGemma-27B via HF transformers) completed its full batch run on
-> 2026-10-06, across all 9,899 flagged-and-noted admissions.
+> (MedGemma-27B via HF transformers) completed its full batch run (rerun
+> merged 2026-11-21) across all 9,899 flagged-and-noted admissions.
 
 ### Stage 1: XGBoost (MIMIC-IV v3.1, n=521,191, held-out test n=104,242, target=unplanned)
 
@@ -100,73 +105,94 @@ precision=0.247. Beats 3 of 4 published benchmarks cited in `evaluate.py`
 35–45% for other age bands). See `MODEL_CARD.md` for the full fairness
 breakdown.
 
-### Does the Discharge Note Add Signal Beyond Structured Data? (RQ1)
+### Do the Structured and Note-Based Models Disagree on Individual Alerts? (RQ1)
 
-We score Stage 1 and Stage 2 independently on the identical population:
-62,759 admissions that have a discharge note, with neither model gating
-the other. This is the only population both models can be fairly compared
-on, since Stage 2 can only ever score an admission that actually has a
-note.
+RQ1 asks, beyond average discrimination, **to what extent the structured
+and note-based models disagree on individual flagged admissions, and
+whether that disagreement flags alerts more likely to be false.**
+
+*Background — average discrimination.* We first score Stage 1 and Stage 2
+independently on the identical population: 62,759 admissions that have a
+discharge note, with neither model gating the other (the only population
+both models can be fairly compared on).
 
 | Model | AUROC |
 |-------|-------|
 | Stage 1 (structured) | 0.7093 |
-| Stage 2 (notes only) | 0.7101 |
-| Difference | +0.0008 [-0.0041, +0.0054] |
+| Stage 2 (notes only) | 0.7102 |
+| Difference (Stage 2 − Stage 1) | +0.0009 [−0.0040, +0.0056] |
 
-The confidence interval crosses zero. **Null result**, expected and
-reportable per this project's own design docs, not a failure of either
-model. On this population, the discharge note carries no more, and no
-less, predictive signal than the roughly forty structured features alone.
+The confidence interval crosses zero: on average, the discharge note
+carries no more, and no less, predictive signal than the roughly forty
+structured features alone.
 
-### Stage 3: MedGemma-27B, the Independent Auditor
+*Disagreement on individuals.* The average hides what matters for an
+auditor — whether the note points the *other way* for particular patients.
+Among the 9,899 flagged-and-noted admissions, Stage 1's alerts are correct
+less often on the admissions where the two models disagree (share of
+correct alerts 0.412 on discordant vs. 0.445 on concordant admissions).
+Disagreement does mark alerts that are more likely to be false, which is
+the room an auditor has to work with.
+
+### How Is the Auditor Designed, and Does It Behave as Intended? (RQ2)
+
+RQ2 asks **how an LLM auditor can be designed to meet core requirements of
+clinical deployment** — local processing of patient data, reproducible
+decisions, verifiable evidence, and the option to abstain — and then checks
+whether it does so in practice.
 
 Stage 3 audits every admission that Stage 1 flagged and that also has a
 discharge note: 9,899 admissions in total, a narrower and already
 higher-risk slice of the population above. On just this subset, Stage 2's
 own AUROC falls to 0.622, not because the model changed, but because
 restricting to an already-flagged population removes most of the easy,
-low-risk cases that make a comparison informative in the first place.
-This does not contradict the 0.7101 reported above. It is the same model
-scored on a different, harder population. See `MODEL_CARD.md` for the
-full explanation of why population choice moves the number this much.
+low-risk cases. This does not contradict the 0.7102 reported above; it is
+the same model scored on a different, harder population.
 
 For each of the 9,899 admissions, Stage 3 reads Stage 1's score with its
 SHAP-ranked reasons, Stage 2's score, a quantitatively computed
-discordance signal between the two, and the discharge note itself. It
-then reaches its own uphold or override decision with a written
-justification, rather than narrating a decision Stage 2 already made.
+discordance signal between the two, and the discharge note itself. It then
+reaches its **own** uphold / override / insufficient-evidence decision with
+a written justification, rather than narrating a decision Stage 2 already
+made. Across the full run it upheld 8,095 alerts, overrode 1,566, and
+abstained (`insufficient_evidence`) on 219; 19 answers were invalid and 0
+inputs failed to prepare. Its own decision matched the code-recomputed
+rule-based decision on 88.5% of decided admissions, and 93.1% of decided
+admissions had every cited quote verified against the note.
 
-A separate robustness check shows the auditor actually uses these
-inputs. With the note withheld, it answered `insufficient_evidence` on
-150 of 150 test admissions, versus 0 of 150 in the real run. Withholding
-Stage 2's score instead changed the decision on 7 of 40 admissions.
-Running the same patient twice gave an identical decision 30 of 30
-times. See `docs/ARCHITECTURE.md` §3 and `MODEL_CARD.md` for the full
-results.
+Whether the auditor genuinely relies on its inputs is tested with four
+validation control arms (reference, repeated reference, note-withheld,
+Stage-2-withheld; n = 150), an acceptance arm test on the first 8
+admissions, and a batch-size check on the first 20 — **pending (validation
+job)**. See `docs/ARCHITECTURE.md` §3 and `MODEL_CARD.md`.
 
-### Does the Auditor Add Value? (RQ2)
+### Does the Auditor Improve Screening at Matched Alert Volume? (RQ3)
 
-Full batch run: Stage 3 audited all 9,899 flagged-and-noted admissions.
-Three results, each building on the last.
+RQ3 is the confirmatory test: **does the audited pipeline beat the
+structured model alone when both raise the same number of alerts?** Stage 3
+audited all 9,899 flagged-and-noted admissions. The comparison uses a
+patient-level **paired** bootstrap of the pipeline-minus-control difference.
 
-1. **The blanket result.** At matched alert volume, Stage 1 alone (the
-   control arm) beats the full three-stage cascade on both precision
-   (0.450 vs. 0.435) and recall (0.316 vs. 0.295, with 95% confidence
-   intervals that essentially do not overlap). Auditing every flagged
-   admission is net harmful, not neutral.
-2. **Conditional triggering.** Running Stage 3 only on cases where
-   Stage 1 and Stage 2 disagree recovers both precision and recall
-   against the blanket run, using 48% fewer LLM calls.
-3. **The direct test.** Comparing Stage 3's real decision against
-   Stage 1's flag standing on its own, computed separately within
-   agreeing and disagreeing cases, shows Stage 3 underperforms Stage 1
-   alone in both groups by F2, and more so on the disagreeing cases, not
-   less.
+1. **The blanket result.** At matched alert volume (14,638 alerts), the
+   full three-stage cascade is slightly *below* Stage 1 alone (the control
+   arm): precision difference −0.0048 (95% CI [−0.0085, −0.0015], excludes
+   zero) and recall difference −0.0035 (95% CI [−0.0076, +0.0003], includes
+   zero). The cascade significantly lowers precision and leaves recall
+   statistically unchanged — net slightly harmful, not beneficial.
+2. **Conditional triggering (exploratory).** Running Stage 3 only on cases
+   where Stage 1 and Stage 2 disagree recovers recall against the blanket
+   run at no precision cost, using 4,631 fewer LLM calls (47%); versus its
+   own matched control the difference is not statistically distinguishable.
+3. **The direct test (exploratory).** Comparing Stage 3's real decision
+   against Stage 1's flag standing on its own, separately within agreeing
+   and disagreeing cases, shows Stage 3 underperforms by F2 in both groups,
+   more so on disagreeing cases.
 
-The honest finding: Stage 3 trades recall for little to no precision gain
-almost everywhere it is applied. Full numbers, confidence intervals, and
-caveats are in `MODEL_CARD.md`'s "Stage 1+2+3, combined pipeline" section.
+The honest finding: the auditor trades a little recall for little-to-no
+precision gain almost everywhere it is applied, and does not improve on the
+structured screen at matched volume. Full numbers, confidence intervals and
+caveats are in `MODEL_CARD.md`'s "Stage 1+2+3, combined pipeline" section
+and `models/pipeline_paired_differences.json`.
 
 ---
 
@@ -324,7 +350,7 @@ flowchart LR
 │   │   └── synthetic.py         # Synthetic data generator
 │   ├── model/                   # Stage 1: train, tune, evaluate, predict, cv,
 │   │                             # calibration, bootstrap, compare_stages (RQ1),
-│   │                             # evaluate_pipeline (RQ2 + control arm)
+│   │                             # evaluate_pipeline (RQ3 + control arm)
 │   ├── stage2/
 │   │   ├── _utils.py            # Shared helpers (band_key, model path)
 │   │   ├── dataset.py           # ClinicalNotesDataset + note loading

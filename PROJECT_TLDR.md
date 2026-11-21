@@ -1,6 +1,6 @@
 This is the single source of truth for project context. LLMs and teammates should read this file first before doing any work. Then read `docs/ARCHITECTURE.md` for the current pipeline design, then the most recent file in `sessions/` to see current state.
 
-# LLM-Augmented Hospital Readmission Prediction — A Three-Stage Auditing Pipeline
+# Triage and Verify: A Large Language Model as Auditor of Structured 30-Day Readmission Alerts in MIMIC-IV
 
 **Program:** M.Sc. Business Analytics, Nova SBE
 **Advisor:** Prof. Yufei Shen
@@ -8,11 +8,11 @@ This is the single source of truth for project context. LLMs and teammates shoul
 
 ## Goal
 
-Predict 30-day hospital readmission using a three-stage pipeline:
+Ask whether a language model can **improve 30-day readmission screening by reviewing the alerts of a structured model — acting as an auditor — rather than producing a risk score of its own.** A three-stage pipeline on MIMIC-IV and MIMIC-IV-Note:
 
 1. A classical ML model flags high-risk patients from **structured** MIMIC-IV data at a deployable, capacity-constrained operating point.
-2. A fine-tuned clinical language model reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate.
-3. A reasoning LLM (MedGemma-27B-text-it, local via HF transformers) audits each flagged case — reading both scores and the note — and makes its own independent uphold/override decision with a clinical justification. Full batch run across all 9,899 flagged+noted admissions completed 2026-10-06.
+2. A fine-tuned clinical encoder reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate — used to measure disagreement with Stage 1 (RQ1) and as a second input to the auditor, not as a competing predictor.
+3. A reasoning LLM (MedGemma-27B-text-it, local via HF transformers) audits each flagged case — reading both scores and the note — and makes its own uphold / override / insufficient-evidence decision with a clinical justification. Full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21).
 
 See `docs/ARCHITECTURE.md` for the full design and rationale.
 
@@ -42,7 +42,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 - **HPC training:** GWDG KISSKI cluster (A100 80GB, bf16, batch_size=8, effective 16 with grad accumulation)
 - **Job script:** `train_stage2.sh` — Slurm job with pre-flight checks; auto-resumes from checkpoint on resubmission
 
-### Stage 3 — Independent LLM Auditor — full run completed 2026-10-06
+### Stage 3 — Independent LLM Auditor — full run (rerun merged 2026-11-21)
 
 - Model: `google/medgemma-27b-text-it`, served locally via HF `transformers.generate()` + `lm-format-enforcer` (guided JSON decoding), `temperature=0` (pinned for reproducibility). Switched from Ollama/phi4-mini 2026-09-10 (batch run moved to cluster GPU hardware) and from vLLM 2026-09-15 (KISSKI's CUDA 12.8 driver ceiling proved incompatible with vLLM's kernel stack) — see `sessions/` for the full diagnosis.
 - Input per patient: Stage 1 score + SHAP-ranked reasons, Stage 2 score, near-full discharge note text, and a pre-computed (not LLM-chosen) discordance mode
@@ -50,7 +50,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 - Discordance mode (`CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES`) is computed quantitatively from percentile-rank displacement of stage1_score vs. stage2_score within the flagged+noted cohort (`src/stage3/discordance.py:compute_discordance`) — not raw score subtraction, and never an LLM choice
 - Two-sided grounds taxonomy, each cited ground requiring its own verified quote: mitigating (`palliative_intent`, `planned_return`, `structured_driver_contradicted`, plus code-derived `strong_discharge_support`) and aggravating (`lives_alone_no_support`, `no_followup_arranged`, `functional_dependence`, `cognitive_impairment`, `nonadherence_risk`, `unstable_at_discharge`) — see `MODEL_CARD.md` for full definitions
 - `decision_rule`: a second, code-computed decision from quote-verified grounds only — a consistency check the model can't fabricate its way past
-- Available both on-demand (per-patient, via the API) and in batch (`src/stage3/batch.py`) — the full batch run across all 9,899 flagged+noted admissions completed 2026-10-06. **Real RQ2 result:** blanket auditing underperforms Stage 1 alone at matched alert volume; see `MODEL_CARD.md`.
+- Available both on-demand (per-patient, via the API) and in batch (`src/stage3/batch.py`) — the full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21). **Real RQ3 result:** at matched alert volume the audited pipeline does not improve on Stage 1 alone — a paired bootstrap shows significantly lower precision (Δ −0.0048, 95% CI [−0.0085, −0.0015]) and statistically unchanged recall (Δ −0.0035, 95% CI [−0.0076, +0.0003]); see `MODEL_CARD.md` and `models/pipeline_paired_differences.json`.
 - Key modules: `src/stage3/explain.py`, `src/stage3/discordance.py`, `src/stage3/pipeline.py`, `src/stage3/batch.py`, `src/stage3/models.py`, `src/stage3/attention.py` (optional auxiliary hint only), `src/stage3/shap_extract.py`
 
 ## Data

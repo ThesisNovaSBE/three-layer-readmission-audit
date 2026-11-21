@@ -178,41 +178,60 @@ provisional value; validate empirically (percentile sweep of the observed
 displacement distribution) before reporting it as a result — nobody has done
 this yet.
 
-`stage3.temperature` is pinned at `0.0`. Uphold/override is the primary
-outcome variable for RQ2; a stochastic auditor makes any reported effect a
-sample from a distribution rather than a fixed, checkable quantity.
+`stage3.temperature` is pinned at `0.0`. Reproducible decisions are an RQ2
+design requirement, and uphold/override is the final prediction feeding the
+RQ3 comparison; a stochastic auditor would make any reported effect a sample
+from a distribution rather than a fixed, checkable quantity.
 
-### RQ1 and RQ2 — which module answers what
+### Research questions (thesis Section 3.1) — which module answers what
 
-- **RQ1 — does text carry signal at all?** Stage 1 vs. Stage 2, scored
-  independently on the *same* population (not gated by Stage 1's flag) and
-  compared head-to-head. `src/stage2/predict.py:predict_stage2_all` produces
-  the population-wide Stage 2 scores this needs;
-  `src/model/compare_stages.py` does the comparison. Neither model feeds the
-  other here — this is not the cascade.
-- **RQ2 — does the auditor add value over Stage 1 alone?** Stage 3 audits
-  Stage 1's positive predictions using Stage 2's score as evidence.
-  `src/stage3/batch.py:run_batch_audit` runs this at scale;
-  `src/model/evaluate_pipeline.py` reports the resulting pipeline metrics
-  with Stage 3's decision (not Stage 2's threshold) as the final prediction
-  wherever a batch audit covers the admission. The load-bearing comparison
-  (colleague review item 1, 2026-08-28) is against a **control arm**:
-  Stage 1 alone, its threshold raised to match the full system's alert
-  volume exactly (`evaluate_pipeline.py:_control_arm_report`, using
-  `select_threshold_for_capacity`) — not an unconstrained Stage 1. Without
-  this, an apparent precision gain from the cascade could just be Stage 1
-  flagging fewer admissions, which raising its own threshold would do for
-  free. Reported as `report["pipeline"]["control_arm_stage1_matched"]`.
-  `run_batch_audit` always audits **every** Stage 1-flagged, note-covered
-  admission (blanket, unconditional) — this was raised as an open question
-  (should Stage 3 only run on discordant cases?) and resolved 2026-08-28
-  (session 19, see §5) as: keep the blanket run, and answer the question as
-  a **post-hoc analysis** of a completed run instead
-  (`evaluate_pipeline.py:_conditional_triggering_report`,
-  `report["pipeline"]["conditional_triggering"]`) — this reports the
-  LLM-call count and metric delta conditional (discordant-only) triggering
-  would have cost/saved, without ever forfeiting the ability to check
-  whether the auditor would have agreed on concordant cases anyway.
+**Overarching RQ:** *Can a large language model that reads the discharge
+summary, acting as an auditor of a risk model trained on structured EHR data,
+improve thirty-day readmission screening?*
+
+- **RQ1** — *Beyond their average discrimination, to what extent do a
+  structured model and a note-based model disagree on individual flagged
+  admissions, and does their disagreement identify alerts that are more likely
+  to be false?* Stage 1 vs. Stage 2 are scored independently on the same
+  notes-covered population (not gated by Stage 1's flag;
+  `src/stage2/predict.py:predict_stage2_all` + `src/model/compare_stages.py` →
+  `comparison_rq1.json`) as **background**. The disagreement itself is the
+  percentile-rank displacement between the two scores within the flagged+noted
+  cohort (`src/stage3/discordance.py`), and the share of correct Stage 1 alerts
+  is compared between concordant and discordant admissions
+  (`discordance_subgroup_evaluation.json`). Neither model feeds the other —
+  this is not the cascade.
+- **RQ2** — *How can a large language model auditor be designed to meet core
+  requirements of clinical deployment, e.g. local processing of patient data,
+  reproducible decisions, verifiable evidence and the option to abstain?* The
+  design choices (open-weight model run locally; greedy decoding at
+  temperature 0 with a fixed output schema; every cited ground carrying a
+  verbatim verified quote plus a rule-based decision recomputed from verified
+  grounds only; an `insufficient_evidence` abstention with a defined fallback)
+  are checked against the full-run decision profile (`stage3_run_summary.json`)
+  and **four validation control arms on 150 admissions** — reference, repeated
+  reference, note-withheld, Stage-2-withheld — plus an acceptance arm test
+  (first 8) and a batch-size check (first 20, one at a time)
+  (`scripts/run_validation_controls.py`, `scripts/compare_batch_size.py`). The
+  control-arm results are **pending (validation job)**.
+- **RQ3** — *Does the auditor improve screening performance compared with the
+  structured model alone at matched alert volume, and where and why does it
+  help or harm?* Stage 3 audits **every** Stage 1-flagged, note-covered
+  admission (blanket, unconditional); `src/model/evaluate_pipeline.py` reports
+  the pipeline with Stage 3's decision (not Stage 2's threshold) as the final
+  prediction, against a **control arm** — Stage 1 alone, top-m by raw score to
+  match the full system's alert volume exactly (`_control_arm_report`), the
+  load-bearing comparison (colleague review item 1, 2026-08-28). Without it an
+  apparent gain could just be Stage 1 flagging fewer admissions. The difference
+  is tested with a patient-level **paired** bootstrap
+  (`scripts/compare_pipeline_control_paired.py` →
+  `pipeline_paired_differences.json`). A **secondary** both-override policy has
+  its own matched control. Conditional (discordant-only) triggering is
+  evaluated **post-hoc** (`_conditional_triggering_report`) — reporting the
+  LLM-call count and metric delta it would have cost/saved, without forfeiting
+  the ability to check whether the auditor would have agreed on concordant
+  cases anyway. The endpoints are **precision and recall at matched alert
+  volume**; net reclassification improvement is not used.
 
 ---
 
@@ -325,7 +344,7 @@ that needed no GPU and no open decision.
   (bootstrap 95% CI, patient-level) and an operating point matched to Stage
   1's alert volume, plus a paired bootstrap CI on the AUROC difference.
   Output `models/comparison_rq1.json`.
-- **Batch Stage 3 runner (RQ2)** — new `src/stage3/batch.py`. Runs
+- **Batch Stage 3 runner (RQ2/RQ3)** — new `src/stage3/batch.py`. Runs
   `explain_patient` over every admission in `stage2_results.csv`
   (preloading artifact/results/feature matrix once), writes incrementally
   and crash-safe to `models/stage3_batch_results.csv`, supports `--limit`
@@ -510,33 +529,20 @@ end to end, after two more rounds of cluster troubleshooting.
   script. 607.5 core-hours were not wasted; they produced 150 real D1
   rows and 40 real D2 rows that job 16948923 then reused instead of
   recomputing.
-- **Real D1/D2/D3 results** (`models/stage3_validation_controls_summary.json`):
-  - **D1 blind-note (n=150): 0% decision agreement with the real run,
-    and that is the best possible outcome, not a red flag.** Every
-    single one of the 150 blind-note responses was
-    `insufficient_evidence`; the real run (same patients, note present)
-    never used `insufficient_evidence` at all (104 uphold, 46 override).
-    The auditor does not guess uphold/override when it has nothing to
-    read — it reliably recognizes that and says so. This is the
-    strongest available evidence that Stage 3's real decisions are
-    actually grounded in the note, not just the two numeric scores.
-  - **D2 no-Stage-2 (n=40): 82.5% agreement.** Removing Stage 2's score
-    and the discordance signal flips the decision on 7 of 40 patients,
-    shifting toward more uphold calls when Stage 2 is hidden (27→30
-    uphold, 13→10 override). Stage 2's evidence earns its place in the
-    prompt to a real, moderate degree without dominating it.
-  - **D3 self-agreement (n=30): 100% agreement** on both
-    `decision_model` and `decision_rule` across two independent runs of
-    every patient. `temperature=0` delivers exactly what it was pinned
-    for — a fixed, reproducible decision, not a sample from a
-    distribution. Verifies, rather than just assumes, the premise the
-    entire RQ2 design rests on.
-  - **Taken together: the net-harmful RQ2 finding is not an artifact of
-    a broken or inattentive auditor.** Stage 3 demonstrably reads the
-    note, demonstrably uses Stage 2's evidence, and is demonstrably
-    reproducible — and still underperforms Stage 1 alone. That is a
-    materially stronger, more defensible claim than an unvalidated
-    negative result would have been.
+- **Validation controls (RQ2) — pending (validation job).** The four control
+  arms (reference, repeated reference, note-withheld, Stage-2-withheld; n=150,
+  run through the same batched procedure as the full audit), the acceptance
+  arm test (first 8 admissions in their original batch grouping) and the
+  batch-size check (first 20, one at a time) are **pending (validation job)**;
+  results will land in `models/stage3_validation_controls_summary.json`
+  (committed without its `sample_hadm_ids` list — see MODEL_CARD's data-handling
+  note). Until then, the RQ2 claim that the auditor genuinely relies on its
+  inputs rests on the full-run decision profile only
+  (`stage3_run_summary.json`: 88.5% model/rule agreement among decided, 93.1%
+  with all quotes verified, 219 abstentions). The RQ3 matched-volume finding
+  below — the cascade does not improve on Stage 1 alone (precision
+  significantly lower, recall statistically unchanged) — stands on the full run
+  regardless.
 
 ---
 
@@ -554,21 +560,23 @@ session 17.
 - ~~Run `predict_stage2_all` at full scale~~ **Done (session 23)** — real
   population-wide scores exist in `models/stage2_results_all.csv`.
 - ~~Run `compare_stages.py`~~ **Done (session 23)** — first real RQ1
-  numbers: Stage 1 AUROC 0.7093 vs. Stage 2 AUROC 0.7101, a null result
+  numbers: Stage 1 AUROC 0.7093 vs. Stage 2 AUROC 0.7102, a null result
   (see `MODEL_CARD.md`). The headline-denominator decision below (notes-
   covered subset as headline) still needs explicit confirmation before this
   is written up as "the" RQ1 answer in the thesis text, but the numbers
   themselves are real and current.
-- ~~Run `batch.py` at full scale~~ **Done (2026-10-06)** — all 9,899
-  flagged+noted admissions, 0.94% annotation failure rate (93 patients,
-  token-budget truncation, fall back to Stage 2's threshold). Real RQ2
-  result: at matched alert volume, Stage 1 alone (control arm) beats the
-  full cascade on both precision (0.450 vs 0.435) and recall (0.316 vs
-  0.295, 95% CIs effectively non-overlapping on recall) — blanket Stage 3
-  auditing is net harmful to screening performance, not neutral. A
-  post-hoc conditional-triggering re-analysis (Stage 3 only on discordant
-  cases) recovers both metrics versus the blanket run at 48% fewer LLM
-  calls, which initially read as "Stage 3 adds value on discordant cases" —
+- ~~Run `batch.py` at full scale~~ **Done (rerun merged 2026-11-21)** — all
+  9,899 flagged+noted admissions, 19 LLM annotation failures (0.19%) plus 219
+  `insufficient_evidence`, all falling back to Stage 2's threshold. Real RQ3
+  result: at matched alert volume the full cascade does not improve on Stage 1
+  alone — a patient-level paired bootstrap gives a precision difference of
+  −0.0048 (95% CI [−0.0085, −0.0015], excludes zero) and a recall difference of
+  −0.0035 (95% CI [−0.0076, +0.0003], includes zero), i.e. significantly lower
+  precision and statistically unchanged recall
+  (`models/pipeline_paired_differences.json`). A post-hoc conditional-triggering
+  re-analysis (Stage 3 only on discordant cases) recovers recall versus the
+  blanket run at 4,631 fewer LLM calls (47%), which initially read as "Stage 3
+  adds value on discordant cases" —
   **but that comparison never varied Stage 3's treatment of the discordant
   group, so it couldn't have tested that.** A direct follow-up
   (`scripts/analyze_discordance_subgroups.py`, 2026-10-07): Stage 3's real
@@ -595,9 +603,9 @@ session 17.
 - ~~Bootstrap CIs not yet in `evaluate_pipeline.py`~~ **Done (2026-10-26,
   session 31)** — `_add_precision_recall_ci` (patient-clustered, 1000
   resamples) now covers all four pipeline arms, including `notes_cohort`
-  (precision=0.433 [0.416, 0.450], recall=0.180 [0.168, 0.193]) and
-  `conditional_triggering` (precision=0.437 [0.420, 0.457],
-  recall=0.319 [0.301, 0.339]) — fixing a real resampling-performance bug
+  (rerun: precision=0.441 [0.426, 0.456], recall=0.215 [0.201, 0.228]) and
+  `conditional_triggering` (rerun: precision=0.437 [0.422, 0.456],
+  recall=0.336 [0.317, 0.356]) — fixing a real resampling-performance bug
   in `bootstrap.py` along the way (see §3, session 31).
 - Feature audit (vitals missingness, lab itemid validation against
   `d_labitems`) — not touched.
@@ -609,7 +617,7 @@ session 17.
   far more often an emergency admission (SMD=0.73, the largest gap by a
   wide margin), more often discharged to a facility — but has a nearly
   balanced outcome rate (19.8% vs. 17.8%, SMD=0.053, below the
-  conventional 0.1 imbalance flag). RQ1/RQ2 are evaluated on a population
+  conventional 0.1 imbalance flag). RQ1–RQ3 are evaluated on a population
   skewed toward older, sicker, emergency-admitted patients — a real scope
   caveat for the thesis text — but that skew is not an outcome-rate
   confound.

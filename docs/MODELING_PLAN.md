@@ -11,7 +11,7 @@
 
 **Readmission is a rare, imbalanced event.** Reported 30-day all-cause rates land around **2–6% positive** depending on cohort definition; heart-failure / disease-specific cohorts run higher. This dominates every design choice below.
 
-**Performance ceilings are modest.** Classical ML on MIMIC structured data typically reports **AUROC ≈ 0.65–0.72** and **low AUPRC (≈ 0.10–0.20)**. We should not expect AUROC > 0.75 from structured data alone — closing that gap is precisely the motivation for the Stage 2 notes model. Set expectations accordingly in the thesis.
+**Performance ceilings are modest.** Classical ML on MIMIC structured data typically reports **AUROC ≈ 0.65–0.72** and **low AUPRC (≈ 0.10–0.20)**. We should not expect AUROC > 0.75 from structured data alone. The Stage 2 notes model is *not* positioned to beat that ceiling as a competing predictor — on the notes-covered test set it ties Stage 1 on AUROC (RQ1 is a null result). Its role is to provide an independent note-based read for measuring disagreement with Stage 1 (RQ1) and as a second input to the auditor (RQ2/RQ3), not to close an AUROC gap. Set expectations accordingly in the thesis.
 
 **Gradient-boosted trees are the consensus winner** on tabular EHR. XGBoost / LightGBM / HistGradientBoosting consistently match or beat logistic regression and random forests, with logistic regression retained as the interpretable baseline.
 

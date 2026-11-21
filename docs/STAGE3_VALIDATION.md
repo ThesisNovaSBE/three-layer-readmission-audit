@@ -1,24 +1,26 @@
 # Stage 3 Manual Validation Plan
 
 > **This is the HUMAN-annotator validation track — not the same thing as
-> the D1/D2/D3 code-only validation controls.** Two separate, complementary
+> the code-only validation controls (RQ2).** Two separate, complementary
 > validation efforts exist for Stage 3, and it's easy to conflate them:
 > this document is a Cohen's-kappa protocol against an independent human
-> clinical annotator (below) — **not yet executed**, no
-> `docs/validation_cases.csv` exists yet. The other track (`src/stage3/
-> batch.py:run_blind_note_control` / `run_no_stage2_control` /
-> `check_self_agreement`, entry point `scripts/run_validation_controls.py`,
-> session 31) checks something different and purely mechanical — does the
-> auditor's decision change when evidence is withheld, and is it
-> reproducible at temperature=0 — with no human judgment involved at all.
-> That track **completed 2026-10-30** (see `docs/ARCHITECTURE.md` §3,
-> session 34) with clean, decisive results: the auditor returned
-> `insufficient_evidence` on 150/150 patients when the note was
-> withheld (vs. 0/150 in the real run), 82.5% decision agreement when
-> Stage 2's score was withheld, and 100% self-agreement across two runs
-> at temperature=0. This document's human-kappa track is still **not
-> done** — the two tracks answer different questions, and this one is
-> not substituted by the other being complete.
+> clinical annotator (below) — **not executed**; the thesis (Section 5.4)
+> reports agreement with clinical judgement as a deliberate non-goal and a
+> stated limitation, and no `docs/validation_cases.csv` exists. The other
+> track (RQ2, entry point `scripts/run_validation_controls.py`) checks
+> something different and purely mechanical: **four control arms on a fixed
+> random sample of 150 admissions** — a *reference arm*, a *repeated
+> reference arm* (does identical input give an identical decision), a
+> *note-withheld arm* (the auditor is then expected to abstain), and a
+> *Stage-2-withheld arm* — all run through the same batched procedure
+> (batches of four, in sample order) as the full audit, preceded by an
+> *acceptance arm test* (first 8 admissions, original batch grouping) and
+> accompanied by a *batch-size check* (first 20 admissions, one at a time).
+> Those results are **pending (validation job)**; they will land in
+> `models/stage3_validation_controls_summary.json` (committed without its
+> `sample_hadm_ids` list — see MODEL_CARD's data-handling note). The two
+> tracks answer different questions, and this one is not substituted by the
+> other.
 >
 > **Partly superseded 2026-08-25, re-targeted 2026-08-28 (session 19).** As
 > of the current `src/stage3/explain.py`, the LLM no longer chooses the

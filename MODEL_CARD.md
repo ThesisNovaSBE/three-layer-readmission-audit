@@ -16,7 +16,7 @@
 > incompatible with KISSKI's CUDA 12.8 driver ceiling) — matches the
 > current code, and has now run at full scale (rerun merged 2026-11-21,
 > all 9,899 flagged+noted admissions, see §"Stage 1+2+3 — Combined pipeline"
-> below for the real RQ2 result).
+> below for the real RQ3 result).
 
 ## Model Details
 
@@ -118,25 +118,27 @@ session; numbers below are post-fix.
 |--------|-------|
 | AUROC | 0.622 |
 | AUPRC | 0.538 |
-| Recall | 0.974 |
-| Precision | 0.437 |
-| F2 | 0.782 |
-| ECE | 0.1957 |
+| Recall | 0.987 |
+| Precision | 0.434 |
+| F2 | 0.786 |
+| ECE | 0.0835 |
 
 Per-age-group:
 
 | Band | N | AUROC | Recall | Precision | F2 | ECE |
 |------|---|-------|--------|-----------|-----|-----|
-| 18-40 | 1,570 | 0.626 | 0.956 | 0.507 | 0.812 | 0.2028 |
-| 41-55 | 2,836 | 0.617 | 0.975 | 0.437 | 0.782 | 0.2324 |
-| 56-70 | 3,514 | 0.632 | 0.983 | 0.432 | 0.783 | 0.1879 |
-| 70+   | 1,979 | 0.581 | 0.974 | 0.392 | 0.751 | 0.1543 |
+| 18-40 | 1,570 | 0.626 | 0.979 | 0.502 | 0.823 | 0.1088 |
+| 41-55 | 2,836 | 0.617 | 0.984 | 0.432 | 0.784 | 0.0685 |
+| 56-70 | 3,514 | 0.632 | 0.993 | 0.430 | 0.786 | 0.0826 |
+| 70+   | 1,979 | 0.581 | 0.987 | 0.390 | 0.756 | 0.0901 |
 
-Fairness gaps: recall gap 0.027 (worst: 18-40), precision gap 0.115 (worst:
+Fairness gaps: recall gap 0.013 (worst: 18-40), precision gap 0.112 (worst:
 70+), AUROC gap 0.051. 70+ remains the hardest band for Stage 2 too, though
 the recall gap specifically is small — the age-group oversampling fix
 appears to have helped recall parity even though precision/AUROC gaps
-remain, worth digging into further for the fairness discussion.
+remain, worth digging into further for the fairness discussion. (Per-band
+ECE is on the 9,899 flagged admissions; the separate Stage 2 acceptance
+check reports much lower ECE on the full notes-covered test set — see RQ2.)
 
 **Training config:**
 
@@ -171,29 +173,43 @@ re-derives from the 20.5% readmitted share: (1 − 0.205) / 0.205 = 3.88].
 GPU-hours including failed runs (43.66 h) [sacct AllocTRES, computed
 2026-11-04, `sessions/2026-11-04_session-36.md`].
 
-### RQ1 — Does the note text add signal beyond structured data?
+### RQ1 — Do the structured and note-based models disagree on individual alerts?
 
-`compare_stages.py` scores Stage 1 and Stage 2 **independently, on the
-identical 62,759-admission notes-covered population** (neither model gates
-or feeds the other) — the fair, apples-to-apples comparison this project's
-own docs call for:
+RQ1 asks, beyond average discrimination, **to what extent the structured
+and note-based models disagree on individual flagged admissions, and
+whether that disagreement identifies alerts more likely to be false.**
+
+**Background — average discrimination.** `compare_stages.py` scores Stage 1
+and Stage 2 **independently, on the identical 62,759-admission notes-covered
+population** (neither model gates or feeds the other):
 
 | Model | AUROC |
 |-------|-------|
 | Stage 1 (structured) | 0.7093 |
-| Stage 2 (notes-only) | 0.7101 |
-| Difference | +0.0008 [-0.0041, +0.0054] (95% CI) |
+| Stage 2 (notes-only) | 0.7102 |
+| Difference (Stage 2 − Stage 1) | +0.0009 [−0.0040, +0.0056] (95% CI) |
 
-**Null result** — the CI straddles zero. This is explicitly anticipated and
-reportable per this project's own design docs, not a failure of either
-model: on this population, the discharge note alone carries no more (and no
-less) predictive signal than the structured record alone.
+The CI straddles zero: on average, the discharge note alone carries no more
+(and no less) predictive signal than the structured record alone.
+
+**Disagreement on individuals.** The average is of limited interest for an
+auditor; what matters is whether the note points the other way for
+particular patients, and whether those are disproportionately false alerts.
+Among the 9,899 flagged-and-noted admissions, Stage 1's alerts are correct
+less often where the two models disagree: the share of correct Stage 1
+alerts is 0.412 on discordant admissions (n=5,144) versus 0.445 on
+concordant admissions (n=4,517) (`discordance_subgroup_evaluation.json`).
+Disagreement does mark alerts more likely to be false — the information an
+auditor could use. A sensitivity sweep of the ±20 pp discordance threshold
+(10/15/20/25/30 pp) is in `discordance_sensitivity.json`; at ±20 pp, 46.8%
+of flagged admissions are concordant, 26.4% note-mitigated and 26.8%
+note-amplified.
 
 ### Selection bias: does the notes-covered population look like the excluded one?
 
 `scripts/analyze_selection_bias.py` (2026-10-26) compares baseline
 characteristics between Stage 1's test-partition admissions that have a
-discharge note (the population RQ1/RQ2 are evaluated on) and those that
+discharge note (the population RQ1–RQ3 are evaluated on) and those that
 don't, using `has_discharge_note` (computed directly against the real
 MIMIC-IV-Note file, not inferred). **They are clinically distinct
 populations.** Of 104,242 test admissions, 60.2% (n=62,759) have a note,
@@ -207,12 +223,12 @@ on 8 of 12 baseline characteristics checked.
 
 **The readmission outcome rate itself, however, is nearly balanced**
 (19.8% covered vs. 17.8% excluded, SMD=0.053 — below the imbalance flag).
-So the skew is real and worth disclosing as scope — RQ1/RQ2 generalize to
+So the skew is real and worth disclosing as scope — RQ1–RQ3 generalize to
 an older, sicker, more acutely-admitted population, not to all
 admissions equally — but it is not an outcome-rate confound driving the
-RQ1/RQ2 results themselves.
+RQ1–RQ3 results themselves.
 
-### Stage 1+2+3 — Combined pipeline (real RQ2 result, rerun merged 2026-11-21)
+### Stage 1+2+3 — Combined pipeline (real RQ3 result, rerun merged 2026-11-21)
 
 All 9,899 flagged+noted admissions audited by Stage 3
 (`google/medgemma-27b-text-it`, temperature=0). Of those, Stage 3 returned a
@@ -227,28 +243,38 @@ labelled old, in "Changes between the old run and the rerun".
 | Metric | Value |
 |--------|-------|
 | Stage 1 alone (test n=104,242) | AUROC=0.7215, recall=0.352, precision=0.431 |
-| Stage 2 alone (flagged+noted, n=9,899, 59.6% decided coverage of flagged) | AUROC=0.622, recall=0.974, precision=0.437 |
+| Stage 2 alone (flagged+noted, n=9,899, 59.6% decided coverage of flagged) | AUROC=0.622, recall=0.987, precision=0.434 |
 | Pipeline, full cohort (n=104,242, blanket Stage 3, C9 fallback applied) | precision=0.439 [0.423, 0.459], recall=0.324 [0.305, 0.345], F1=0.373, F2=0.342 |
 | Pipeline, notes cohort only (n=97,929) | precision=0.441, recall=0.215 |
 | Control arm (Stage 1 alone @ matched 14.0% alert rate, 14,638 alerts) | precision=0.444 [0.427, 0.463], recall=0.328 [0.309, 0.349], F1=0.377, F2=0.346 |
 | Conditional triggering (discordant-only, post-hoc; 5,268/9,899 LLM calls, 4,631 saved) | precision=0.437 [0.422, 0.456], recall=0.336 [0.317, 0.356], F1=0.380, F2=0.352 |
 | Secondary policy (withdraw only if decision_model AND decision_rule both override; 545 alerts withdrawn) | precision=0.432 [0.416, 0.451], recall=0.341 [0.322, 0.362]; its matched control precision=0.436 [0.420, 0.454], recall=0.344 [0.326, 0.365] |
 
-**Headline RQ2 result: at matched alert volume, adding the full three-stage
-cascade does not improve screening over Stage 1 alone.** In the rerun, Stage 1
-alone (the control arm) is nominally ahead on both precision (0.444 vs. 0.439)
-and recall (0.328 vs. 0.324), but both gaps are small and the independent 95%
-CIs overlap on both metrics — the control arm's recall CI [0.309, 0.349]
-straddles the pipeline's point estimate (0.324), so the clear recall gap seen
-in the old run is gone. Two overlapping independent CIs do not by themselves
-settle whether the difference is real; the patient-level **paired** bootstrap
-of the pipeline-minus-control difference
-(`scripts/compare_pipeline_control_paired.py` →
-`models/pipeline_paired_differences.json`, generated on the cluster where the
-per-admission data lives) is the proper test, and should be read as the
-arbiter of significance. Either way the conclusion is the same in direction:
-applying Stage 3 to every flagged admission buys no measurable screening gain
-over simply tightening Stage 1's threshold to the same alert budget.
+**Headline RQ3 result: at matched alert volume, adding the full three-stage
+cascade does not improve screening over Stage 1 alone — and significantly
+lowers precision.** The proper test is the patient-level **paired** bootstrap
+of the pipeline-minus-control difference (`compare_pipeline_control_paired.py`
+→ `models/pipeline_paired_differences.json`; same 1000-resample, seed-42,
+patient-cluster scheme as the rest of the project). It gives, for the full
+pipeline minus its matched control (14,638 alerts):
+
+- **Precision difference −0.0048, 95% CI [−0.0085, −0.0015]** — excludes zero,
+  so the cascade's precision is significantly *below* Stage 1 alone (by about
+  half a percentage point).
+- **Recall difference −0.0035, 95% CI [−0.0076, +0.0003]** — includes zero, so
+  recall is statistically unchanged.
+
+So the cascade is net slightly harmful at matched volume: it significantly
+reduces precision and leaves recall unchanged. (The paired test is tighter
+than the two independent CIs in the table above, which overlap; the paired CI
+is the one that settles significance.) Applying Stage 3 to every flagged
+admission buys no screening gain over simply tightening Stage 1's threshold to
+the same alert budget. The secondary both-override policy is likewise
+significantly below its own matched control on both precision (Δ −0.0031, CI
+[−0.0051, −0.0010]) and recall (Δ −0.0025, CI [−0.0050, −0.0002]); the
+conditional discordant-only policy is statistically indistinguishable from its
+matched control on both (precision Δ −0.0026, CI [−0.0055, +0.0001]; recall Δ
+−0.0020, CI [−0.0049, +0.0008]).
 
 The **conditional-triggering** analysis (`scripts/analyze_discordance_subgroups.py`)
 re-scores the same completed run under a different rule: a CONCORDANT
@@ -377,7 +403,7 @@ its own prediction). `src/stage3/batch.py:run_batch_audit` produced Stage 3
 decisions across every Stage 1-flagged, note-covered admission (rerun
 merged 2026-11-21, 9,899/9,899, 19 LLM annotation failures = 0.19%, plus
 219 `insufficient_evidence`) — see "Stage 1+2+3 — Combined pipeline" above
-for the real RQ2 result this made possible.
+for the real RQ3 result this made possible.
 
 ### Does Stage 3's `planned_return` agree with the structured-data proxy?
 
@@ -407,13 +433,24 @@ so this is reported as an open, unresolved discrepancy between the two
 signals, not evidence that either one is simply wrong. See
 `models/planned_return_crosscheck.json`.
 
-### Is Stage 3 actually using its inputs? Three validation controls (2026-10-30)
+### RQ2 — Auditor design, and whether it behaves as intended
 
-Session 19 built three diagnostic controls to test whether the auditor
-genuinely relies on the evidence it is given, rather than ignoring part
-of it. They had never been run against the real model until
-`scripts/run_validation_controls.py` executed all three on KISSKI
-(`models/stage3_validation_controls_summary.json`).
+RQ2 asks **how an LLM auditor can be designed to meet core requirements of
+clinical deployment** — local processing of patient data, reproducible
+decisions, verifiable evidence, and the option to abstain — and then checks,
+from the full run and from validation controls, whether it does so.
+
+**Decision profile (full run, `models/stage3_run_summary.json`).** Of the
+9,899 audited admissions: **8,095 uphold, 1,566 override, 219
+`insufficient_evidence`** (abstentions), 19 invalid answers, and 0
+preparation failures. The model's own decision matched the code-recomputed
+rule-based decision on **88.5%** of the 9,661 decided admissions, and
+**93.1%** of decided admissions had every cited quote verified against the
+note. 795 audited notes (8.0%) were shown head+tail-truncated. Of the 9,899
+raw answers, 11 were unparseable and 2 had a field out of the
+schema-enforced order (`named_caregiver_quote`, `planned_return`); 7
+generation batches hit CUDA out-of-memory and were retried one admission at
+a time.
 
 > **Data-handling note (MIMIC-IV-Note DUA).**
 > `stage3_validation_controls_summary.json` must be committed **without** its
@@ -427,35 +464,27 @@ of it. They had never been run against the real model until
 > exposure assessed) — it is flagged here deliberately and **not** rewritten by
 > this change set.
 
-**Blind-note control (n=150):** withholds the discharge note entirely.
-The auditor returned `insufficient_evidence` on **150 of 150**
-admissions. On the same 150 admissions with the note present, the real
-run never used `insufficient_evidence` once (104 uphold, 46 override).
-Raw agreement with the real decision is 0%, and that is the intended
-result, not a failure: the auditor does not guess uphold or override
-when it has nothing to read. It consistently recognizes the absence of
-evidence and says so. This is the strongest available evidence that
-Stage 3's real decisions are grounded in the note itself.
+**Validation controls — pending (validation job).** Whether the auditor
+genuinely relies on its inputs is tested with **four control arms on a fixed
+random sample of 150 admissions**, all run through the same batched
+procedure (batches of four, in sample order) as the full audit: a
+*reference arm* (unchanged inputs), a *repeated reference arm* (the same
+inputs a second time — tests whether identical inputs yield identical
+decisions), a *note-withheld arm* (summary and attention sentences removed —
+the auditor is then expected to abstain), and a *Stage-2-withheld arm*
+(Stage 2 score and the disagreement block removed). An **acceptance arm
+test** re-audits the first 8 admissions in their original batch grouping and
+the arms run only if all eight decisions match; a **batch-size check**
+re-audits the first 20 admissions one at a time to quantify how much
+batching moves decisions. **Results are pending (validation job).**
 
-**No-Stage-2 control (n=40):** withholds Stage 2's score and the
-discordance signal, note still present. Agreement with the real
-decision is 82.5%; removing Stage 2's evidence flips the decision on 7
-of 40 admissions, shifting toward more upholds (27→30 uphold, 13→10
-override). Stage 2's score measurably influences the audit without
-dominating it.
-
-**Self-agreement control (n=30):** runs the identical patient through
-Stage 3 twice. Agreement is 100% on both `decision_model` and
-`decision_rule` across all 30 admissions. `temperature=0` delivers a
-fixed, reproducible decision in practice, not just in principle, which
-the full RQ2 result (a single run across 9,899 admissions) depends on.
-
-**Taken together**, the net-harmful RQ2 finding is not an artifact of a
-broken or inattentive auditor. Stage 3 demonstrably reads the note,
-demonstrably uses Stage 2's evidence, and is demonstrably reproducible,
-and it still underperforms Stage 1 alone at matched alert volume. That
-is a materially stronger claim than an unvalidated negative result would
-have been.
+**Taken together (so far):** the full-run decision profile — high
+model/rule agreement, a high quote-verified share, and a non-trivial
+abstention rate — is consistent with an attentive, evidence-grounded
+auditor, but the input-reliance controls that would confirm it
+(note-withheld, Stage-2-withheld, repeated-reference) are **pending
+(validation job)**. The RQ3 finding below stands on the full run regardless:
+the cascade does not improve on Stage 1 alone at matched alert volume.
 
 ## Changes between the old run and the rerun
 
@@ -490,7 +519,7 @@ old run was defensible, but its numbers on these axes are not comparable):
   infusions, clinic appointments and lab checks no longer count as planned
   returns. The old run used a broader reading, so its `planned_return` rate
   is not comparable to the rerun's.
-- A secondary alert-withdrawal policy was added to the RQ2 reporting: an
+- A secondary alert-withdrawal policy was added to the RQ3 reporting: an
   alert is withdrawn only when the model's own decision **and** the
   rule-recomputed decision both say `override`, with its own alert-volume-
   matched Stage 1 control arm. The primary single-chain policy is unchanged;
@@ -533,7 +562,7 @@ bit-for-bit reproducible.
 - Trained and evaluated on MIMIC-IV only (single US academic medical center)
 - Temporal and demographic generalization not validated
 - Not intended for real-time clinical use
-- **Population scope.** RQ1 and RQ2 are evaluated on the notes-covered
+- **Population scope.** RQ1–RQ3 are evaluated on the notes-covered
   subset of Stage 1's test partition, which is demographically distinct
   from the excluded subset: older, sicker, and far more often an
   emergency admission (see "Selection bias" above). The readmission
@@ -564,7 +593,7 @@ bit-for-bit reproducible.
   `docs/ARCHITECTURE.md` §6 for the full disclosure and why this
   operationalization was still chosen.
 - **A model-scale robustness check (does a larger auditor change the
-  RQ2 result?) was considered and explicitly not pursued** — it would
+  RQ3 result?) was considered and explicitly not pursued** — it would
   require a second full Stage 3 batch run, and the original run took
   six days of cluster wall-clock time. Not affordable within this
   thesis's timeline; recorded as a closed decision, not an oversight

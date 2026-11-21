@@ -18,7 +18,7 @@ corrected age-group oversampling + 4096-token window. Supersedes a
 2026-08-28.
 
 **`pipeline_evaluation.json`** (added 2026-10-08, rerun merged
-2026-11-21) — the real RQ1/RQ2 result: Stage 1 alone, Stage 2 alone,
+2026-11-21) — the real RQ1 + RQ3 result: Stage 1 alone, Stage 2 alone,
 full pipeline, control arm, the conditional-triggering post-hoc
 analysis, and the secondary both-override policy, all from the completed
 full Stage 3 batch rerun (2026-11-21, all 9,899 flagged+noted
@@ -33,7 +33,7 @@ the full writeup.
 
 **`selection_bias_evaluation.json`** (added 2026-10-26) — does the
 ~60% of Stage 1's test partition with a discharge note (the population
-RQ1/RQ2 are evaluated on) differ systematically from the ~40% without
+RQ1–RQ3 are evaluated on) differ systematically from the ~40% without
 one? Yes, demographically: the notes-covered group is older, sicker,
 and far more often an emergency admission. No, in outcome rate: the
 readmission rate itself is nearly balanced between the two groups
@@ -52,23 +52,22 @@ planned. Reported as an open, unresolved discrepancy, not evidence
 either signal is simply wrong. See `MODEL_CARD.md`'s `planned_return`
 section.
 
-**`stage3_validation_controls_summary.json`** (added 2026-10-30) — the
-D1/D2/D3 robustness controls testing whether Stage 3 actually uses its
-inputs, long open since session 19 (2026-08-28) and finally executed
-this week. Blind-note control: the auditor answered
-"insufficient_evidence" on 150/150 admissions with the note withheld,
-versus 0/150 in the real run — the strongest available evidence the
-auditor is genuinely grounded in the note. No-Stage-2 control: 82.5%
-decision agreement. Self-agreement at `temperature=0`: 100% across two
-independent runs of every admission. See `MODEL_CARD.md`'s "Is Stage 3
-actually using its inputs?" section for the full writeup.
+**`stage3_validation_controls_summary.json`** (RQ2) — the robustness
+controls testing whether Stage 3 actually uses its inputs: four control
+arms on 150 admissions (reference, repeated reference, note-withheld,
+Stage-2-withheld), an acceptance arm test (first 8) and a batch-size check
+(first 20, one at a time). **Results pending (validation job).** Must be
+committed **without** its `sample_hadm_ids` list (MIMIC-IV-Note DUA — no
+admission identifiers in tracked files); run
+`python -m scripts.check_results_no_identifiers` on it before committing.
+See `MODEL_CARD.md`'s RQ2 section.
 
 **`discordance_sensitivity.json`** (added 2026-10-08) — the
 `±10pp`–`±30pp` sweep of the discordance-mode threshold over the real,
 completed Stage 3 run.
 
 **`discordance_subgroup_evaluation.json`** (added 2026-10-08) — the
-direct follow-up test the headline RQ2 result alone doesn't answer: Stage
+direct follow-up test the headline RQ3 result alone doesn't answer: Stage
 3's real decision vs. "Stage 1's flag stands," computed separately within
 the concordant and discordant subgroups. By F2, Stage 3 underperforms
 Stage 1 alone in **both** subgroups, more so on discordant cases — see
