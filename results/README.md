@@ -17,17 +17,19 @@ corrected age-group oversampling + 4096-token window. Supersedes a
 2026-08-01 pre-fairness-rebuild snapshot that was removed as stale
 2026-08-28.
 
-**`pipeline_evaluation.json`** (added 2026-10-08, updated 2026-10-26) —
-the real RQ1/RQ2 result: Stage 1 alone, Stage 2 alone, full pipeline,
-control arm, and the conditional-triggering post-hoc analysis, all from
-the completed full Stage 3 batch run (2026-10-06, all 9,899
-flagged+noted admissions). The headline: at matched alert volume, Stage
-1 alone beats the full cascade. The 2026-10-26 update added bootstrap
-confidence intervals to the `notes_cohort` and `conditional_triggering`
-arms (previously only `full_cohort` and `control_arm` had them) — fixed
-alongside a real O(n²)-ish performance bug in `src/model/bootstrap.py`
-that made this computation impractically slow before the fix. See
-`MODEL_CARD.md` for the full writeup.
+**`pipeline_evaluation.json`** (added 2026-10-08, rerun merged
+2026-11-21) — the real RQ1/RQ2 result: Stage 1 alone, Stage 2 alone,
+full pipeline, control arm, the conditional-triggering post-hoc
+analysis, and the secondary both-override policy, all from the completed
+full Stage 3 batch rerun (2026-11-21, all 9,899 flagged+noted
+admissions). The headline: at matched alert volume, adding the full
+cascade does not improve on Stage 1 alone — in the rerun Stage 1 is
+nominally ahead on precision (0.444 vs 0.439) and recall (0.328 vs
+0.324) but the 95% CIs overlap on both, so the clear recall gap seen in
+the old run is gone. The paired pipeline-minus-control difference test
+lives in `pipeline_paired_differences.json`
+(`scripts/compare_pipeline_control_paired.py`). See `MODEL_CARD.md` for
+the full writeup.
 
 **`selection_bias_evaluation.json`** (added 2026-10-26) — does the
 ~60% of Stage 1's test partition with a discharge note (the population
@@ -38,14 +40,17 @@ readmission rate itself is nearly balanced between the two groups
 (SMD=0.053, below the conventional 0.1 imbalance threshold). See
 `MODEL_CARD.md`'s "Selection bias" section.
 
-**`planned_return_crosscheck.json`** (added 2026-10-26) — does Stage
-3's note-derived `planned_return` field agree with the structured,
-`admission_type`-based "unplanned" proxy? Not reassuringly: 81.7% raw
-agreement is actually *below* the 95.8% a trivial "always predict
-unplanned" baseline would score, since Stage 3 calls "planned" 4.5x
-more often than the structured data supports. Reported as an open,
-unresolved discrepancy, not evidence either signal is simply wrong. See
-`MODEL_CARD.md`'s `planned_return` section.
+**`planned_return_crosscheck.json`** (added 2026-10-26, rerun
+2026-11-21) — does Stage 3's note-derived `planned_return` field agree
+with the structured, `admission_type`-based "unplanned" proxy? Not
+reassuringly: 93.4% raw agreement is still *below* the 95.8% a trivial
+"always predict unplanned" baseline would score. In the rerun the
+tighter `planned_return` definition brings the LLM's "planned" rate onto
+the structured proxy's (4.2% vs 4.2%, down from 19.2% vs 4.2% in the old
+run), but the two still disagree substantially on *which* admissions are
+planned. Reported as an open, unresolved discrepancy, not evidence
+either signal is simply wrong. See `MODEL_CARD.md`'s `planned_return`
+section.
 
 **`stage3_validation_controls_summary.json`** (added 2026-10-30) — the
 D1/D2/D3 robustness controls testing whether Stage 3 actually uses its
