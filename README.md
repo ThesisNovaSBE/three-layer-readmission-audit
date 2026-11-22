@@ -316,9 +316,6 @@ The dashboard has two views:
 
 ## Pipeline
 
-Purely the technical data flow, with no research framing. See "The Idea"
-above for that.
-
 ```mermaid
 flowchart LR
     STRUCT[/"Structured EHR data"/]:::input --> S1("Stage 1: Screen<br/>XGBoost"):::s1
