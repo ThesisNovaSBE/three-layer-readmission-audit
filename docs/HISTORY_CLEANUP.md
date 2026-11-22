@@ -1,6 +1,17 @@
 # Git history cleanup — removing admission identifiers and the maintainer email
 
-**Status: prepared, NOT yet run.** This document is the runbook for scrubbing
+> **Status: EXECUTED 2026-11-22.** The history was rewritten with
+> `git filter-repo` (33 admission identifiers → `<hadm_id>`, plus the
+> maintainer's email → `<email-removed>`) and the cleaned history was pushed to
+> a **new** repository under the old name. The old repository was renamed to
+> `…-private` and kept private (it still carries the pre-rewrite commits, which
+> remain reachable by SHA and via its 30 `refs/pull/*` refs — which is exactly
+> why a fresh repo was used instead of a force-push). **Every collaborator must
+> delete any clone made before 2026-11-22 and clone again; never `git push`
+> from a pre-2026-11-22 clone** (it would re-introduce the identifiers). The
+> runbook below is retained as the record of what was done.
+
+**Status: prepared, now run (2026-11-22).** This document is the runbook for scrubbing
 MIMIC-IV admission identifiers (`hadm_id`) that were committed to git history in
 earlier commits (e.g. an old `results/stage3_validation_controls_summary.json`
 that carried a 30-identifier sample list, and a few IDs in session notes / a

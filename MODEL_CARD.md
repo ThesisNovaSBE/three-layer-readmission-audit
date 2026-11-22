@@ -38,7 +38,7 @@
 
 - MIMIC-IV v3.1 (structured tables) — credentialed access via PhysioNet
 - MIMIC-IV-Note (discharge summaries) — credentialed access via PhysioNet
-- Population: Adult patients (age >= 18), excluding in-hospital deaths and elective readmissions
+- Population: Adult patients (age >= 18). In-hospital deaths and elective *index* admissions are excluded from the cohort; and a *next* admission that is elective or same-day surgical counts as a **planned return, not an unplanned readmission** — the model's target is `readmission_30d_unplanned` (`src/data/features.py`: cohort filter at `exclude_in_hospital_death`/`exclude_elective`, label at `compute_readmission_label`)
 
 ## Metrics
 
@@ -76,7 +76,7 @@ Subgroup AUROC (fairness): Female=0.718 (n=54,512, pos_rate=17.7%),
 Male=0.724 (n=49,730, pos_rate=20.5%) — near-equal. Age: 18–40=0.750,
 41–55=0.737, 56–70=0.728, **70+=0.665** — elderly patients are
 meaningfully harder to predict, and their recall at the primary operating
-point is only 19.0% vs. 35–45% for the other three bands. This is the
+point is only 19.0% vs. 37.6–44.7% for the other three bands. This is the
 documented "v1 recall gap" that Stage 2's age-group oversampling exists to
 address — see `config.yaml`'s `stage2.age_group_train_targets` comment.
 
@@ -85,11 +85,12 @@ The isotonic calibrator has **47 distinct output levels at or above the
 0.3235` on the calibrator in `models/stage1_xgboost.joblib`]. It is **not** a
 47-value step function, though: scikit-learn's `IsotonicRegression`
 interpolates linearly between those levels (`out_of_bounds="clip"`), so the
-calibrated scores at or above 0.3235 actually take **51 distinct values on
+calibrated scores at or above 0.3235 actually take **~51 distinct values on
 the out-of-fold training predictions** [recomputed with
-`src.model.cv.oof_predict` using the stored params/seed/3 folds then
-`fit_isotonic_calibrator` — CPU reproduction, so *(approximate: the original
-folds trained on cuda)*] and **58 distinct values on the held-out test
+`src.model.cv.oof_predict` using the stored params/seed and 5-fold grouped CV
+(the final model's `cv_folds` in full mode) then `fit_isotonic_calibrator` —
+approximate CPU reproduction (the original folds trained on cuda)] and
+**58 distinct values on the held-out test
 partition** [`apply_calibration` over `artifact["test_idx"]`]. The scores are
 nonetheless heavily tied: on the test partition the **largest group of
 flagged admissions sharing a single calibrated score is 2,535** (all at
@@ -251,30 +252,29 @@ labelled old, in "Changes between the old run and the rerun".
 | Secondary policy (withdraw only if decision_model AND decision_rule both override; 545 alerts withdrawn) | precision=0.432 [0.416, 0.451], recall=0.341 [0.322, 0.362]; its matched control precision=0.436 [0.420, 0.454], recall=0.344 [0.326, 0.365] |
 
 **Headline RQ3 result: at matched alert volume, adding the full three-stage
-cascade does not improve screening over Stage 1 alone — and significantly
-lowers precision.** The proper test is the patient-level **paired** bootstrap
-of the pipeline-minus-control difference (`compare_pipeline_control_paired.py`
-→ `models/pipeline_paired_differences.json`; same 1000-resample, seed-42,
+cascade does not improve screening over Stage 1 alone — its precision is
+lower.** The proper test is the patient-level **paired** bootstrap of the
+pipeline-minus-control difference (`compare_pipeline_control_paired.py` →
+`models/pipeline_paired_differences.json`; same 1000-resample, seed-42,
 patient-cluster scheme as the rest of the project). It gives, for the full
 pipeline minus its matched control (14,638 alerts):
 
-- **Precision difference −0.0048, 95% CI [−0.0085, −0.0015]** — excludes zero,
-  so the cascade's precision is significantly *below* Stage 1 alone (by about
-  half a percentage point).
-- **Recall difference −0.0035, 95% CI [−0.0076, +0.0003]** — includes zero, so
-  recall is statistically unchanged.
+- **Precision difference −0.0048, 95% CI [−0.0085, −0.0015]** — the interval
+  excludes zero, so the cascade's precision is lower than Stage 1 alone (by
+  about half a percentage point).
+- **Recall difference −0.0035, 95% CI [−0.0076, +0.0003]** — the interval
+  includes zero.
 
-So the cascade is net slightly harmful at matched volume: it significantly
-reduces precision and leaves recall unchanged. (The paired test is tighter
-than the two independent CIs in the table above, which overlap; the paired CI
-is the one that settles significance.) Applying Stage 3 to every flagged
-admission buys no screening gain over simply tightening Stage 1's threshold to
-the same alert budget. The secondary both-override policy is likewise
-significantly below its own matched control on both precision (Δ −0.0031, CI
-[−0.0051, −0.0010]) and recall (Δ −0.0025, CI [−0.0050, −0.0002]); the
-conditional discordant-only policy is statistically indistinguishable from its
-matched control on both (precision Δ −0.0026, CI [−0.0055, +0.0001]; recall Δ
-−0.0020, CI [−0.0049, +0.0008]).
+So at matched volume the cascade's precision is lower and its recall difference
+is within interval noise. (The paired CI is tighter than the two independent
+CIs in the table above, which overlap, and is the one to read for the
+difference.) Applying Stage 3 to every flagged admission buys no screening gain
+over simply tightening Stage 1's threshold to the same alert budget. The
+secondary both-override policy is likewise below its own matched control on both
+precision (Δ −0.0031, CI [−0.0051, −0.0010], excludes zero) and recall
+(Δ −0.0025, CI [−0.0050, −0.0002], excludes zero); the conditional
+discordant-only policy's differences both include zero (precision Δ −0.0026, CI
+[−0.0055, +0.0001]; recall Δ −0.0020, CI [−0.0049, +0.0008]).
 
 The **conditional-triggering** analysis (`scripts/analyze_discordance_subgroups.py`)
 re-scores the same completed run under a different rule: a CONCORDANT
@@ -304,8 +304,9 @@ picture (95% CIs, patient-clustered bootstrap):
 | Discordant (n=5,144) | Stage 1 alone | 0.412 [0.395, 0.428] | 1.000 | 0.778 |
 | | Stage 3's decision | 0.430 [0.413, 0.448] | 0.844 [0.823, 0.865] | **0.708** |
 
-By F2 (weights recall 4x precision — appropriate here since a missed
-readmission is costlier than a false alarm), **Stage 3 still makes things
+By F2 (β=2, which treats recall as twice as important as precision —
+appropriate here since a missed readmission is costlier than a false alarm),
+**Stage 3 still makes things
 worse in both subgroups, but the drop is much smaller than in the old run
 and is now larger on discordant cases (−0.070) than concordant (−0.056)** —
 recall falls further there (16 points vs. 11 points) and F2 punishes that
@@ -344,13 +345,15 @@ on MIMIC-IV-style reasoning; see `sessions/2026-09-13_session-23.md` and
 `config.yaml`'s `stage3.model_name` comment for the full model comparison
 and license check. Available both on-demand (one patient per call, via the
 API) and in batch (`src/stage3/batch.py`, every Stage 1-flagged,
-note-covered admission) — the full batch run completed 2026-10-06 across
-all 9,899 flagged+noted admissions. For each patient, the model receives:
+note-covered admission) — the full batch run (rerun merged 2026-11-21)
+covered all 9,899 flagged+noted admissions. For each patient, the model receives:
 - Stage 1's score + top-k SHAP-ranked structured risk factors
 - Stage 2's independently-derived, note-based score
 - A quantitatively pre-computed discordance mode (never chosen by the LLM)
-- The discharge note itself (near-full text, ~20,000-char safety cap — not a
-  5-sentence attention summary)
+- The discharge note itself: shown in full up to 20,000 characters; a longer
+  note is shown as its first 12,000 and last 8,000 characters with the middle
+  omitted (`src/stage3/_notecap.py`) — not a 5-sentence attention summary. 795
+  of the audited summaries (8.0%) exceeded the cap (`stage3_run_summary.json`).
 
 The model reaches its **own** independent decision — it is not asked to
 narrate or classify a decision Stage 2 already made.
@@ -453,16 +456,13 @@ generation batches hit CUDA out-of-memory and were retried one admission at
 a time.
 
 > **Data-handling note (MIMIC-IV-Note DUA).**
-> `stage3_validation_controls_summary.json` must be committed **without** its
-> `sample_hadm_ids` list — no admission identifiers may appear in any
-> git-tracked file. Run
-> `python -m scripts.check_results_no_identifiers <file>` before committing it;
-> that guard rejects the file while the list is present.
-> **Already in git history:** the committed
-> `results/stage3_validation_controls_summary.json` currently contains 30
-> `sample_hadm_ids`. This needs to be scrubbed from the tracked copy (and the
-> exposure assessed) — it is flagged here deliberately and **not** rewritten by
-> this change set.
+> `stage3_validation_controls_summary.json` is committed **without** any
+> `sample_hadm_ids` — no admission identifiers appear in any git-tracked file.
+> The 30 sample identifiers that an earlier committed copy carried were removed,
+> and the git history was rewritten on 22 Nov 2026 to purge them from all past
+> commits (see `docs/HISTORY_CLEANUP.md`). Run
+> `python -m scripts.check_results_no_identifiers <file>` before committing any
+> result file; the guard rejects a file while identifiers are present.
 
 **Validation controls (n=150, `stage3_validation_controls_summary.json`).**
 Whether the auditor genuinely relies on its inputs was tested with **four
@@ -592,7 +592,7 @@ bit-for-bit reproducible.
   not empirically validated against any ground truth before being used
   as the reporting default.** A sensitivity sweep (±10pp–±30pp) shows
   the CONCORDANT/discordant split is meaningfully sensitive to this
-  choice (CONCORDANT ranges 27.0%–65.2% across the range swept) — see
+  choice (CONCORDANT ranges 26.1%–63.5% across the range swept) — see
   `docs/ARCHITECTURE.md` §4.
 - **Stage 3's note-derived `planned_return` field disagrees with the
   structured-data proxy more than chance would predict**, and the
@@ -611,12 +611,19 @@ bit-for-bit reproducible.
   six days of cluster wall-clock time. Not affordable within this
   thesis's timeline; recorded as a closed decision, not an oversight
   (`docs/ARCHITECTURE.md` §5).
-- Stage 1's decision threshold is selected on the same out-of-fold data
-  used for early stopping — a mild contamination risk, flagged once,
-  never revisited.
+- Stage 1's decision threshold (top-15% capacity) and its isotonic
+  calibrator are both fit on the **same out-of-fold predictions** from the
+  5-fold patient-grouped CV over the training partition; the final model's
+  early stopping uses a **separate** 15% patient-grouped hold-out of the
+  training partition. The threshold therefore never sees the held-out test
+  set (no test leakage). The only residual risk is that the out-of-fold
+  predictions come from the per-fold models, not the exact final
+  full-training model that is deployed — so the chosen threshold and
+  calibration are tuned on slightly different models than the one shipped.
 - Truncation asymmetry between Stage 2 (4096-token window) and Stage 3
-  (20,000-character safety cap) is much smaller than in earlier designs
-  but not eliminated for pathologically long notes.
+  (20,000-character cap; a longer note shown as its first 12,000 + last 8,000
+  characters, middle omitted) is much smaller than in earlier designs but not
+  eliminated for pathologically long notes.
 - **The old Stage 3 run's SHAP evidence was gain-based, not per-patient.**
   The KISSKI `thesis-env` runs Python 3.11.9, numpy 2.3.5, xgboost 3.2.0,
   transformers 4.57.6 (plus the torch and `lm-format-enforcer` versions

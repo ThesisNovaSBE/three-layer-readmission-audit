@@ -12,7 +12,7 @@ Ask whether a language model can **improve 30-day readmission screening by revie
 
 1. A classical ML model flags high-risk patients from **structured** MIMIC-IV data at a deployable, capacity-constrained operating point.
 2. A fine-tuned clinical encoder reads the **clinical notes** (MIMIC-IV-Note) of flagged patients and produces an independent, note-only risk estimate — used to measure disagreement with Stage 1 (RQ1) and as a second input to the auditor, not as a competing predictor.
-3. A reasoning LLM (MedGemma-27B-text-it, local via HF transformers) audits each flagged case — reading both scores and the note — and makes its own uphold / override / insufficient-evidence decision with a clinical justification. Full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21).
+3. An instruction-tuned medical language model (MedGemma-27B-text-it, run locally via HF transformers) audits each flagged case — reviewing both scores and the note — and makes its own uphold / override / insufficient-evidence decision with a clinical justification. Full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21).
 
 See `docs/ARCHITECTURE.md` for the full design and rationale.
 
@@ -24,7 +24,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 ### Stage 1 — XGBoost (structured screen) — IMPLEMENTED
 
 - Models: Logistic Regression, XGBoost, HistGradientBoosting (selectable via `config.yaml`)
-- Input: ~40 structured EHR features from MIMIC-IV (demographics, index-admission traits, prior utilisation, Charlson comorbidity index, last + aggregate labs, last vitals)
+- Input: 55 structured EHR features from MIMIC-IV (17 base — demographics, index-admission traits, prior utilisation, Charlson comorbidity index — plus 8 labs × 4 aggregates and 6 last-value vitals)
 - **Operating point: capacity-constrained (primary, since 2026-08-25)** — flags the top `capacity_k` (default 15%) of admissions by risk score. Recall-floor (`recall >= 0.85`) kept as a secondary table for literature comparability; it alone flagged 66.94% of admissions, which is not a deployable triage.
 - Imbalance: `scale_pos_weight` / `class_weight="balanced"`
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC)
@@ -45,12 +45,12 @@ Full design detail (and what's implemented vs. still pending) lives in
 ### Stage 3 — Independent LLM Auditor — full run (rerun merged 2026-11-21)
 
 - Model: `google/medgemma-27b-text-it`, served locally via HF `transformers.generate()` + `lm-format-enforcer` (guided JSON decoding), `temperature=0` (pinned for reproducibility). Switched from Ollama/phi4-mini 2026-09-10 (batch run moved to cluster GPU hardware) and from vLLM 2026-09-15 (KISSKI's CUDA 12.8 driver ceiling proved incompatible with vLLM's kernel stack) — see `sessions/` for the full diagnosis.
-- Input per patient: Stage 1 score + SHAP-ranked reasons, Stage 2 score, near-full discharge note text, and a pre-computed (not LLM-chosen) discordance mode
+- Input per patient: Stage 1 score + SHAP-ranked reasons, Stage 2 score, the discharge note (shown in full up to 20,000 characters; a longer note as its first 12,000 + last 8,000 characters with the middle omitted, `src/stage3/_notecap.py`; 795 / 8.0% exceeded the cap), and a pre-computed (not LLM-chosen) discordance mode
 - **MedGemma reaches its own independent `uphold`/`override`/`insufficient_evidence` decision** — it does not narrate or classify a decision Stage 2 already made
 - Discordance mode (`CONCORDANT` / `NOTE_MITIGATES` / `NOTE_AMPLIFIES`) is computed quantitatively from percentile-rank displacement of stage1_score vs. stage2_score within the flagged+noted cohort (`src/stage3/discordance.py:compute_discordance`) — not raw score subtraction, and never an LLM choice
 - Two-sided grounds taxonomy, each cited ground requiring its own verified quote: mitigating (`palliative_intent`, `planned_return`, `structured_driver_contradicted`, plus code-derived `strong_discharge_support`) and aggravating (`lives_alone_no_support`, `no_followup_arranged`, `functional_dependence`, `cognitive_impairment`, `nonadherence_risk`, `unstable_at_discharge`) — see `MODEL_CARD.md` for full definitions
 - `decision_rule`: a second, code-computed decision from quote-verified grounds only — a consistency check the model can't fabricate its way past
-- Available both on-demand (per-patient, via the API) and in batch (`src/stage3/batch.py`) — the full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21). **Real RQ3 result:** at matched alert volume the audited pipeline does not improve on Stage 1 alone — a paired bootstrap shows significantly lower precision (Δ −0.0048, 95% CI [−0.0085, −0.0015]) and statistically unchanged recall (Δ −0.0035, 95% CI [−0.0076, +0.0003]); see `MODEL_CARD.md` and `models/pipeline_paired_differences.json`.
+- Available both on-demand (per-patient, via the API) and in batch (`src/stage3/batch.py`) — the full batch run across all 9,899 flagged+noted admissions (rerun merged 2026-11-21). **Real RQ3 result:** at matched alert volume the audited pipeline does not improve on Stage 1 alone — a paired bootstrap gives a precision difference of −0.0048 (95% CI [−0.0085, −0.0015], excludes zero) and a recall difference of −0.0035 (95% CI [−0.0076, +0.0003], includes zero); see `MODEL_CARD.md` and `models/pipeline_paired_differences.json`.
 - **RQ2 validation (done):** four control arms on 150 admissions confirm the auditor uses its inputs — note-withheld abstains 150/150, Stage-2-withheld agrees 89.3% with the reference arm, a repeated run agrees 100%, and the reference arm reproduces the main run on 145/150 (96.7%); acceptance arm test 8/8, batch-size check decision 100% / grounds 65% (`models/stage3_validation_controls_summary.json`, `models/batch_size_comparison.json`).
 - Key modules: `src/stage3/explain.py`, `src/stage3/discordance.py`, `src/stage3/pipeline.py`, `src/stage3/batch.py`, `src/stage3/models.py`, `src/stage3/attention.py` (optional auxiliary hint only), `src/stage3/shap_extract.py`
 
@@ -81,4 +81,4 @@ python -m src.model.evaluate         # AUPRC/AUROC + operating point + fairness
 - **Simplicity** — keep the architecture straightforward
 - **Small/local models** — no large cloud APIs in the pipeline
 - **Build it ourselves** — understand every component
-- **Code quality** — Pylint 10.00/10 enforced via `.pylintrc`; Pydantic v2 config validation throughout (`src/config_schema.py`)
+- **Code quality** — Pylint target 10.00 (`.pylintrc` `fail-under`); last repo-wide run 9.99/10. Pydantic v2 config validation throughout (`src/config_schema.py`)

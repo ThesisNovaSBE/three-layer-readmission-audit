@@ -31,9 +31,9 @@ alone at the **same number of alerts.**
    the discharge note, with no structured data at all, and produces its
    own risk estimate independently of the first model, never gated by
    its flag.
-3. **Audit:** a medical reasoning LLM acts like a senior doctor
-   double-checking the flagged cases. It reads both scores and the note,
-   then reaches its own uphold or override decision with a justification.
+3. **Audit:** an instruction-tuned medical language model, run locally,
+   reviews the flagged cases. It reads both scores and the note, then
+   reaches its own uphold or override decision with a justification.
 
 We benchmark every layer against the simpler option alone, **at the
 same number of alerts**, so "does more AI help" has an actual, falsifiable
@@ -45,7 +45,7 @@ MIMIC-IV access.
 
 ## Implementation at a Glance
 
-**Stage 1: XGBoost (structured screen).** Trained on 521,191 MIMIC-IV
+**Stage 1: XGBoost (structured screen).** Trained on the 416,949-admission training partition of a cohort of 521,191 MIMIC-IV
 structured admissions, flags the top-K% highest-risk admissions at a
 capacity-constrained operating point (default K=15%). Recall-floor is
 kept as a secondary comparison table.
@@ -58,8 +58,8 @@ flag. We built a jointly-trained structured-plus-note "FusionLongformer"
 variant and dropped it on 2026-08-26 without ever completing a training
 run. See `docs/ARCHITECTURE.md` §2 for why.
 
-**Stage 3: MedGemma-27B (independent auditor).** A local reasoning model,
-served via plain HF `transformers.generate()` with `lm-format-enforcer`
+**Stage 3: MedGemma-27B (independent auditor).** A local, instruction-tuned
+medical language model, served via plain HF `transformers.generate()` with `lm-format-enforcer`
 for guided, schema-constrained JSON decoding, temperature pinned at 0.
 Switched from Ollama/phi4-mini on 2026-09-10 once the batch run moved to
 cluster GPU hardware, then from vLLM on 2026-09-15 once KISSKI's CUDA
@@ -102,7 +102,7 @@ Recall-floor (secondary, for literature comparability): recall≥0.85 gives
 precision=0.247. Beats 3 of 4 published benchmarks cited in `evaluate.py`
 (LACE 0.694, Xiao 2018 0.715, Fraccaro 2016 0.684), behind Rajkomar 2018
 (0.773). Weakest subgroup is age 70+ (AUROC 0.665, recall only 19.0% vs.
-35–45% for other age bands). See `MODEL_CARD.md` for the full fairness
+37.6–44.7% for other age bands). See `MODEL_CARD.md` for the full fairness
 breakdown.
 
 ### Do the Structured and Note-Based Models Disagree on Individual Alerts? (RQ1)
@@ -123,7 +123,7 @@ both models can be fairly compared on).
 | Difference (Stage 2 − Stage 1) | +0.0009 [−0.0040, +0.0056] |
 
 The confidence interval crosses zero: on average, the discharge note
-carries no more, and no less, predictive signal than the roughly forty
+carries no more, and no less, predictive signal than the 55
 structured features alone.
 
 *Disagreement on individuals.* The average hides what matters for an
@@ -181,12 +181,16 @@ patient-level **paired** bootstrap of the pipeline-minus-control difference.
    full three-stage cascade is slightly *below* Stage 1 alone (the control
    arm): precision difference −0.0048 (95% CI [−0.0085, −0.0015], excludes
    zero) and recall difference −0.0035 (95% CI [−0.0076, +0.0003], includes
-   zero). The cascade significantly lowers precision and leaves recall
-   statistically unchanged — net slightly harmful, not beneficial.
+   zero). The cascade's precision is lower (the interval excludes zero) and the
+   recall difference's interval includes zero — a small net reduction, not a gain.
 2. **Conditional triggering (exploratory).** Running Stage 3 only on cases
-   where Stage 1 and Stage 2 disagree recovers recall against the blanket
-   run at no precision cost, using 4,631 fewer LLM calls (47%); versus its
-   own matched control the difference is not statistically distinguishable.
+   where Stage 1 and Stage 2 disagree recovers recall against the blanket run
+   using 4,631 fewer LLM calls (47%). But it raises more alerts (15,217 vs.
+   14,638) and its own precision (0.437) is a touch below the blanket run's
+   (0.439), so it should only be judged against its **own** matched control:
+   there its precision difference is −0.0026 (95% CI [−0.0055, +0.0001]) and its
+   recall difference −0.0020 (95% CI [−0.0049, +0.0008]) — both intervals
+   include zero.
 3. **The direct test (exploratory).** Comparing Stage 3's real decision
    against Stage 1's flag standing on its own, separately within agreeing
    and disagreeing cases, shows Stage 3 underperforms by F2 in both groups,
@@ -248,7 +252,7 @@ python -m src.stage3.pipeline <hadm_id>
 
 ## GPU / HPC Training (GWDG KISSKI)
 
-Stage 2 training on 249k notes requires a capable GPU. The reference setup uses the GWDG KISSKI cluster (A100 80GB) via `train_stage2.sh`:
+Stage 2 training requires a capable GPU. The final run trained on 141,767 discharge summaries (validation 49,855); the original per-age-group target was ~249k but was not reached. The reference setup uses the GWDG KISSKI cluster (A100 80GB) via `train_stage2.sh`:
 
 ```bash
 # On the cluster, submit the Slurm job
@@ -340,7 +344,7 @@ flowchart LR
 ├── PROJECT_TLDR.md              # Project context (read first)
 ├── MODEL_CARD.md                # Full model documentation + metrics
 ├── config.yaml                  # All configurable parameters
-├── .pylintrc                    # Pylint config (enforces 10.00/10)
+├── .pylintrc                    # Pylint config (target 10.00; last run 9.99)
 ├── setup_demo.py                # One-command demo (synthetic data)
 ├── setup_stage2.py              # Stage 2 fine-tuning runner
 │                                 # (Stage 3 has no setup script: on-demand only, src/stage3/pipeline.py)
@@ -387,7 +391,14 @@ flowchart LR
 │   ├── STAGE3_VALIDATION.md     # Human-annotator (Cohen's kappa) validation plan
 │   ├── THESIS_NARRATIVE.md      # Storytelling/framing guide for the thesis text
 │   └── archive/                 # Superseded planning docs, kept for history
-├── results/                     # Final, citable result snapshots (aggregate-only)
+├── results/                     # Curated, committed copy of thesis-relevant result JSONs (aggregate-only)
 ├── data/                        # LOCAL ONLY, gitignored
-└── models/                      # Trained artifacts, gitignored
+└── models/                      # Canonical pipeline outputs + trained artifacts (JSONs tracked, binaries gitignored)
 ```
+
+**Result files.** `models/*.json` are the **canonical** outputs the pipeline
+writes; `results/` is a **curated, committed copy** of the thesis-relevant
+subset (a stable, citable snapshot). Any file present in both folders is kept
+byte-identical (`tests/test_results_models_parity.py`). All Chapter 4 numbers
+are regenerated from these JSONs into `docs/THESIS_NUMBERS.md` by
+`scripts/export_thesis_numbers.py`, each tagged with its source file and key.

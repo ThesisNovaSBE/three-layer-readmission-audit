@@ -54,7 +54,7 @@ This matches the schema already drafted in `src/schemas.py` (`FEATURE_MATRIX_COL
 
 ### 2.3 Cohort & label (recap from config)
 
-- Adults (age ≥ 18); exclude in-hospital deaths; exclude elective readmissions from the positive label.
+- Adults (age ≥ 18); exclude in-hospital deaths and elective *index* admissions from the cohort; a *next* admission that is elective or same-day surgical counts as a planned return, not a positive (unplanned) readmission (`src/data/features.py`).
 - Label = 1 if the **same patient** has a subsequent qualifying admission within **30 days** of discharge; else 0.
 - One row per index admission.
 

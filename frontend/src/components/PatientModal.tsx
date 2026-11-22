@@ -298,7 +298,7 @@ function Stage3Section({
     return (
       <div className="bg-slate-50 rounded-xl p-6 flex flex-col items-center gap-3 text-center">
         <div className="w-6 h-6 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-slate-500">phi4-mini is reasoning…</p>
+        <p className="text-sm text-slate-500">MedGemma is reviewing…</p>
         <p className="text-xs text-slate-400">First call may take 15–30 s while the model loads.</p>
       </div>
     );
@@ -312,7 +312,7 @@ function Stage3Section({
         </p>
       )}
       <p className="text-sm text-slate-600">
-        Request an on-demand audit from phi4-mini. The model reasons over Stage 1's SHAP
+        Request an on-demand audit from MedGemma-27B. The model reviews Stage 1's SHAP
         features, Stage 2's independent note-based score, and the discharge note itself, then
         returns its own uphold/override decision with a quoted, verified justification.
       </p>
@@ -328,7 +328,7 @@ function Stage3Section({
         Request Explanation
       </button>
       <p className="text-xs text-slate-400 text-center">
-        Requires Ollama running locally with <code>phi4-mini</code> pulled.
+        Requires the MedGemma-27B weights available locally (served via HF transformers).
       </p>
     </div>
   );
@@ -425,7 +425,7 @@ export default function PatientModal({
                 Stage 3 — Clinical Audit
               </h3>
               <span className="text-xs text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-full">
-                phi4-mini
+                MedGemma-27B
               </span>
             </div>
             <Stage3Section hadmId={patient.hadm_id} artifactLoaded={artifactLoaded} />

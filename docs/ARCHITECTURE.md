@@ -1,7 +1,8 @@
 # Architecture — Current State
 
-**Last updated:** 2026-10-30 (session 34; §3 carries the most recent
-content). This is the single current source of
+**Last updated:** 2026-11-22 (reflects the Stage 3 rerun merged 2026-11-21 and
+the Chapter 4–6 documentation reconciliation; numbers trace to the committed
+JSONs via `docs/THESIS_NUMBERS.md`). This is the single current source of
 truth for the pipeline design. It supersedes `docs/archive/IMPLEMENTATION_PLAN.md`,
 `docs/THESIS_NARRATIVE.md`, and `docs/archive/SANITY_CHECK_2026-07-06.md` — the
 archived two are kept for history (each has a banner pointing here) but
@@ -40,7 +41,7 @@ See that session log for the full reasoning trail.
 
 ### Stage 1 — XGBoost (structured screen)
 
-- Input: ~40 structured MIMIC-IV features (demographics, admission traits,
+- Input: 55 structured MIMIC-IV features (demographics, admission traits,
   prior utilisation, Charlson comorbidity index, lab/vital aggregates).
 - Output: calibrated risk score.
 - **Operating point policy (changed 2026-08-25): capacity-constrained,
@@ -64,10 +65,11 @@ See that session log for the full reasoning trail.
 - **FusionLongformer (structured features + note, jointly trained) was
   designed, built, and reverted on 2026-08-26 without ever completing a
   training run.** `models/` never contained fusion weights — every evaluated
-  Stage 2 number that exists (`stage2_evaluation.json`, dated 2026-08-01) is
-  from the plain note-only model. Decision: drop fusion as a modeling target.
+  Stage 2 number is from the plain note-only model (the current
+  `stage2_evaluation.json` is the 2026-11 rerun of that model). Decision: drop
+  fusion as a modeling target.
   Reasons: (1) note-only is the cleaner independence story for Stage 3's
-  discordance measure — Stage 1 (~40 structured features) and Stage 2 (note
+  discordance measure — Stage 1 (55 structured features) and Stage 2 (note
   text, zero structured features) are unambiguously informationally
   independent, no caveating required; (2) it was never trained, so dropping
   it costs nothing already built, while training it for the first time would
@@ -97,8 +99,10 @@ with vLLM's flashinfer/CUTLASS kernels regardless of vLLM/torch version —
 see `config.yaml`'s `stage3.model_name` comment for the model/license
 comparison and `sessions/` for the full serving-mechanism diagnosis.
 Inputs: Stage 1's score + SHAP-ranked reasons,
-Stage 2's score, the discharge note itself (near-full text, not a 5-sentence
-attention summary), and a pre-computed discordance mode.
+Stage 2's score, the discharge note itself (shown in full up to 20,000
+characters; a longer note as its first 12,000 + last 8,000 characters with the
+middle omitted, `src/stage3/_notecap.py` — not a 5-sentence attention summary),
+and a pre-computed discordance mode.
 
 **Grounds taxonomy (session 19), replacing the single free-choice
 `primary_clinical_domain`.** The LLM extracts a list of `mitigating_grounds`
@@ -548,9 +552,9 @@ end to end, after two more rounds of cluster troubleshooting.
   grounds 65%**. This corroborates the full-run decision profile
   (`stage3_run_summary.json`: 88.5% model/rule agreement among decided, 93.1%
   with all quotes verified, 219 abstentions). The RQ3 matched-volume finding
-  below — the cascade does not improve on Stage 1 alone (precision
-  significantly lower, recall statistically unchanged) — stands on the full run
-  regardless.
+  below — the cascade does not improve on Stage 1 alone (precision difference's
+  CI excludes zero; recall difference's CI includes zero) — stands on the full
+  run regardless.
 
 ---
 
@@ -579,8 +583,8 @@ session 17.
   result: at matched alert volume the full cascade does not improve on Stage 1
   alone — a patient-level paired bootstrap gives a precision difference of
   −0.0048 (95% CI [−0.0085, −0.0015], excludes zero) and a recall difference of
-  −0.0035 (95% CI [−0.0076, +0.0003], includes zero), i.e. significantly lower
-  precision and statistically unchanged recall
+  −0.0035 (95% CI [−0.0076, +0.0003], includes zero), i.e. the precision
+  difference excludes zero while the recall difference includes it
   (`models/pipeline_paired_differences.json`). A post-hoc conditional-triggering
   re-analysis (Stage 3 only on discordant cases) recovers recall versus the
   blanket run at 4,631 fewer LLM calls (47%), which initially read as "Stage 3
@@ -590,16 +594,17 @@ session 17.
   (`scripts/analyze_discordance_subgroups.py`, 2026-10-07): Stage 3's real
   decision vs. "Stage 1's flag stands," within each subgroup separately,
   with CIs. By F2, Stage 3 underperforms Stage 1 alone in BOTH subgroups,
-  and the drop is larger on discordant cases (−0.168) than concordant
-  (−0.130) — see `MODEL_CARD.md` for the full table. The correct
+  and the drop is larger on discordant cases (−0.070) than concordant
+  (−0.056) (`discordance_subgroup_evaluation.json`) — see `MODEL_CARD.md` for
+  the full table. The correct
   statement: Stage 3 trades recall for little-to-no precision gain almost
   everywhere it's applied; removing it from concordant cases is a clean
   win, but it is not adding value on discordant cases either.
 - ~~Run `batch.py --sweep`~~ **Done (2026-10-06)** —
   `models/discordance_sensitivity.json`: at the provisional ±20pp,
-  CONCORDANT=47.6%, NOTE_MITIGATES=29.8%, NOTE_AMPLIFIES=22.7%. Sweep
+  CONCORDANT=46.8%, NOTE_MITIGATES=26.4%, NOTE_AMPLIFIES=26.8%. Sweep
   across ±10-30pp shows the mode split is meaningfully sensitive to the
-  threshold choice (CONCORDANT ranges 27.0%-65.2%), worth discussing as a
+  threshold choice (CONCORDANT ranges 26.1%-63.5%), worth discussing as a
   robustness caveat rather than treating ±20pp as uniquely correct.
 - ~~Wire and run the Stage 3 robustness arm~~ **Decided against, 2026-10-30
   — see §5.** Not a deferred item anymore; closed.
@@ -672,7 +677,7 @@ findings):**
 - **RQ1's headline comparison denominator.** Confirmed: the headline RQ1
   number is both models restricted to the notes-covered subset
   (`stage1_notes_cohort` vs. `stage2_notes_cohort` in `comparison_rq1.json`
-  — AUROC 0.7093 vs. 0.7101) — the only population both models can be
+  — AUROC 0.7093 vs. 0.7102) — the only population both models can be
   fairly compared on, since comparing each model on a different
   population isn't a comparison at all. `stage1_full_population` (AUROC
   0.7215) is reported as separate deployment context, never blended into
@@ -693,7 +698,7 @@ findings):**
 - **What should Stage 3 reason over, beyond the current
   score+SHAP+note+discordance-mode bundle?** Confirmed: leave as-is — do
   not add Stage 1's raw feature values. Two reasons: (1) giving the LLM
-  all ~40 raw structured features, instead of the top-5 SHAP-ranked,
+  all 55 raw structured features, instead of the top-5 SHAP-ranked,
   direction-and-magnitude-labeled strings already provided, would dilute
   the prompt with mostly-irrelevant structured noise on top of near-full
   note text already competing for the model's attention under a hard
@@ -712,9 +717,9 @@ findings):**
   bias-mitigation machinery. Layering a systematic age-band context onto
   Stage 3 as well risks compounding those corrections in an uncontrolled
   way, or introducing a new vector for inconsistent treatment (the auditor
-  reasoning differently about identical clinical content depending on a
+  weighing identical clinical content differently depending on a
   stated age band), rather than reducing bias further. One honest caveat:
-  `age` is one of Stage 1's ~40 features, so it can appear *incidentally*
+  `age` is one of Stage 1's 55 features, so it can appear *incidentally*
   in a given patient's top-5 SHAP block if age happens to be a top risk
   driver for that specific admission (`src/stage3/shap_extract.py`'s
   `_FEATURE_LABELS`) — a side effect of SHAP ranking, not the deliberate,
@@ -754,18 +759,18 @@ findings):**
   against each other~~ **Done (2026-10-26, session 31,
   `scripts/analyze_planned_return_crosscheck.py`) — and the finding is
   not reassuring.** Restricted to Stage-3-audited patients who were
-  actually readmitted within 30 days (n=4,375, the only population where
+  actually readmitted within 30 days (n=4,402, the only population where
   "was the readmission planned" has a structured answer at all): raw
-  agreement is 81.7%, but a trivial "always predict unplanned" baseline
+  agreement is 93.4%, but a trivial "always predict unplanned" baseline
   already scores 95.8% (structured-planned rate is only 4.2%) — **Stage
-  3's actual agreement is below the trivial baseline.** Stage 3 calls
-  "planned" 4.5× more often than the structured proxy does (19.2% vs.
-  4.2%); of Stage 3's 842 "yes" calls, only 112 (13.3%) match the
-  structured proxy. Reads as the LLM being substantially more liberal
-  about reading a note as describing a planned return than the
-  structured data would license — worth stating explicitly as an open
-  discrepancy between the two signals in the thesis text, not quietly
-  citing the 81.7% number alone.
+  3's actual agreement is still below the trivial baseline.** In the rerun
+  the tighter `planned_return` definition brings Stage 3's "planned" rate
+  onto the structured proxy's (4.2% each); of Stage 3's 184 "yes" calls,
+  40 match the structured proxy, and of the 186 structured-planned cases
+  Stage 3 catches only 40 — the marginal rates match but the two still
+  disagree on which admissions are planned. Worth stating explicitly as an
+  open discrepancy between the two signals in the thesis text, not quietly
+  citing the 93.4% number alone.
 - `MODEL_TARGET_COL` (`src/schemas.py`) is the single switch controlling
   which label column (`TARGET_COL`/all-cause vs `TARGET_COL_UNPLANNED`)
   every training/eval script actually uses — set to unplanned as of
@@ -777,9 +782,10 @@ findings):**
   not before. If retraining ever needs to compare against the all-cause
   label again, change only this one constant; every consumer (Stage 1's
   `split_xy()`, every Stage 2 module) follows it automatically.
-- Truncation asymmetry between Stage 2 (4096 tokens) and Stage 3 (now a
-  20,000-character safety cap, effectively near-full note) is much smaller
-  than before session 15 but not eliminated for pathologically long notes.
+- Truncation asymmetry between Stage 2 (4096 tokens) and Stage 3 (20,000-char
+  cap; a longer note shown as its first 12,000 + last 8,000 characters, middle
+  omitted — `src/stage3/_notecap.py`) is much smaller than before session 15
+  but not eliminated for pathologically long notes.
 - `training-changes` is still unmerged into `main` (44+ commits ahead as of
   session 15). Nothing in this doc addresses that — it's a repo-hygiene
   decision (merge vs. formally adopt as the working branch), not a code fix.

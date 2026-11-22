@@ -1,22 +1,31 @@
-// Pre-retrain metrics (recall-floor Stage 1, v1 Stage 2) — kept as the last known
-// numbers pending the capacity-constrained Stage 1 / fairness-rebuilt Stage 2 retrain.
-// See docs/ARCHITECTURE.md §4 and MODEL_CARD.md for current status.
+// Current (rerun) metrics, hand-copied from the committed result JSONs (the
+// frontend bundle cannot import the gitignored models/ files). Source file and
+// key given per value; regenerate numbers via docs/THESIS_NUMBERS.md
+// (scripts/export_thesis_numbers.py). Last synced 2026-11.
 const STAGE1 = {
-  nPatients: 521_191,
-  auroc: 0.706,
-  recall: 0.848,
-  precision: 0.256,
-  threshold: 0.354,
-  notesCohort: 43_776,
+  cohort: 521_191,            // study cohort (README)
+  trainPartition: 416_949,    // cohort minus held-out test 104,242
+  auroc: 0.7215,              // xgboost_metrics.json auroc
+  recall: 0.352,              // xgboost_metrics.json operating_point.recall (capacity-15%, primary)
+  precision: 0.431,           // xgboost_metrics.json operating_point.precision
+  threshold: 0.3235,          // xgboost_metrics.json operating_point.threshold
+  flaggedNoted: 9_899,        // flagged + noted group (stage2_evaluation.json overall.n)
 };
 
 const STAGE2 = {
-  auroc: 0.676,
-  recall: 0.908,
-  precision: 0.289,
-  f2: 0.635,
-  confirmed: 35_187,
-  pruned: 8_589,
+  auroc: 0.622,               // stage2_evaluation.json overall.auroc (flagged group)
+  recall: 0.987,              // stage2_evaluation.json overall.recall
+  precision: 0.434,           // stage2_evaluation.json overall.precision
+  f2: 0.786,                  // stage2_evaluation.json overall.f2
+  confirmed: 9_618,           // stage2_evaluation.json overall tp+fp (4171+5447)
+};
+
+// Pipeline vs. matched control at equal alert volume (pipeline_evaluation.json).
+const PIPELINE = {
+  pipePrecision: 0.439,       // pipeline.full_cohort.precision
+  pipeRecall: 0.324,          // pipeline.full_cohort.recall
+  ctrlPrecision: 0.444,       // pipeline.control_arm_stage1_matched.precision
+  ctrlRecall: 0.328,          // pipeline.control_arm_stage1_matched.recall
 };
 
 function StageBox({
@@ -80,11 +89,11 @@ export default function PipelineDiagram() {
           model="XGBoost"
           color="border-blue-200"
           metrics={[
-            { label: "Dataset",          value: `${STAGE1.nPatients.toLocaleString()} admissions` },
-            { label: "AUROC",            value: STAGE1.auroc.toFixed(3) },
-            { label: "Recall @ thr",     value: STAGE1.recall.toFixed(3) },
-            { label: "Precision",        value: STAGE1.precision.toFixed(3) },
-            { label: "Notes cohort",     value: STAGE1.notesCohort.toLocaleString() },
+            { label: "Cohort",            value: `${STAGE1.cohort.toLocaleString()} admissions` },
+            { label: "AUROC",             value: STAGE1.auroc.toFixed(4) },
+            { label: "Recall @ cap-15%",  value: STAGE1.recall.toFixed(3) },
+            { label: "Precision",         value: STAGE1.precision.toFixed(3) },
+            { label: "Flagged + noted",   value: STAGE1.flaggedNoted.toLocaleString() },
           ]}
         />
         <Arrow />
@@ -95,12 +104,12 @@ export default function PipelineDiagram() {
           model="Clinical-Longformer"
           color="border-violet-200"
           metrics={[
-            { label: "With notes",   value: STAGE1.notesCohort.toLocaleString() },
-            { label: "AUROC",        value: STAGE2.auroc.toFixed(3) },
-            { label: "Recall",       value: STAGE2.recall.toFixed(3) },
-            { label: "Precision",    value: STAGE2.precision.toFixed(3) },
-            { label: "F2",           value: STAGE2.f2.toFixed(3) },
-            { label: "Cascade-confirmed", value: `${STAGE2.confirmed.toLocaleString()} (${((STAGE2.confirmed / STAGE1.notesCohort) * 100).toFixed(0)}%)` },
+            { label: "Flagged group",   value: STAGE1.flaggedNoted.toLocaleString() },
+            { label: "AUROC",           value: STAGE2.auroc.toFixed(3) },
+            { label: "Recall",          value: STAGE2.recall.toFixed(3) },
+            { label: "Precision",       value: STAGE2.precision.toFixed(3) },
+            { label: "F2",              value: STAGE2.f2.toFixed(3) },
+            { label: "Cascade-confirmed", value: `${STAGE2.confirmed.toLocaleString()} (${((STAGE2.confirmed / STAGE1.flaggedNoted) * 100).toFixed(0)}%)` },
           ]}
         />
         <Arrow />
@@ -108,14 +117,14 @@ export default function PipelineDiagram() {
           number="3"
           title="Audit"
           subtitle="Both scores + note → uphold/override decision"
-          model="phi4-mini (Ollama)"
+          model="MedGemma-27B (HF transformers)"
           color="border-emerald-200"
           metrics={[
-            { label: "Trigger",     value: "Clinician request" },
-            { label: "Input",       value: "SHAP + attention + both scores + note" },
+            { label: "Audited",     value: `${STAGE1.flaggedNoted.toLocaleString()} flagged + noted` },
+            { label: "Input",       value: "SHAP + both scores + note" },
             { label: "Output",      value: "Decision + quoted justification" },
-            { label: "Deployment",  value: "Local (on-device)" },
-            { label: "Training",    value: "None — inference only" },
+            { label: "Pipeline vs control", value: `P ${PIPELINE.pipePrecision.toFixed(3)} vs ${PIPELINE.ctrlPrecision.toFixed(3)}` },
+            { label: "(same alert volume)",  value: `R ${PIPELINE.pipeRecall.toFixed(3)} vs ${PIPELINE.ctrlRecall.toFixed(3)}` },
           ]}
         />
       </div>

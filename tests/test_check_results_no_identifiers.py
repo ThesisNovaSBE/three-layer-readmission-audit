@@ -43,3 +43,22 @@ def test_free_text_key_with_string_flagged():
 
 def test_bool_not_treated_as_identifier():
     assert find_identifier_leaks({"available": True, "flagged": False}) == []
+
+
+def test_without_hadm_count_keys_not_flagged():
+    # "*_without_hadm*" are aggregate count keys, not identifiers
+    assert find_identifier_leaks({"discharge_notes_without_hadm": 123,
+                                  "radiology_without_hadm_share": 0.4}) == []
+
+
+def test_tokenizer_files_skipped(tmp_path):
+    import json as _json  # noqa: PLC0415
+    from scripts.check_results_no_identifiers import check_file
+    # a vocab.json with BPE tokens that LOOK like id keys / de-id markers
+    p = tmp_path / "vocab.json"
+    p.write_text(_json.dumps({"Ġsubject": 1, "___": 2}))
+    assert check_file(p) == []
+    # but a non-tokenizer file with the same content is still flagged
+    q = tmp_path / "results.json"
+    q.write_text(_json.dumps({"Ġsubject": 1}))
+    assert check_file(q)
