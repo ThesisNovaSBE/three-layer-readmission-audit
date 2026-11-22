@@ -102,7 +102,8 @@ def _prepare_population(
 
     Returns:
         DataFrame with columns: hadm_id, subject_id, age_band,
-        readmission_30d, stage1_score, stage1_threshold, age_band_key.
+        readmission_30d, stage1_score, stage1_score_raw, stage1_threshold,
+        age_band_key.
     """
     features = split_xy(matrix)[0]
     test_idx = artifact["test_idx"]
@@ -115,6 +116,15 @@ def _prepare_population(
         ["hadm_id", "subject_id", "age_band", TARGET_COL]
     ].reset_index(drop=True)
     test_meta["stage1_score"] = stage1_scores
+    # Uncalibrated XGBoost probability, kept alongside the calibrated score.
+    # Stage 3's percentile-rank discordance (r1) uses THIS, not stage1_score:
+    # the isotonic-calibrated score collapses to only ~47 distinct values at
+    # or above the flag threshold, so ranks of the ~9,899 flagged admissions
+    # are heavily tied and biased. The raw probability has the same risk
+    # ordering with no ties. The prompt still shows the calibrated score as
+    # the probability (see src/stage3/explain.build_prompt); only the rank
+    # uses the raw score.
+    test_meta["stage1_score_raw"] = raw_scores
     test_meta["stage1_threshold"] = stage1_threshold
     test_meta["age_band_key"] = test_meta["age_band"].apply(band_key)
 
@@ -177,25 +187,50 @@ def _run_inference(
 def _apply_calibration(
     notes_df: pd.DataFrame,
     calibration: dict,
-    global_threshold: float,
 ) -> pd.DataFrame:
     """Apply Platt scaling and per-group thresholds to raw stage2_scores.
 
-    Converts raw softmax probabilities to logits, applies the per-band
-    calibration coefficients, converts back to calibrated probabilities,
-    then applies the per-band decision threshold.
+    Converts raw softmax probabilities to logits (recovering z1 - z0, the
+    same quantity src/stage2/calibrate.py now fits the Platt coefficients
+    on), applies the per-band calibration coefficients, converts back to
+    calibrated probabilities, then applies the per-band decision threshold.
 
     Args:
-        notes_df:         DataFrame with ``stage2_score`` and ``age_band_key``.
-        calibration:      calibration dict loaded from JSON.
-        global_threshold: fallback threshold for bands missing from calibration.
+        notes_df:    DataFrame with ``stage2_score`` and ``age_band_key``.
+        calibration: calibration dict loaded from JSON.
 
     Returns:
         Updated DataFrame with calibrated ``stage2_score`` and
         ``stage2_confirmed`` columns.
+
+    Raises:
+        ValueError: if any age band present in the data has no entry in the
+            calibration's per-band calibrators or thresholds. This is
+            deliberate: silently falling back to identity calibration / a
+            global threshold for an unmatched band would quietly ship
+            miscalibrated scores to Stage 3, which is exactly the class of
+            fit/apply bug this rerun exists to remove.
     """
     cal_calibrators = calibration["calibrators"]
     cal_thresholds = calibration["thresholds"]
+
+    data_bands = set(notes_df["age_band_key"].unique())
+    if notes_df["age_band_key"].isna().any():
+        raise ValueError(
+            "Some admissions have no age_band_key; cannot select a per-band "
+            "calibrator for them. Check the feature matrix's age_band column."
+        )
+    missing_cal = data_bands - set(cal_calibrators)
+    missing_thr = data_bands - set(cal_thresholds)
+    if missing_cal or missing_thr:
+        raise ValueError(
+            "Stage 2 calibration is missing age bands present in the data: "
+            f"calibrators missing {sorted(missing_cal)}, thresholds missing "
+            f"{sorted(missing_thr)}. Available calibrator bands: "
+            f"{sorted(cal_calibrators)}. Refusing to fall back to identity "
+            "calibration / a global threshold -- rerun "
+            "`python -m src.stage2.calibrate --force`."
+        )
 
     raw_scores = notes_df["stage2_score"].values
     raw_logits = np.log(
@@ -205,13 +240,13 @@ def _apply_calibration(
 
     cal_probs = np.empty(len(notes_df))
     for i, (logit, band) in enumerate(zip(raw_logits, notes_df["age_band_key"].values)):
-        coef, intercept = cal_calibrators.get(band, [1.0, 0.0])
+        coef, intercept = cal_calibrators[band]
         cal_logit = coef * logit + intercept
         cal_probs[i] = 1.0 / (1.0 + np.exp(-cal_logit))
 
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = cal_probs
-    band_thr = notes_df["age_band_key"].map(cal_thresholds).fillna(global_threshold)
+    band_thr = notes_df["age_band_key"].map(cal_thresholds)
     notes_df["stage2_confirmed"] = (notes_df["stage2_score"] >= band_thr).astype(int)
     print(f"[stage2/predict] Per-group thresholds: {cal_thresholds}")
     return notes_df
@@ -244,15 +279,19 @@ def _score_core(
     max_length = cfg.stage2.max_seq_length
 
     cal_json_path = model_dir / "stage2_calibration.json"
-    calibration: dict | None = None
-    if cal_json_path.exists():
-        calibration = json.loads(cal_json_path.read_text())
-        print(f"[stage2/predict] Loaded calibration from {cal_json_path}")
-    else:
-        print(
-            f"[stage2/predict] No calibration found — "
-            f"using global threshold={global_threshold:.3f}"
+    if not cal_json_path.exists():
+        # Raise, don't fall back to a global threshold: a missing calibration
+        # file means calibrate.py never ran (or its output was moved aside),
+        # and scoring on a single global threshold would ship miscalibrated
+        # probabilities AND a wrong per-band operating point to Stage 3 --
+        # silently, exactly the failure this rerun exists to remove.
+        raise FileNotFoundError(
+            f"{cal_json_path} not found. Run `python -m src.stage2.calibrate --force` "
+            "first (slurm_stage2_finish.sh does this). Refusing to fall back to a "
+            "global threshold."
         )
+    calibration: dict | None = json.loads(cal_json_path.read_text())
+    print(f"[stage2/predict] Loaded calibration from {cal_json_path}")
 
     if artifact is None:
         artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
@@ -275,12 +314,13 @@ def _score_core(
     notes_df = notes_df.copy()
     notes_df["stage2_score"] = all_probs
     notes_df = notes_df.merge(
-        population[["hadm_id", "stage1_score", "stage1_threshold", "age_band_key"]],
+        population[["hadm_id", "stage1_score", "stage1_score_raw",
+                    "stage1_threshold", "age_band_key"]],
         on="hadm_id", how="left",
     )
 
     if calibration is not None:
-        notes_df = _apply_calibration(notes_df, calibration, global_threshold)
+        notes_df = _apply_calibration(notes_df, calibration)
         thr_display = "per-group"
     else:
         notes_df["stage2_confirmed"] = (
@@ -296,7 +336,8 @@ def _score_core(
 
     result_cols = [
         "hadm_id", "subject_id", TARGET_COL,
-        "stage1_score", "stage1_threshold", "stage2_score", "stage2_confirmed",
+        "stage1_score", "stage1_score_raw", "stage1_threshold",
+        "stage2_score", "stage2_confirmed",
     ]
     return notes_df[[c for c in result_cols if c in notes_df.columns]]
 

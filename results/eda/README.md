@@ -35,6 +35,9 @@ enforced by `src/eda/privacy.py` and `tests/test_eda_privacy.py`.
 | Planned returns removed by the unplanned label | 6,234 (5.9% of all-cause) |
 | Median days to readmission | 8.6; 43.7% within 7 days; 13.3% within 1 day |
 | Discharge-note length | median **3,268** Longformer tokens (p25 2,450, p75 4,236) |
+| Discharge-note length (characters) | median **9,912**, p95 **18,660** [`results/eda/notes_summary.json`: `length.chars.p50`, `.p95`] |
+| … share above the 20,000-char Stage 3 cap | **under 5%** — falls between p95 (18,660) and p99 (24,708) *(unverified: no direct share field in `notes_summary.json`)* |
+| Characters per Clinical-Longformer token | **~3.06** [`results/eda/notes_summary.json`: `length.chars_per_token` = 3.057] |
 | Notes longer than the 4,096-token Stage 2 window | **27.9%** |
 
 ## Findings that matter for the thesis

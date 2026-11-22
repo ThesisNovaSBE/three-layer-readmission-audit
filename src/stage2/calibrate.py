@@ -1,8 +1,9 @@
 """Post-training calibration for Stage 2 Clinical-Longformer.
 
-Runs Platt scaling (logistic regression on raw logits) per age group on the
-calibration split, then selects per-group decision thresholds that satisfy a
-recall floor while maximising F2.
+Runs Platt scaling (logistic regression on the logit of the softmax
+positive-class probability, z1 - z0) per age group on the calibration
+split, then selects per-group decision thresholds that satisfy a recall
+floor while maximising F2.
 
 Output: ``models/stage2_calibration.json``::
 
@@ -61,7 +62,13 @@ def _get_logits(
     batch_size: int,
     device: torch.device,
 ) -> np.ndarray:
-    """Run inference and return raw class-1 logits for every sample."""
+    """Run inference and return the logit of the softmax positive-class
+    probability (z1 - z0) for every sample.
+
+    Must match predict.py's _apply_calibration exactly, which recovers this
+    same z1 - z0 quantity via logit(softmax_prob) before applying the
+    calibrator -- using the raw class-1 logit (z1) alone here previously
+    fit the calibrator on a different quantity than it was applied to."""
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     all_logits: list[float] = []
     model.eval()  # type: ignore[union-attr]
@@ -72,7 +79,8 @@ def _get_logits(
                 if k not in {"labels", "group_weight"}
             }
             logits = model(**inputs).logits  # type: ignore[operator]
-            all_logits.extend(logits[:, 1].cpu().numpy().tolist())
+            logit_diff = logits[:, 1] - logits[:, 0]
+            all_logits.extend(logit_diff.cpu().numpy().tolist())
     return np.array(all_logits)
 
 

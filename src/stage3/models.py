@@ -63,6 +63,11 @@ class ExplanationResult(BaseModel):
 
     hadm_id: int
     stage1_score: float
+    # Uncalibrated XGBoost probability. The prompt shows stage1_score
+    # (calibrated), but the percentile-rank discordance (r1) ranks on this
+    # raw score to avoid the calibrated score's heavy ties -- recorded per
+    # row so the output says what the rank was computed from.
+    stage1_score_raw: float
     stage1_threshold: float
     stage2_score: float
     stage2_confirmed: bool

@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.stage3.shap_extract import _label, extract_shap_features, extract_shap_for_patient
+from src.stage3.shap_extract import (
+    _direction,
+    _format_value,
+    _label,
+    extract_shap_features,
+    extract_shap_for_patient,
+)
 
 
 # ── Label helper ─────────────────────────────────────────────────────────────
@@ -21,6 +27,21 @@ def test_label_known_column():
 def test_label_unknown_column_replaces_underscores():
     """Unknown columns fall back to underscore-replaced name."""
     assert _label("my_custom_col") == "my custom col"
+
+
+def test_administrative_features_marked_in_label():
+    """N8: administrative/provenance features are labelled 'administrative' so
+    the auditor doesn't read them as clinical risk drivers."""
+    for col in ("has_discharge_note", "admit_hour", "admit_is_weekend", "admit_is_night"):
+        assert "administrative" in _label(col)
+
+
+def test_format_value_missing_days_since_discharge_reads_no_prior_admission():
+    """N8: a missing days_since_last_discharge means no prior admission, not a
+    generic 'not recorded'. Other missing features keep 'not recorded'."""
+    assert _format_value(float("nan"), "days_since_last_discharge") == "no prior admission"
+    assert _format_value(float("nan"), "spo2_last") == "not recorded"
+    assert _format_value(3.2, "creatinine_last") == "3.2"
 
 
 # ── Mock artifact ─────────────────────────────────────────────────────────────
@@ -94,8 +115,9 @@ def test_feature_strings_contain_label():
     assert "creatinine (last)" in results[0][0]
 
 
-def test_missing_columns_filled_with_zeros():
-    """Patients missing some feature columns must not crash."""
+def test_missing_columns_non_xgboost_does_not_crash():
+    """A non-XGBoost estimator (gain path) with some feature columns absent
+    must not crash -- the strict full-schema check applies to XGBoost only."""
     artifact = _make_artifact()
     patients = pd.DataFrame({"creatinine_last": [1.5, 2.0], "age": [65, 72]})
     results = extract_shap_features(artifact, patients, top_k=2)
@@ -133,23 +155,123 @@ def test_extract_shap_for_patient_matches_batch():
         assert single == batch[i]
 
 
-# ── SHAP path (if shap is installed) ─────────────────────────────────────────
+# ── XGBoost native pred_contribs path (no shap library needed) ───────────────
 
-def test_shap_direction_labels_present_when_shap_installed():
-    """When shap is available, output must include direction and SHAP value."""
-    pytest.importorskip("shap")
+def _fit_xgb():
+    """A tiny real XGBClassifier over the 5 test feature columns, NO early
+    stopping (so best_iteration is unset or == the last round)."""
     import xgboost as xgb  # pylint: disable=import-outside-toplevel
     from sklearn.datasets import make_classification  # pylint: disable=import-outside-toplevel
-
     x_arr, y_arr = make_classification(n_samples=60, n_features=5, random_state=0)
     model = xgb.XGBClassifier(n_estimators=5, max_depth=2, random_state=0)
-    model.fit(x_arr, y_arr)
+    model.fit(pd.DataFrame(x_arr, columns=FEATURE_COLS), y_arr)
+    return model, x_arr
+
+
+def _fit_xgb_early_stopping():
+    """An XGBClassifier trained WITH early stopping, so best_iteration ends up
+    well below the number of boosted rounds -- the exact setup that exposed
+    the iteration_range bug on the real Stage 1 artifact."""
+    import xgboost as xgb  # pylint: disable=import-outside-toplevel
+    from sklearn.datasets import make_classification  # pylint: disable=import-outside-toplevel
+    from sklearn.model_selection import train_test_split  # pylint: disable=import-outside-toplevel
+    x_arr, y_arr = make_classification(n_samples=400, n_features=5, random_state=0)
+    x_tr, x_val, y_tr, y_val = train_test_split(x_arr, y_arr, test_size=0.3, random_state=0)
+    model = xgb.XGBClassifier(
+        n_estimators=500, max_depth=2, learning_rate=0.1,
+        early_stopping_rounds=5, eval_metric="logloss", random_state=0,
+    )
+    model.fit(
+        pd.DataFrame(x_tr, columns=FEATURE_COLS), y_tr,
+        eval_set=[(pd.DataFrame(x_val, columns=FEATURE_COLS), y_val)], verbose=False,
+    )
+    return model, x_arr
+
+
+def test_xgb_shap_with_early_stopping_uses_best_iteration():
+    """Locks in the iteration_range fix: with early stopping, best_iteration
+    is below the trained rounds, so a naive all-trees pred_contribs would NOT
+    reconstruct predict()'s margin. extract_shap_features must still succeed
+    (it passes iteration_range=(0, best_iteration+1)); if the fix regressed,
+    the margin check would raise here."""
+    model, x_arr = _fit_xgb_early_stopping()
+    # Confirm the scenario is genuine: there are trained rounds beyond the one
+    # predict() stops at, which a naive pred_contribs would wrongly include.
+    assert model.best_iteration is not None
+    assert model.best_iteration + 1 < model.get_booster().num_boosted_rounds()
 
     artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
     patients = pd.DataFrame(x_arr[:3], columns=FEATURE_COLS)
-    results = extract_shap_features(artifact, patients, top_k=2)
+    results = extract_shap_features(artifact, patients, top_k=2)  # must NOT raise
+    assert len(results) == 3
+    for patient_features in results:
+        for s in patient_features:
+            assert "log-odds" in s
 
+
+def test_xgb_shap_without_early_stopping_handles_best_iteration():
+    """A model with no early stopping (best_iteration unset or == last round)
+    must not crash when the code reads best_iteration."""
+    model, x_arr = _fit_xgb()
+    # getattr(..., None) is how the code reads it -- just confirm no crash.
+    _ = getattr(model, "best_iteration", None)
+    artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
+    results = extract_shap_features(artifact, pd.DataFrame(x_arr[:2], columns=FEATURE_COLS), top_k=2)
+    assert len(results) == 2
+
+
+def test_xgb_shap_direction_and_log_odds_unit():
+    """XGBoost pred_contribs output must include a direction, a SHAP value,
+    and the explicit 'log-odds' unit -- no shap library involved."""
+    model, x_arr = _fit_xgb()
+    artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
+    patients = pd.DataFrame(x_arr[:3], columns=FEATURE_COLS)
+    results = extract_shap_features(artifact, patients, top_k=2)
+    assert len(results) == 3
     for patient_features in results:
         for s in patient_features:
             assert ("↑ risk" in s or "↓ risk" in s), f"no direction in: {s}"
             assert "SHAP=" in s
+            assert "log-odds" in s
+
+
+def test_xgb_shap_raises_when_feature_schema_incomplete():
+    """For an XGBoost model, a patient frame missing a feature column must
+    RAISE (not fall back), so it becomes a PREP_FAILED row upstream."""
+    model, x_arr = _fit_xgb()
+    artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
+    # Drop one required feature column -> available != feature_cols.
+    patients = pd.DataFrame(x_arr[:2], columns=FEATURE_COLS).drop(columns=["age"])
+    with pytest.raises(ValueError, match="full Stage 1 feature schema"):
+        extract_shap_features(artifact, patients, top_k=2)
+
+
+# ── SHAP direction (incl. exactly-zero contribution) ─────────────────────────
+
+def test_direction_sign_including_zero():
+    """Deterministic, version-independent: negative -> down, zero -> no effect,
+    positive -> up."""
+    assert _direction(-0.5) == "↓ risk"
+    assert _direction(0.0) == "no effect"
+    assert _direction(0.5) == "↑ risk"
+
+
+def test_xgb_shap_zero_contribution_feature_reads_no_effect():
+    """A feature XGBoost never splits on (a constant column) has an exactly-zero
+    pred_contribs value in every xgboost version, so its prompt line must read
+    'no effect' -- confirming the label reaches the string. top_k spans all
+    features so the constant column is guaranteed to be included."""
+    import xgboost as xgb  # pylint: disable=import-outside-toplevel
+    from sklearn.datasets import make_classification  # pylint: disable=import-outside-toplevel
+    x_arr, y_arr = make_classification(n_samples=80, n_features=5, random_state=1)
+    x_arr[:, 0] = 7.0  # FEATURE_COLS[0] constant -> never split -> contrib == 0
+    model = xgb.XGBClassifier(n_estimators=8, max_depth=2, random_state=1)
+    model.fit(pd.DataFrame(x_arr, columns=FEATURE_COLS), y_arr)
+
+    artifact = {"estimator": model, "feature_cols": FEATURE_COLS}
+    patients = pd.DataFrame(x_arr[:2], columns=FEATURE_COLS)
+    results = extract_shap_features(artifact, patients, top_k=len(FEATURE_COLS))
+
+    const_label = _label(FEATURE_COLS[0])  # "creatinine (last)"
+    const_lines = [s for s in results[0] if s.startswith(const_label)]
+    assert const_lines and "no effect" in const_lines[0]

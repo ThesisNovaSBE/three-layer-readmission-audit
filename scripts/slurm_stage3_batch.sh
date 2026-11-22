@@ -4,17 +4,10 @@
 #SBATCH -C 80gb_vram
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-# Real measured throughput as of 2026-09-21 (job 16119168, --limit 50
-# --batch-size 4): 34m37s for 50 patients = ~41.5s/admission. At ~9,899
-# target admissions that is ~114 hours (~4.75 days) of pure generation
-# time, i.e. this script WILL hit its 24h limit and need ~5 resubmissions
-# minimum, not counting queue wait between them (30+ hours once this
-# project, when kisski was congested). This is safe to run into: batch.py
-# writes each admission's result to the output CSV incrementally (not one
-# save at the end), and --resume skips hadm_ids already written -- a
-# timeout here loses at most the one in-flight chunk (<= generation_batch_
-# size admissions), not the whole run.
+#SBATCH --time=2-00:00:00
+# 48h = partition maximum; the run takes ~137 GPU-h, so 3 segments with
+# --resume instead of 6, because each resubmission queues again at our low
+# fair-share priority.
 #SBATCH --job-name=thesis-stage3-batch
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_batch_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_batch_%j.err
@@ -24,7 +17,7 @@
 # without TIME_LIMIT explicitly listed, a timed-out segment could go
 # unnoticed for hours while it sits idle waiting to be resubmitted.
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage3_batch.sh ...
 
 set -eo pipefail
 # No -u (nounset): thesis-env's MKL conda activation hook references an
@@ -46,6 +39,15 @@ echo "[slurm] Git: $(git rev-parse --short HEAD)"
 
 # ── Pre-flight checks ────────────────────────────────────────
 echo "=== Pre-flight checks ==="
+# Fail-fast interlock (N6): a previous segment aborted with >20% failures and
+# left this marker. Refuse to burn another slot until it is investigated and
+# the file is deleted.
+if [ -f models/stage3_FAILFAST ]; then
+    echo "ERROR: models/stage3_FAILFAST exists -- a prior run aborted on a high"
+    echo "  failure rate. Investigate, then delete the file to resubmit:"
+    cat models/stage3_FAILFAST
+    exit 1
+fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 echo "Checking Stage 1 artifact..."
@@ -81,11 +83,36 @@ print(f'  OK — {torch.cuda.get_device_name(0)}, {torch.cuda.get_device_propert
 
 echo "=== All checks passed — starting batch audit ==="
 
+# ── Smoke-run checklist (do this FIRST, before the full run) ──────────────
+# Run a 20-admission smoke batch to its own throwaway file so the real
+# output stays untouched:
+#     python -m src.stage3.batch --limit 20 --out models/stage3_smoke.csv
+# Then check, in the job log and in models/stage3_smoke.csv, that:
+#   - mean(r1) and mean(r2) are each ~50 (percentile ranks of a sample of
+#     the cohort should centre on 50; a mean far from 50 means the ranking
+#     population or the raw/calibrated score wiring is wrong);
+#   - each SHAP line reads "name: val (↑/↓ risk, SHAP=±x.xxx log-odds)" --
+#     XGBoost native pred_contribs always runs; there is no gain fallback and
+#     no "[shap_extract]" log line, because a SHAP integrity failure now
+#     RAISES (the admission becomes a PREP_FAILED row instead);
+#   - top_shap_features shows "not recorded" for missing values, never 0;
+#   - attention_sentences is not empty;
+#   - annotation_failed is 0 and no row has discordance_mode == "PREP_FAILED";
+#   - for any admission whose note exceeded 20,000 chars, the prompt's note
+#     block carries the "middle of the discharge note omitted" marker.
+#
 # ── Run ──────────────────────────────────────────────────────
-# --resume: safe to always pass. On a fresh run the output CSV doesn't
-# exist yet, so it behaves identically to a plain run; on a resubmission
-# after a timeout/crash, it picks up where it left off instead of
-# redoing (and re-billing) work already done.
+# --resume: safe to always pass FOR A GIVEN RUN's OWN resubmission chain
+# (timeout/crash -> picks up where it left off instead of redoing, and
+# re-billing, work already done). NOT safe across two different runs that
+# share the same output path: if models/stage3_batch_results.csv already
+# has all 9,899 hadm_ids from a prior run (e.g. before a methodology fix
+# upstream), this silently treats every admission as already done and
+# audits nothing new -- no error, looks like a successful no-op. Before
+# the FIRST submission of a fresh run, move any existing
+# stage3_batch_results.csv out of the way (e.g. to
+# stage3_batch_results_v1.csv) -- only keep --resume active across that
+# one run's own follow-up segments.
 python -m src.stage3.batch --resume
 
 echo "[slurm] Done at $(date)"

@@ -198,12 +198,13 @@ def _pipeline_report(
 
 def _control_arm_report(
     y_true: np.ndarray,
-    s1_scores: np.ndarray,
+    s1_scores_raw: np.ndarray,
+    s1_scores_calibrated: np.ndarray,
     target_alert_rate: float,
     subgroups: pd.DataFrame,
     groups: np.ndarray | None = None,
 ) -> dict:
-    """Stage 1 alone, thresholded to match the full system's alert volume.
+    """Stage 1 alone, selected to match the full system's alert volume.
 
     The load-bearing comparison for RQ2 (colleague review, 2026-08-27):
     without this, there is no answer to "did the cascade + audit add
@@ -213,25 +214,60 @@ def _control_arm_report(
     flag rate for RQ1 -- this matches Stage 1 to the whole system's
     *post-audit* rate (Stage 3's decision, not Stage 2's threshold) for RQ2.
 
+    Primary selection is the top ``m = round(target_alert_rate * n)``
+    admissions by RAW Stage 1 score (stable descending argsort), NOT a
+    quantile threshold on the calibrated score: the isotonic-calibrated score
+    has only ~47 distinct values at the top, so a quantile threshold lands on
+    a big tie block and flags far more than the target, making the "matched
+    alert volume" comparison not actually matched. The raw probability breaks
+    those ties, so the realised alert count equals the pipeline's to within
+    one admission. The old calibrated-threshold arm is kept as a secondary,
+    clearly-labelled field for comparison.
+
     Args:
-        y_true:             ground-truth labels for the test partition.
-        s1_scores:           Stage 1 scores for the same population.
-        target_alert_rate:  the full system's final alert rate to match
-                             (``pipeline.full_cohort.confirmed_rate``).
-        subgroups:           age-band subgroup dataframe, aligned to y_true.
-        groups:              optional subject_id array -- see
-                             _pipeline_report's groups docstring.
+        y_true:                ground-truth labels for the test partition.
+        s1_scores_raw:         raw (uncalibrated) Stage 1 scores -- the
+                               primary selection ranks on these.
+        s1_scores_calibrated:  calibrated Stage 1 scores -- the secondary
+                               threshold arm uses these.
+        target_alert_rate:     the full system's final alert rate to match
+                               (``pipeline.full_cohort.confirmed_rate``).
+        subgroups:             age-band subgroup dataframe, aligned to y_true.
+        groups:                optional subject_id array -- see
+                               _pipeline_report's groups docstring.
 
     Returns:
-        A `_pipeline_report`-shaped dict, plus ``threshold`` and
-        ``target_alert_rate``, directly comparable to
-        ``pipeline.full_cohort``.
+        A `_pipeline_report`-shaped dict for the primary top-m arm, plus
+        ``selection``, ``target_alert_rate``, ``realised_alert_count``,
+        ``realised_alert_rate``, ``threshold`` (the raw-score cutoff), and
+        ``secondary_threshold_arm_calibrated`` (the old arm).
     """
-    threshold = select_threshold_for_capacity(s1_scores, max(target_alert_rate, 1e-6))
-    pred = (s1_scores >= threshold).astype(int)
+    raw = np.asarray(s1_scores_raw, dtype=float)
+    n = len(y_true)
+    m = round(target_alert_rate * n)
+    order = np.argsort(-raw, kind="stable")
+    pred = np.zeros(n, dtype=int)
+    if m > 0:
+        pred[order[:m]] = 1
     report = _pipeline_report(y_true, pred, subgroups, groups=groups)
-    report["threshold"] = float(threshold)
+    report["selection"] = "top_m_by_raw_stage1_score"
     report["target_alert_rate"] = float(target_alert_rate)
+    report["realised_alert_count"] = int(pred.sum())
+    report["realised_alert_rate"] = float(pred.sum() / n) if n else 0.0
+    report["threshold"] = float(raw[order[m - 1]]) if m > 0 else float("inf")
+
+    # Secondary (old behaviour, kept for comparison): quantile threshold on
+    # the CALIBRATED score. Its realised alert count overshoots the target
+    # when the calibrated score is tied -- that overshoot is exactly why the
+    # primary arm switched to top-m-by-raw.
+    calibrated = np.asarray(s1_scores_calibrated, dtype=float)
+    sec_threshold = select_threshold_for_capacity(calibrated, max(target_alert_rate, 1e-6))
+    sec_pred = (calibrated >= sec_threshold).astype(int)
+    sec = _pipeline_report(y_true, sec_pred, subgroups, groups=groups)
+    sec["threshold"] = float(sec_threshold)
+    sec["realised_alert_count"] = int(sec_pred.sum())
+    sec["realised_alert_rate"] = float(sec_pred.sum() / n) if n else 0.0
+    report["secondary_threshold_arm_calibrated"] = sec
     return report
 
 
@@ -348,10 +384,20 @@ def _apply_stage3_decisions(
     for", never silently drops or miscounts coverage.
 
     Returns:
-        (pipeline_pred_with_stage3, info) — ``info`` reports coverage and
-        separately how many admissions had an ``insufficient_evidence``
-        verdict; if no batch Stage 3 result exists yet, ``pipeline_pred_full``
-        is returned unchanged and ``info["available"]`` is ``False``.
+        (pipeline_pred_with_stage3, info) — ``info`` reports coverage and the
+        four mutually-exclusive outcome categories, counted over ``hadm_test``
+        (the thesis reports test-partition numbers): ``n_test_with_stage3_decision``
+        (decided: uphold/override), ``n_insufficient_evidence``,
+        ``n_llm_annotation_failed`` (the LLM was called but returned
+        unparseable output; excludes PREP_FAILED), and ``n_prep_failed`` (prep
+        failed before any call). These four sum to the number of Stage 3 rows,
+        ON THE ASSUMPTION that every Stage 3 row's hadm_id is in the test
+        partition -- true because the batch only scores flagged test
+        admissions with a note. ``n_stage3_rows_outside_test`` counts any that
+        aren't (should be 0; a loud warning fires if not, since the four
+        categories would then stop summing to the CSV row count). If no batch
+        Stage 3 result exists yet, ``pipeline_pred_full`` is returned unchanged
+        and ``info["available"]`` is ``False``.
     """
     s3_path = model_dir / "stage3_batch_results.csv"
     if not s3_path.exists():
@@ -370,13 +416,34 @@ def _apply_stage3_decisions(
         s3_rows["decision_model"] if "decision_model" in s3_rows.columns
         else pd.Series(dtype=object)
     )
+    modes = (
+        s3_rows["discordance_mode"] if "discordance_mode" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
+    annotation_failed = (
+        s3_rows["annotation_failed"] if "annotation_failed" in s3_rows.columns
+        else pd.Series(dtype=object)
+    )
 
     decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
+    mode_arr = np.array([modes.get(h, None) for h in hadm_test], dtype=object)
+    failed_arr = np.array([bool(annotation_failed.get(h, False)) for h in hadm_test])
     has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
     is_insufficient = decision_arr == "insufficient_evidence"
+    is_prep_failed = mode_arr == "PREP_FAILED"
+    is_llm_failed = failed_arr & ~is_prep_failed  # LLM called but output unparseable
 
     pred = np.where(has_s3, (decision_arr == "uphold").astype(int), pipeline_pred_full)
     pred = np.where(flagged, pred, 0)  # never-flagged admissions always stay negative
+
+    # Stage 3 rows whose hadm_id isn't in the test partition (should be 0).
+    hadm_set = {int(h) for h in hadm_test}
+    n_outside = int(sum(1 for h in s3_rows.index if int(h) not in hadm_set))
+    if n_outside:
+        print(f"[pipeline_eval] WARNING: {n_outside} Stage 3 row(s) have a hadm_id NOT in "
+              "the test partition. The decided/insufficient/LLM-failed/prep-failed counts "
+              "will not sum to the Stage 3 CSV row count. This should be 0 -- the batch "
+              "only scores flagged test admissions with a note.")
 
     coverage = float(has_s3.sum() / flagged.sum()) if flagged.sum() else 0.0
     info = {
@@ -384,17 +451,48 @@ def _apply_stage3_decisions(
         "n_test_with_stage3_decision": int(has_s3.sum()),
         "coverage_of_flagged": coverage,
         "n_insufficient_evidence": int(is_insufficient.sum()),
+        "n_llm_annotation_failed": int(is_llm_failed.sum()),
+        "n_prep_failed": int(is_prep_failed.sum()),
+        "n_stage3_rows_outside_test": n_outside,
     }
     print(f"[pipeline_eval] Stage 3 decisions applied to {has_s3.sum():,} / "
-          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage; "
-          f"{int(is_insufficient.sum()):,} insufficient_evidence, not counted as coverage)")
+          f"{int(flagged.sum()):,} flagged admissions ({coverage:.1%} coverage). "
+          f"Outcomes: {int(has_s3.sum()):,} decided, {int(is_insufficient.sum()):,} "
+          f"insufficient_evidence, {int(is_llm_failed.sum()):,} LLM-failed, "
+          f"{int(is_prep_failed.sum()):,} prep-failed.")
     return pred, info
+
+
+# Conditional-triggering rule for CONCORDANT cases: under discordant-only
+# triggering the auditor is never called on a concordant case, so its alert is
+# left standing (Stage 1's flag = positive). Decided from discordance_mode
+# alone, never from what the auditor happened to return. The team may later
+# switch this to the Stage 2 decision.
+_CONCORDANT_ALERT_STANDS = 1
+
+
+def _conditional_predictions(
+    mode_arr: np.ndarray, pred_with_stage3: np.ndarray, flagged: np.ndarray
+) -> np.ndarray:
+    """Per-admission prediction under discordant-only Stage 3 triggering.
+
+    CONCORDANT (decided from ``discordance_mode`` alone) -> Stage 1's alert
+    stands (``_CONCORDANT_ALERT_STANDS``), regardless of what the auditor
+    returned. Everything else -- discordant, PREP_FAILED, or no Stage 3 row --
+    keeps ``pred_with_stage3``, the array AFTER Stage 3 was applied, so a
+    discordant case keeps its real decision (uphold -> 1, override -> 0,
+    insufficient_evidence / failed -> that admission's Stage 2 decision via
+    the pipeline's fallback chain). Not flagged -> 0.
+    """
+    is_concordant = mode_arr == "CONCORDANT"
+    pred = np.where(is_concordant, _CONCORDANT_ALERT_STANDS, pred_with_stage3)
+    return np.where(flagged, pred, 0)
 
 
 def _conditional_triggering_report(
     model_dir: object,
     hadm_test: np.ndarray,
-    pipeline_pred_full: np.ndarray,
+    pred_with_stage3: np.ndarray,
     flagged: np.ndarray,
     y_test: np.ndarray,
     sub_test: pd.DataFrame,
@@ -407,12 +505,16 @@ def _conditional_triggering_report(
     discordant cases was an open, undecided question, and committing to it
     as the execution mode would mean never learning what auditing concordant
     cases would have found. This answers the question empirically instead —
-    for every admission the blanket run actually covered, a CONCORDANT case
-    is treated as if Stage 3 had never been called (Stage 1's flag simply
-    stands); a discordant case keeps its real Stage 3 decision. The
-    resulting metric delta vs. the real (blanket) pipeline, alongside the
-    LLM-call count saved, is the cost/benefit trade-off conditional
-    triggering would have bought.
+    a CONCORDANT case (by discordance_mode alone, not gated by what the
+    auditor returned) is treated as if Stage 3 had never been called (Stage
+    1's flag stands); every other admission keeps ``pred_with_stage3``.
+
+    ``pred_with_stage3`` MUST be the prediction array AFTER Stage 3 was
+    applied (``_apply_stage3_decisions``), not the Stage-2-only array
+    ``_eval_stage2`` returns under the same name. The caller currently passes
+    the post-Stage-3 array; if that call is ever moved above
+    ``_apply_stage3_decisions``, the auditor's decisions would silently vanish
+    from the discordant rows of this analysis.
 
     Args:
         groups: optional subject_id array -- see ``_pipeline_report``'s
@@ -423,7 +525,10 @@ def _conditional_triggering_report(
 
     Returns:
         None if no batch Stage 3 result exists yet. Otherwise a dict with
-        ``blanket_llm_calls``, ``conditional_llm_calls``, ``llm_calls_saved``,
+        ``blanket_llm_calls`` (every call the blanket run made: all admissions
+        with a real discordance mode, incl. insufficient/failed, excl.
+        PREP_FAILED), ``conditional_llm_calls`` (discordant only),
+        ``llm_calls_saved`` (concordant only; blanket == conditional + saved),
         and ``report`` (a ``_pipeline_report``-shaped dict under the
         conditional policy, directly comparable to ``pipeline.full_cohort``).
     """
@@ -433,37 +538,80 @@ def _conditional_triggering_report(
 
     s3_all = pd.read_csv(s3_path)
     s3_rows = s3_all.set_index("hadm_id")
-    decisions = (
-        s3_rows["decision_model"] if "decision_model" in s3_rows.columns
-        else pd.Series(dtype=object)
-    )
     modes = (
         s3_rows["discordance_mode"] if "discordance_mode" in s3_rows.columns
         else pd.Series(dtype=object)
     )
-
-    decision_arr = np.array([decisions.get(h, None) for h in hadm_test], dtype=object)
     mode_arr = np.array([modes.get(h, None) for h in hadm_test], dtype=object)
-    has_s3 = np.array([d in ("uphold", "override") for d in decision_arr])
+
+    # Concordant vs discordant from discordance_mode ALONE. PREP_FAILED and
+    # admissions with no Stage 3 row (mode None) are neither -- no real
+    # discordance was computed and (for PREP_FAILED) no LLM call was made.
     is_concordant = mode_arr == "CONCORDANT"
+    is_discordant = np.isin(mode_arr, ["NOTE_MITIGATES", "NOTE_AMPLIFIES"])
 
-    covered_discordant = has_s3 & ~is_concordant
-    covered_concordant = has_s3 & is_concordant
-
-    # Concordant + covered -> Stage 1's flag stands (as if Stage 3 skipped it).
-    # Discordant + covered -> keep the real Stage 3 decision.
-    # Not covered by the blanket run -> unchanged existing (C9-corrected) prediction.
-    conditional_pred = np.where(
-        covered_discordant, (decision_arr == "uphold").astype(int),
-        np.where(covered_concordant, 1, pipeline_pred_full),
-    )
-    conditional_pred = np.where(flagged, conditional_pred, 0)
+    conditional_pred = _conditional_predictions(mode_arr, pred_with_stage3, flagged)
 
     return {
-        "blanket_llm_calls": int(has_s3.sum()),
-        "conditional_llm_calls": int(covered_discordant.sum()),
-        "llm_calls_saved": int(covered_concordant.sum()),
+        "blanket_llm_calls": int(is_concordant.sum() + is_discordant.sum()),
+        "conditional_llm_calls": int(is_discordant.sum()),
+        "llm_calls_saved": int(is_concordant.sum()),
         "report": _pipeline_report(y_test, conditional_pred, sub_test, groups=groups),
+    }
+
+
+def _both_agree_report(
+    model_dir: object,
+    hadm_test: np.ndarray,
+    pred_with_stage3: np.ndarray,
+    flagged: np.ndarray,
+    y_test: np.ndarray,
+    sub_test: pd.DataFrame,
+    *,
+    s1_scores_raw: np.ndarray,
+    s1_scores: np.ndarray,
+    groups: np.ndarray | None = None,
+) -> dict | None:
+    """Secondary, stricter withdrawal policy: an alert is withdrawn ONLY when
+    the LLM's ``decision_model`` AND the code-computed ``decision_rule`` both
+    say ``override``. A model override that ``decision_rule`` doesn't confirm
+    (its quote-verified grounds don't actually justify the override) leaves
+    the alert standing. Every other admission follows the primary chain
+    (``pred_with_stage3``): uphold stays, insufficient/no-decision keeps the
+    Stage 2 fallback.
+
+    Recomputed from the batch CSV (needs both decision columns), not derived
+    from ``pred_with_stage3`` alone. Comes with its OWN top-m-by-raw control
+    arm matched to this policy's realised alert volume, so it is comparable
+    to Stage 1 alone on the same terms the primary policy is.
+
+    Returns None if no batch Stage 3 result exists yet.
+    """
+    s3_path = model_dir / "stage3_batch_results.csv"
+    if not s3_path.exists():
+        return None
+    s3 = pd.read_csv(s3_path).set_index("hadm_id")
+    dec = s3["decision_model"] if "decision_model" in s3.columns else pd.Series(dtype=object)
+    rule = s3["decision_rule"] if "decision_rule" in s3.columns else pd.Series(dtype=object)
+    decision_arr = np.array([dec.get(h, None) for h in hadm_test], dtype=object)
+    rule_arr = np.array([rule.get(h, None) for h in hadm_test], dtype=object)
+
+    has_s3 = np.isin(decision_arr, ["uphold", "override"])
+    both_override = (decision_arr == "override") & (rule_arr == "override")
+    # Covered admissions: alert stands (1) unless BOTH decisions say override
+    # (0). Everything else keeps the primary chain.
+    pred = np.where(has_s3, (~both_override).astype(int), pred_with_stage3)
+    pred = np.where(flagged, pred, 0)
+
+    report = _pipeline_report(y_test, pred, sub_test, groups=groups)
+    control = _control_arm_report(
+        y_test, s1_scores_raw, s1_scores, report["confirmed_rate"], sub_test, groups=groups
+    )
+    return {
+        "policy": "withdraw_only_if_decision_model_and_decision_rule_both_override",
+        "n_alerts_withdrawn": int((both_override & flagged).sum()),
+        "report": report,
+        "control_arm_stage1_matched": control,
     }
 
 
@@ -478,6 +626,29 @@ def _print_pipeline_line(prefix: str, report: dict) -> None:
           f"[{p_ci['ci_lower']:.3f}, {p_ci['ci_upper']:.3f}]  "
           f"recall={report['recall']:.3f} [{r_ci['ci_lower']:.3f}, {r_ci['ci_upper']:.3f}]  "
           f"F1={report['f1']:.3f}  F2={report['f2']:.3f}")
+
+
+def _print_stage3_policy_reports(conditional_report: dict | None, both_agree: dict | None) -> None:
+    """Print the two post-hoc Stage 3 policy reports (conditional triggering,
+    and the N4 both-agree secondary policy with its matched control arm), each
+    only if its batch result exists."""
+    if conditional_report is not None:
+        cr = conditional_report["report"]
+        print(f"[pipeline_eval] Conditional triggering (discordant-only, post-hoc): "
+              f"{conditional_report['conditional_llm_calls']:,} LLM calls "
+              f"({conditional_report['llm_calls_saved']:,} saved vs. blanket "
+              f"{conditional_report['blanket_llm_calls']:,}) -> "
+              f"precision={cr['precision']:.3f}  recall={cr['recall']:.3f}")
+    if both_agree is not None:
+        ba, ba_ctrl = both_agree["report"], both_agree["control_arm_stage1_matched"]
+        _print_pipeline_line(
+            "[pipeline_eval] Secondary policy (withdraw only if model+rule both "
+            f"override; {both_agree['n_alerts_withdrawn']:,} withdrawn): ", ba,
+        )
+        _print_pipeline_line(
+            "[pipeline_eval]   its matched control arm (Stage 1 top-m by raw @ "
+            f"{ba_ctrl['realised_alert_rate']:.1%}): ", ba_ctrl,
+        )
 
 
 # ── main evaluation ───────────────────────────────────────────────────────────
@@ -495,7 +666,8 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     artifact = joblib.load(model_dir / f"stage1_{cfg.stage1.model}.joblib")
 
     x_test, y_test, sub_test, hadm_test, groups_test = _load_test_partition(artifact, cfg)
-    s1_scores = apply_calibration(artifact, artifact["estimator"].predict_proba(x_test)[:, 1])
+    s1_scores_raw = artifact["estimator"].predict_proba(x_test)[:, 1]
+    s1_scores = apply_calibration(artifact, s1_scores_raw)
     s1_report = _stage1_report(y_test, s1_scores, artifact["threshold"], sub_test)
     print(f"\n[pipeline_eval] Stage 1 (test n={s1_report['n']:,}): "
           f"AUROC={s1_report['auroc']:.4f}  "
@@ -538,11 +710,14 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
     # would tightening Stage 1's threshold alone have caught as much at the
     # same alert budget?"
     control_report = _control_arm_report(
-        y_test, s1_scores, full_report_["confirmed_rate"], sub_test, groups=groups_test
+        y_test, s1_scores_raw, s1_scores, full_report_["confirmed_rate"],
+        sub_test, groups=groups_test
     )
     _print_pipeline_line(
-        "[pipeline_eval] Control arm (Stage 1 @ matched alert rate="
-        f"{control_report['target_alert_rate']:.1%}, thr={control_report['threshold']:.4f}): ",
+        "[pipeline_eval] Control arm (Stage 1, top-m by raw score @ matched alert rate="
+        f"{control_report['target_alert_rate']:.1%}, realised="
+        f"{control_report['realised_alert_rate']:.1%}, "
+        f"n={control_report['realised_alert_count']:,}): ",
         control_report,
     )
 
@@ -553,13 +728,14 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
         model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test,
         groups=groups_test,
     )
-    if conditional_report is not None:
-        cr = conditional_report["report"]
-        print(f"[pipeline_eval] Conditional triggering (discordant-only, post-hoc): "
-              f"{conditional_report['conditional_llm_calls']:,} LLM calls "
-              f"({conditional_report['llm_calls_saved']:,} saved vs. blanket "
-              f"{conditional_report['blanket_llm_calls']:,}) -> "
-              f"precision={cr['precision']:.3f}  recall={cr['recall']:.3f}")
+    # Secondary policy (N4): withdraw an alert only when decision_model AND
+    # decision_rule both say override. Stricter than the primary chain, with
+    # its own volume-matched control arm.
+    both_agree_report = _both_agree_report(
+        model_dir, hadm_test, pipeline_pred_full, flagged, y_test, sub_test,
+        s1_scores_raw=s1_scores_raw, s1_scores=s1_scores, groups=groups_test,
+    )
+    _print_stage3_policy_reports(conditional_report, both_agree_report)
 
     report = {
         "note": (
@@ -592,6 +768,7 @@ def evaluate_pipeline(cfg: AppConfig) -> dict:
             "notes_cohort": notes_report,
             "control_arm_stage1_matched": control_report,
             "conditional_triggering": conditional_report,
+            "secondary_both_agree": both_agree_report,
         },
     }
     _print_band_table(s1_report, s2_report, full_report_)

@@ -1,0 +1,74 @@
+{
+  "note": "Paired patient-level bootstrap of (pipeline policy - matched Stage 1 control) in precision and recall. Positive => the pipeline arm is higher; 'excludes_zero' true => the 95% CI does not contain 0. Aggregates only; no admission identifiers.",
+  "n_resamples": 1000,
+  "seed": 42,
+  "confidence": 0.95,
+  "comparisons": {
+    "primary_full_vs_control": {
+      "n_admissions": 104242,
+      "control_alert_count": 14638,
+      "precision_diff": {
+        "point_estimate": -0.00478,
+        "ci_lower": -0.00852,
+        "ci_upper": -0.00147,
+        "excludes_zero": true,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_diff": {
+        "point_estimate": -0.00353,
+        "ci_lower": -0.00757,
+        "ci_upper": 0.00027,
+        "excludes_zero": false,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    },
+    "secondary_both_override_vs_control": {
+      "n_admissions": 104242,
+      "control_alert_count": 15659,
+      "precision_diff": {
+        "point_estimate": -0.00313,
+        "ci_lower": -0.00507,
+        "ci_upper": -0.00097,
+        "excludes_zero": true,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_diff": {
+        "point_estimate": -0.00247,
+        "ci_lower": -0.00501,
+        "ci_upper": -0.0002,
+        "excludes_zero": true,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    },
+    "conditional_discordant_only_vs_control": {
+      "n_admissions": 104242,
+      "control_alert_count": 15217,
+      "precision_diff": {
+        "point_estimate": -0.00263,
+        "ci_lower": -0.00545,
+        "ci_upper": 0.00014,
+        "excludes_zero": false,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      },
+      "recall_diff": {
+        "point_estimate": -0.00202,
+        "ci_lower": -0.00494,
+        "ci_upper": 0.0008,
+        "excludes_zero": false,
+        "confidence": 0.95,
+        "n_resamples_used": 1000,
+        "n_resamples_requested": 1000
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "n_rows": 9899,
+  "decision_model_counts": {
+    "uphold": 8095,
+    "override": 1566,
+    "insufficient_evidence": 219,
+    "missing": 19
+  },
+  "decision_rule_counts": {
+    "uphold": 9248,
+    "override": 632,
+    "missing": 19
+  },
+  "n_decided": 9661,
+  "model_rule_agreement_among_decided": 0.88531,
+  "all_quotes_verified_share_among_decided": 0.93055,
+  "note_truncated_count": 795,
+  "note_truncated_share": 0.08031,
+  "planned_return_distribution": {
+    "no": 9656,
+    "yes": 224,
+    "missing": 19
+  },
+  "n_insufficient_evidence": 219,
+  "n_prep_failed": 0,
+  "n_invalid_llm_answers": 19,
+  "raw": {
+    "raw_sidecar_present": true,
+    "n_raw_lines": 9899,
+    "n_raw_unparseable": 11,
+    "n_keys_out_of_schema_order": 2,
+    "out_of_place_field_counts": {
+      "named_caregiver_quote": 1,
+      "planned_return": 1
+    },
+    "n_answers_with_unexpected_keys": 0
+  },
+  "oom_retries": {
+    "log_files_scanned": 7,
+    "oom_retried_batches": 7
+  }
+}

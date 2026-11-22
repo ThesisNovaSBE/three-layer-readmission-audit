@@ -14,7 +14,7 @@
 > to give Prof. Shen as a preview.
 >
 > Companion docs: `PROJECT_TLDR.md` (what we built) · `docs/ARCHITECTURE.md`
-> (current state, including the now-real RQ1/RQ2 results) ·
+> (current state, including the now-real RQ1–RQ3 results) ·
 > `docs/archive/SANITY_CHECK_2026-07-06.md` (historical — what needed
 > fixing as of 2026-07-06; most of it is resolved now, see `sessions/`).
 
@@ -33,21 +33,25 @@
 Stage 2) rather than "LLM predicts readmission too." The known argumentation gaps this
 paragraph originally flagged (why a cascade beats a matched-budget structured-only baseline,
 notes-cohort denominator, clinical utility quantification) are now **answered, not just
-catalogued** — the full Stage 3 batch run (2026-10-06, all 9,899 flagged+noted admissions)
-gives a real result, and it is not the flattering one a reader might expect: at matched alert
-volume, Stage 1 alone beats the full cascade, and a subgroup-level follow-up shows the
-auditor trades recall for little-to-no precision gain almost everywhere it's applied (see
-`MODEL_CARD.md`). This changes the storyline below from "does the cascade beat the baseline"
-(open question) to "why doesn't an independently-reasoning LLM auditor beat simple threshold
-tightening, and what does that say about this class of system" (answered, and arguably a more
-interesting thesis finding than a clean win would have been). **Added 2026-10-30:** the
-obvious pushback to a negative result, that the auditor might simply be broken or ignoring
-its inputs, is also now answered, not just anticipated. Three validation controls show the
-auditor returns "insufficient evidence" on 150 of 150 admissions when the note is withheld
-(versus 0 of 150 when it is present), changes its decision on 1 in 6 admissions when Stage 2's
-score is withheld, and reaches an identical decision 30 of 30 times when asked twice at
-temperature zero (see `MODEL_CARD.md`). The system does what it is supposed to do, and still
-underperforms the simple baseline. That combination is the actual finding.
+catalogued** — the full Stage 3 batch run (rerun merged 2026-11-21, all 9,899 flagged+noted
+admissions) gives a real result, and it is not the flattering one a reader might expect: at
+matched alert volume the full cascade does not improve on Stage 1 alone — a patient-level
+paired bootstrap shows significantly lower precision (Δ −0.0048, 95% CI [−0.0085, −0.0015])
+and statistically unchanged recall (Δ −0.0035, CI [−0.0076, +0.0003]) — and a subgroup-level
+follow-up shows the auditor trades recall for little-to-no precision gain almost everywhere
+it's applied (see `MODEL_CARD.md`). This changes the storyline below from "does the cascade
+beat the baseline" (open question) to "why doesn't an independently-reasoning LLM auditor beat
+simple threshold tightening, and what does that say about this class of system" (answered, and
+arguably a more interesting thesis finding than a clean win would have been). The obvious
+pushback to a negative result — that the auditor might simply be broken or ignoring its inputs
+— is addressed by the RQ2 validation: the full-run decision profile is consistent with an
+attentive, evidence-grounded auditor (88.5% model/rule agreement among decided, 93.1% with all
+quotes verified), and the four input-reliance control arms confirm it — with the note withheld
+the auditor abstains on 150/150, with Stage 2 withheld it changes ~11% of decisions (89.3%
+agreement with the reference arm), a repeated run of identical inputs agrees 100%, and the
+reference arm reproduces the main run on 145/150 (96.7%); the acceptance arm test passed 8/8 and
+the batch-size check leaves decisions unchanged (100%, grounds 65%). The finding: the system
+behaves as designed and still does not beat the simple baseline.
 
 ---
 
@@ -133,7 +137,7 @@ contribute, and do it with small, local, fairness-audited models."*
 | **1. Introduction** | Open with the composite patient vignette (below) + the alert-fatigue statistic. Pose the question: *can we make risk alerts trustworthy enough to act on?* |
 | **2. Literature review** | Build to the gap in three steps: structured models plateau (AUROC ≈ 0.7)… LLMs are used as predictors, feature-extractors, or explainers of a model's own output… but never to audit another model's decision. **Gap: nobody uses the LLM as an *independent auditor*.** |
 | **3. Data & Methodology** | Frame each stage as a member of the clinical team: the screener working within a fixed follow-up capacity (Stage 1, top-K% by risk), the specialist reading the note cold, forming an independent opinion (Stage 2, Clinical-Longformer), the auditor who reviews the case file — both scores, the SHAP reasons, the note itself — and reaches their own verdict (Stage 3, local + guarded prompt). State the prediction time-point (at discharge) explicitly. |
-| **4. Results** | Tell it as the patient's journey through the funnel: X admissions → Y flagged (top-K%) → Z upheld / W overridden by the auditor. Report the control-arm comparison (structured-only at the same alert budget) alongside precision/recall, full-cohort AND notes-cohort. The RQ1/RQ2 comparison table (does text add signal / does the auditor add value over the matched-budget baseline) is "the one table that settles it." |
+| **4. Results** | Tell it as the patient's journey through the funnel: X admissions → Y flagged (top-K%) → Z upheld / W overridden by the auditor. Report the control-arm comparison (structured-only at the same alert budget) alongside precision/recall, full-cohort AND notes-cohort. The RQ1 disagreement table and the RQ3 matched-volume comparison (does the auditor improve on the structured screen at the same alert budget) are "the tables that settle it." |
 | **5. Discussion** | Return to the vignette: what did the note say that the numbers couldn't? (disagreement analysis, quote-verified). Then honesty: coverage gap, calibration, single-center. Fairness rebuild as self-critical science. |
 | **6. Conclusion** | The workflow argument: this isn't a model, it's a *division of labour* between a fixed-capacity screen, an independent read, and an accountable auditor — a pattern that generalises beyond readmission. |
 
@@ -144,8 +148,8 @@ contribute, and do it with small, local, fairness-audited models."*
 2. **Alert-budget-matched comparison** as the recurring clinical metric: does the audited
    pipeline outperform the structured screen alone at the *same* alert volume
    (`_control_arm_report`)? Every results table repeats this comparison. [Done, at full
-   scale, in both directions (`MODEL_CARD.md`): the control arm wins. Use the real numbers,
-   not a placeholder.]
+   scale (`MODEL_CARD.md`): it does not — the paired test shows significantly lower precision
+   and statistically unchanged recall. Use the real numbers, not a placeholder.]
 3. **Name the pipeline.** Prefer "screen, independent read, audit" over the retired
    "triage-and-verify" framing — use it consistently as a
    brand (figure titles, table captions), so the committee remembers *the pattern*, not just
@@ -163,7 +167,7 @@ contribute, and do it with small, local, fairness-audited models."*
 
 > **Updated 2026-10-30: every result below is now real, final, and verified** — not a
 > placeholder. Stage 1 and Stage 2 are both retrained (`MODEL_CARD.md`); the full Stage 3
-> batch run, the RQ1/RQ2 comparisons, the subgroup analysis, and three validation controls
+> batch run, the RQ1–RQ3 comparisons, the subgroup analysis, and the four validation controls (done)
 > confirming the auditor genuinely uses its inputs are all complete
 > (`docs/ARCHITECTURE.md` §3, session 34). The body below states the actual findings
 > directly rather than posing them as open questions, since they no longer are.
@@ -197,12 +201,12 @@ contribute, and do it with small, local, fairness-audited models."*
 > population, independent of the cascade: no — the two carry statistically indistinguishable
 > signal, a null result that is itself informative. Does an independently-informed auditor
 > improve on the structured screen alone, including against the simplest alternative of just
-> raising its threshold to the same alert budget? Also no: at matched alert volume, the
-> structured screen alone beats the full three-stage cascade on both precision and recall.
-> Three validation controls rule out the obvious objection that the auditor is simply
-> ignoring its inputs — it reads the note, uses the independent score, and is fully
-> reproducible — and the gap persists regardless, worsening specifically where the two risk
-> signals disagree. A fairness audit closed a recall disparity affecting patients over 70
+> raising its threshold to the same alert budget? Also no: at matched alert volume the full
+> three-stage cascade does not improve on the structured screen — a paired comparison shows
+> significantly lower precision and statistically unchanged recall. The RQ2 decision profile
+> is consistent with an attentive auditor, and the input-reliance validation controls confirm
+> it — the auditor abstains on 150/150 without the note and changes ~11% of decisions without
+> Stage 2's score; the gap worsens specifically where the two risk signals disagree. A fairness audit closed a recall disparity affecting patients over 70
 > through age-stratified training and per-group calibration, though a smaller discrimination
 > gap for that group remains open. Every override is quote-verified against the source note,
 > making human review of the audit's reasoning tractable rather than a leap of faith.
@@ -233,14 +237,15 @@ at ~400; re-check length after any further edits.)*
 - **"Isn't a negative result bad for the thesis?"** → No — it is the contribution. No prior
   work in a systematic 49-study literature review uses an LLM as an independent auditor of
   *another model's* output. A rigorous, validated negative result (matched-volume control
-  arm, subgroup-level test, three separate controls ruling out "the system is just broken")
-  is a real empirical finding, not a failed experiment.
-- **"How do you know the auditor isn't just ignoring its inputs?"** → Three controls test
-  this directly. Withholding the note entirely makes it answer "insufficient evidence" on
-  150 of 150 admissions, versus 0 of 150 when the note is present: it does not guess.
-  Withholding Stage 2's score changes the decision on 1 in 6 admissions: that evidence
-  matters too. Asking the same question twice gives an identical answer 30 of 30 times:
-  the result is reproducible, not a lucky draw.
+  arm, subgroup-level test, and the RQ2 decision profile) is a real empirical finding, not a
+  failed experiment.
+- **"How do you know the auditor isn't just ignoring its inputs?"** → The full-run decision
+  profile (88.5% model/rule agreement among decided, 93.1% with all quotes verified, 219
+  abstentions) is consistent with an attentive auditor, and the four control arms confirm it:
+  with the note withheld it abstains on 150/150, with Stage 2 withheld it changes ~11% of
+  decisions (89.3% agreement with the reference arm), a repeated run of identical inputs agrees
+  100%, and the reference arm reproduces the main run on 145/150 (96.7%). The acceptance arm
+  test passed 8/8 and the batch-size check leaves decisions unchanged (100%, grounds 65%).
 - **"What's novel?"** → The *auditor* framing (LLM independently reviews another model's
   flagged output, on stated evidence, with a quoted and verified justification for every
   override) — a role absent from a systematic 49-study literature review — plus a validated

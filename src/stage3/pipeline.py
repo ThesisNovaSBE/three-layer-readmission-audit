@@ -30,6 +30,7 @@ Usage::
 
 from __future__ import annotations
 
+import time
 from typing import NamedTuple
 
 import joblib
@@ -43,9 +44,27 @@ from src.schemas import MODEL_TARGET_COL
 from src.stage2._utils import get_stage2_model_path
 from src.stage3.attention import extract_attention_spans
 from src.stage3.discordance import compute_discordance
-from src.stage3.explain import build_prompt, call_llm, is_note_truncated
+from src.stage3._notecap import is_note_truncated
+from src.stage3.explain import build_prompt, call_llm
 from src.stage3.models import ExplanationResult
 from src.stage3.shap_extract import extract_shap_for_patient
+
+# Per-call SHAP/attention wall-clock, accumulated by _prepare_patient (N7).
+# batch.py resets this before each chunk and reads it after, to log per-chunk
+# averages. A module-level accumulator (not a _prepare_patient parameter)
+# keeps that function within the argument limit; single-threaded, so safe.
+_PREP_TIMINGS: dict[str, float] = {"shap": 0.0, "attention": 0.0}
+
+
+def reset_prep_timings() -> None:
+    """Zero the SHAP/attention timing accumulator (call before a chunk)."""
+    _PREP_TIMINGS["shap"] = 0.0
+    _PREP_TIMINGS["attention"] = 0.0
+
+
+def get_prep_timings() -> dict[str, float]:
+    """Accumulated SHAP/attention seconds since the last reset_prep_timings()."""
+    return dict(_PREP_TIMINGS)
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
@@ -74,8 +93,23 @@ def _load_results(model_dir: object) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _require_raw_stage1(results_df: pd.DataFrame) -> None:
+    """Raise a clear error if the results file predates the stage1_score_raw
+    column. No fallback to the calibrated score: the whole point of the raw
+    column is that the isotonic-calibrated score is too tied to rank, so
+    silently ranking on it would reintroduce exactly the bias this removes."""
+    if "stage1_score_raw" not in results_df.columns:
+        raise KeyError(
+            "stage2_results.csv has no 'stage1_score_raw' column. It was written "
+            "by an older src/stage2/predict.py that only stored the calibrated "
+            "Stage 1 score. Re-run `python -m src.stage2.predict` (and --all) so "
+            "the raw XGBoost probability is available for discordance ranking."
+        )
+
+
 def _lookup_patient(hadm_id: int, results_df: pd.DataFrame) -> dict:
     """Extract one patient's Stage 1 + Stage 2 data from the results DataFrame."""
+    _require_raw_stage1(results_df)
     row = results_df[results_df["hadm_id"] == hadm_id]
     if row.empty:
         raise KeyError(
@@ -87,6 +121,7 @@ def _lookup_patient(hadm_id: int, results_df: pd.DataFrame) -> dict:
         "hadm_id": int(r["hadm_id"]),
         "subject_id": int(r.get("subject_id", 0)),
         "stage1_score": float(r["stage1_score"]),
+        "stage1_score_raw": float(r["stage1_score_raw"]),
         "stage1_threshold": float(r["stage1_threshold"]),
         "stage2_score": float(r["stage2_score"]),
         "stage2_confirmed": bool(int(r["stage2_confirmed"])),
@@ -95,16 +130,20 @@ def _lookup_patient(hadm_id: int, results_df: pd.DataFrame) -> dict:
 
 
 def _cohort_scores(results_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Return (stage1_scores, stage2_scores) for the flagged+noted cohort.
+    """Return (stage1_raw_scores, stage2_scores) for the flagged+noted cohort.
 
     This is the reference population percentile ranks are computed against —
     every admission that reached Stage 2 (has a ``stage2_score``), i.e. the
     same population :func:`src.model.evaluate_pipeline._eval_stage2` calls the
-    "notes cohort".
+    "notes cohort". The Stage 1 side is the RAW (uncalibrated) score: r1 ranks
+    on it to avoid the isotonic score's heavy ties (see
+    src/stage2/predict._prepare_population). The Stage 2 side is the
+    calibrated note-based score, unchanged.
     """
+    _require_raw_stage1(results_df)
     cohort = results_df.dropna(subset=["stage2_score"])
     return (
-        cohort["stage1_score"].to_numpy(dtype=float),
+        cohort["stage1_score_raw"].to_numpy(dtype=float),
         cohort["stage2_score"].to_numpy(dtype=float),
     )
 
@@ -121,8 +160,50 @@ def _get_patient_feature_row(
     available = [c for c in feat_cols if c in matrix.columns]
     match = matrix[matrix["hadm_id"] == hadm_id]
     if match.empty:
-        return pd.Series({c: 0.0 for c in available})
+        # Raise, don't fabricate an all-zero row -- a zero row would make the
+        # SHAP explanation describe a non-existent patient (every feature 0,
+        # e.g. "SpO2 0") and silently feed that to the auditor. In batch, this
+        # becomes a prep-failure row (discordance_mode=PREP_FAILED) instead.
+        raise KeyError(
+            f"hadm_id {hadm_id} is not in the feature matrix; cannot build its "
+            "structured features for SHAP. The results file and the feature "
+            "matrix are out of sync."
+        )
     return match.iloc[0][available]
+
+
+# Max allowed |re-scored raw Stage 1 probability - stage1_score_raw in
+# stage2_results.csv|. Both come from the same estimator on the same features
+# (float32 inside XGBoost), so a genuine match agrees to ~1e-7; anything
+# larger means the feature row is not the record Stage 1 actually scored.
+_RAW_SCORE_TOL = 1e-5
+
+
+def _assert_feature_row_matches_score(
+    hadm_id: int, artifact: dict, feature_row: pd.Series, patient: dict
+) -> None:
+    """Raise if the feature row SHAP is about to explain does not reproduce
+    this admission's Stage 1 raw score from stage2_results.csv.
+
+    SHAP's own integrity check (sum of contributions == model margin) only
+    proves the attribution is internally consistent for WHATEVER row it was
+    given. It cannot detect that the row itself differs from the one scored
+    in Stage 2 (e.g. features.csv rebuilt since, a different hadm_id match,
+    a quick-mode matrix). This closes that gap: Stage 2 -> Stage 3 handoff
+    must refer to the same patient record. In batch, a mismatch becomes a
+    PREP_FAILED row.
+    """
+    estimator = artifact.get("estimator")
+    if estimator is None or not hasattr(estimator, "predict_proba"):
+        return
+    frame = pd.DataFrame([feature_row])[list(artifact["feature_cols"])]
+    rescored = float(estimator.predict_proba(frame)[:, 1][0])
+    if abs(rescored - patient["stage1_score_raw"]) > _RAW_SCORE_TOL:
+        raise ValueError(
+            f"hadm_id {hadm_id}: feature row re-scores to {rescored:.6f} but "
+            f"stage2_results.csv has stage1_score_raw={patient['stage1_score_raw']:.6f}. "
+            "The feature matrix Stage 3 reads is not the one Stage 2 scored."
+        )
 
 
 def _load_note_text(hadm_id: int, subject_id: int, cfg: AppConfig) -> str:
@@ -205,6 +286,11 @@ def _prepare_patient(
     """Assemble one patient's evidence and build their prompt -- everything
     :func:`explain_patient` does up to (not including) the LLM call.
 
+    Wall-clock seconds spent on SHAP and attention are ACCUMULATED into the
+    module-level :data:`_PREP_TIMINGS` (N7 per-chunk profiling in batch.py,
+    which calls :func:`reset_prep_timings` / :func:`get_prep_timings` around
+    each chunk). Harmless for the single-patient API path, which ignores it.
+
     All heavy objects (artifact, results_df, feature_matrix, note_text) can be
     pre-loaded by the caller and passed in as keyword arguments — the API
     server does this at startup so each explanation request does not pay the
@@ -255,23 +341,38 @@ def _prepare_patient(
     df = results_df if results_df is not None else _load_results(get_model_dir())
     patient = _lookup_patient(hadm_id, df)
 
-    feature_row = _get_patient_feature_row(
-        hadm_id, loaded_artifact, cfg, feature_matrix
-    )
-    shap_strings = extract_shap_for_patient(
-        loaded_artifact, feature_row, top_k=cfg.stage3.top_shap_features
-    )
-
     note_text = (
         note_text if note_text is not None
         else _load_note_text(hadm_id, patient["subject_id"], cfg)
     )
-    attention_sentences = _get_attention(hadm_id, note_text, cfg)
+    # A real audit needs a note. An empty/whitespace-only note (admission not
+    # in notes_lookup, or no discharge summary on file) must not be audited as
+    # if the note were simply uninformative -- raise so batch.py records a
+    # PREP_FAILED row. Checked before SHAP/attention so a note-less admission
+    # fails fast. The blind-note control (suppress_note) is the one case where
+    # an empty note is intentional, so it is exempt.
+    if not suppress_note and not note_text.strip():
+        raise ValueError(f"no discharge note for hadm_id {hadm_id}")
 
-    cohort_s1, cohort_s2 = _cohort_scores(df)
+    feature_row = _get_patient_feature_row(
+        hadm_id, loaded_artifact, cfg, feature_matrix
+    )
+    _assert_feature_row_matches_score(hadm_id, loaded_artifact, feature_row, patient)
+    _t = time.perf_counter()
+    shap_strings = extract_shap_for_patient(
+        loaded_artifact, feature_row, top_k=cfg.stage3.top_shap_features
+    )
+    _PREP_TIMINGS["shap"] += time.perf_counter() - _t
+    _t = time.perf_counter()
+    attention_sentences = _get_attention(hadm_id, note_text, cfg)
+    _PREP_TIMINGS["attention"] += time.perf_counter() - _t
+
+    # r1 ranks on the RAW Stage 1 score (tie-free); r2 on the calibrated
+    # Stage 2 score. Both cohort arrays come from _cohort_scores accordingly.
+    cohort_s1_raw, cohort_s2 = _cohort_scores(df)
     discordance = compute_discordance(
-        patient["stage1_score"], patient["stage2_score"],
-        cohort_s1, cohort_s2,
+        patient["stage1_score_raw"], patient["stage2_score"],
+        cohort_s1_raw, cohort_s2,
         displacement_pp=cfg.stage3.discordance_displacement_pp,
     )
 
@@ -285,6 +386,8 @@ def _prepare_patient(
     prompt_attention = [] if suppress_note else attention_sentences
 
     prompt = build_prompt(
+        # The prompt shows the CALIBRATED Stage 1 score as the probability;
+        # only the percentile rank (r1, inside `discordance`) uses the raw score.
         stage1_score=patient["stage1_score"],
         stage1_threshold=patient["stage1_threshold"],
         stage2_score=patient["stage2_score"],
@@ -320,6 +423,7 @@ def _assemble_result(
     return ExplanationResult(
         hadm_id=patient["hadm_id"],
         stage1_score=patient["stage1_score"],
+        stage1_score_raw=patient["stage1_score_raw"],
         stage1_threshold=patient["stage1_threshold"],
         stage2_score=patient["stage2_score"],
         stage2_confirmed=patient["stage2_confirmed"],

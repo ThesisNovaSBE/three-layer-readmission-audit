@@ -18,6 +18,10 @@
 # excerpts) are NOT covered by this and stay trackable.
 models/stage3_full_evaluation_export.json
 
+# Raw Stage 3 model-output sidecar (N5): contains discharge-note text and the
+# full prompt under --limit, so it must never be committed.
+*.raw.jsonl
+
 # ── Model artifacts ──
 # Exclude large binaries at any depth under models/
 models/**/*.pkl

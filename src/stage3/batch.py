@@ -19,9 +19,9 @@ it can batch the middle step across a whole chunk of patients.
 This is required, not optional, for two things the on-demand path cannot
 produce on its own:
 
-- RQ2 metrics at scale (net reclassification improvement of the auditor
-  over Stage 1 alone) — needs a decision for every flagged+noted admission,
-  not one at a time.
+- RQ2 metrics at scale (precision and recall at matched alert volume for
+  the auditor over Stage 1 alone) — needs a decision for every flagged+noted
+  admission, not one at a time.
 - ``evaluate_pipeline.py``'s final-prediction column, which per
   docs/ARCHITECTURE.md should be Stage 3's decision, not Stage 2's
   threshold, once this file exists.
@@ -45,6 +45,9 @@ Usage::
     python -m src.stage3.batch --limit 10        # smoke test
     python -m src.stage3.batch --resume          # skip hadm_ids already written
     python -m src.stage3.batch --sweep           # sensitivity sweep only, no LLM calls
+    python -m src.stage3.batch --resume --range-start 5200 --range-end 9600
+                                                 # one parallel range job (see
+                                                 # scripts/slurm_stage3_range.sh)
 """
 
 from __future__ import annotations
@@ -52,10 +55,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 from typing import NamedTuple
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.config import get_model_dir, load_config
@@ -63,16 +68,33 @@ from src.config_schema import AppConfig
 from src.data.features import load_feature_matrix
 from src.schemas import MODEL_TARGET_COL
 from src.stage3.discordance import sweep_discordance_thresholds
+from src.stage3._ranges import select_range, validate_range
+from src.stage3._annotation import BatchGenerationError, generation_failure_annotation
 from src.stage3.explain import call_llm_batch
-from src.stage3.pipeline import _assemble_result, _lookup_patient, _prepare_patient, explain_patient
+from src.stage3.pipeline import (
+    _assemble_result,
+    _lookup_patient,
+    _prepare_patient,
+    explain_patient,
+    get_prep_timings,
+    reset_prep_timings,
+)
 
 _OUTPUT_FIELDS = [
-    "hadm_id", "stage1_score", "stage1_threshold", "stage2_score",
+    "hadm_id", "stage1_score", "stage1_score_raw", "stage1_threshold", "stage2_score",
     "stage2_confirmed", "r1", "r2", "displacement", "discordance_mode",
+    "top_shap_features", "attention_sentences",
     "mitigating_grounds", "aggravating_grounds", "all_quotes_verified",
     "planned_return", "clinical_justification", "decision_model",
     "decision_rule", "note_truncated", "model_name", "annotation_failed",
 ]
+# top_shap_features/attention_sentences (2026-11): what the auditor actually
+# saw in its prompt, previously computed (ExplanationResult already had
+# both fields) but never written to the output CSV -- every post-hoc check
+# of the real SHAP/attention bugs had to reconstruct these from scratch
+# against the Stage 1 artifact and the raw notes instead of just reading
+# them. Must be added before the Stage 3 rerun: the only time this is free
+# to add is before the six-day run, not after.
 
 
 def _load_artifact(cfg: AppConfig) -> dict:
@@ -103,6 +125,91 @@ def _already_done(out_path: Path) -> set[int]:
         return set()
     existing = pd.read_csv(out_path, usecols=["hadm_id"])
     return set(existing["hadm_id"].astype(int).tolist())
+
+
+def _assert_output_matches_current_inputs(out_path: Path, results_df: pd.DataFrame) -> None:
+    """Guard against resuming/appending into an output file from a DIFFERENT
+    run. If ``out_path`` exists, require:
+
+      (a) its header equals the current ``_OUTPUT_FIELDS``, and
+      (b) every existing row's ``stage2_score`` and ``stage1_score_raw``
+          match the CURRENT ``stage2_results.csv`` (``results_df``) to 1e-9.
+
+    Otherwise ``SystemExit`` -- the file is almost certainly from an earlier
+    run (e.g. before a recalibration regenerated stage2_results.csv) and must
+    be moved aside, or resuming would silently blend two incompatible runs.
+
+    No-op when ``out_path`` doesn't exist -- a fresh run, or the arm test
+    (which deletes its reference file first), never trips this.
+
+    A header-only file (a job killed during model load, before any row) is
+    allowed to resume. A file whose LAST line was cut off mid-write by a kill
+    (a NaN annotation_failed, or a CSV parse error inside a quoted JSON field)
+    is rejected with a "delete that line and resubmit" message.
+    """
+    if not out_path.exists():
+        return
+    cut_off_tail = ("the last line was likely cut off mid-write by a kill. Delete that "
+                    "last line and resubmit.")
+    try:
+        existing = pd.read_csv(out_path)
+    except pd.errors.ParserError as exc:
+        # A kill inside a quoted JSON field (mitigating_grounds, etc.) leaves an
+        # unterminated record that pandas can't parse -- same remedy as a NaN
+        # last row below.
+        raise SystemExit(f"[stage3/batch] {out_path} failed to parse -- {cut_off_tail}") from exc
+    if list(existing.columns) != _OUTPUT_FIELDS:
+        raise SystemExit(
+            f"[stage3/batch] Refusing to resume into {out_path}: its header "
+            f"({len(existing.columns)} columns) does not match the current output "
+            f"schema ({len(_OUTPUT_FIELDS)} columns). It is almost certainly from an "
+            "earlier run -- move it aside first."
+        )
+    if existing.empty:
+        # Header-only file (died during model load, before any patient): nothing
+        # to verify, and resuming is correct -- don't crash.
+        return
+    # annotation_failed is the last column, so a line cut off mid-write shows a
+    # malformed value there (NaN, or a truncated "Fals"). A clean bool column
+    # stringifies to exactly "True"/"False"; anything else is a cut-off row.
+    bad = ~existing["annotation_failed"].astype(str).isin(["True", "False"])
+    if bad.any():
+        raise SystemExit(
+            f"[stage3/batch] {out_path} has row(s) with a malformed annotation_failed "
+            f"value (hadm_id {existing.loc[bad, 'hadm_id'].tolist()}); {cut_off_tail}"
+        )
+    for col in ("stage2_score", "stage1_score_raw"):
+        if col not in results_df.columns:
+            raise SystemExit(
+                f"[stage3/batch] Current stage2_results.csv has no '{col}' column; "
+                f"cannot verify {out_path} against it. Re-run src.stage2.predict."
+            )
+    if not results_df["hadm_id"].is_unique:
+        raise SystemExit(
+            "[stage3/batch] Current stage2_results.csv has duplicate hadm_ids; cannot "
+            f"verify {out_path} against it. Re-run src.stage2.predict."
+        )
+    # An existing hadm_id absent from the current stage2_results.csv means the
+    # file is from a different run -- stop with the clear move-aside message
+    # rather than letting a lookup raise a bare KeyError.
+    current = results_df.set_index("hadm_id")
+    missing = sorted(set(existing["hadm_id"]) - set(current.index))
+    if missing:
+        raise SystemExit(
+            f"[stage3/batch] Refusing to resume into {out_path}: it contains "
+            f"{len(missing)} hadm_id(s) absent from the current stage2_results.csv "
+            f"(e.g. {missing[:5]}). It is from an earlier run -- move it aside first."
+        )
+    for col in ("stage2_score", "stage1_score_raw"):
+        out_vals = existing[col].to_numpy(dtype=float)
+        cur_vals = current.loc[existing["hadm_id"], col].to_numpy(dtype=float)
+        if not np.allclose(out_vals, cur_vals, rtol=0, atol=1e-9, equal_nan=True):
+            raise SystemExit(
+                f"[stage3/batch] Refusing to resume into {out_path}: its '{col}' "
+                "values do not match the current stage2_results.csv (to 1e-9). The "
+                "Stage 2 results were regenerated since this file was written -- move "
+                "the old output aside before (re)running."
+            )
 
 
 def _preload_notes(
@@ -157,19 +264,26 @@ def _prep_failure_row(
     try:
         patient = _lookup_patient(hadm_id, results_df)
         stage1_score = patient["stage1_score"]
+        stage1_score_raw = patient["stage1_score_raw"]
         stage1_threshold = patient["stage1_threshold"]
         stage2_score = patient["stage2_score"]
         stage2_confirmed = patient["stage2_confirmed"]
     except Exception:  # pylint: disable=broad-exception-caught
-        stage1_score = stage1_threshold = stage2_score = 0.0
+        stage1_score = stage1_score_raw = stage1_threshold = stage2_score = 0.0
         stage2_confirmed = False
     return {
         "hadm_id": hadm_id,
         "stage1_score": stage1_score,
+        "stage1_score_raw": stage1_score_raw,
         "stage1_threshold": stage1_threshold,
         "stage2_score": stage2_score,
         "stage2_confirmed": stage2_confirmed,
-        "r1": 0.0, "r2": 0.0, "displacement": 0.0, "discordance_mode": "CONCORDANT",
+        # PREP_FAILED / NaN, not CONCORDANT / 0: a prep failure produced no
+        # real discordance, so it must be excluded from the sensitivity sweep
+        # and discordance analyses, not silently counted as a concordant 0.
+        "r1": float("nan"), "r2": float("nan"),
+        "displacement": float("nan"), "discordance_mode": "PREP_FAILED",
+        "top_shap_features": "[]", "attention_sentences": "[]",
         "mitigating_grounds": "[]", "aggravating_grounds": "[]",
         "all_quotes_verified": None, "planned_return": None,
         "clinical_justification": f"[PREP FAILED: {exc}]",
@@ -179,70 +293,180 @@ def _prep_failure_row(
     }
 
 
+def _retry_chunk_individually(
+    prepared: list[tuple[int, object]], cfg: AppConfig
+) -> tuple[list[dict], int, int]:
+    """After a whole-chunk generate() failure, retry each patient once in a
+    batch of one. Returns (annotations, n_retried, n_retry_failed) with one
+    annotation per prepared patient, in order -- a real annotation on
+    recovery, or a generation_failure_annotation (annotation_failed=True) if
+    the individual retry also raised. Logged separately from the normal
+    per-chunk counters so retries are visible in the job log."""
+    annotations: list[dict] = []
+    n_retried = n_retry_failed = 0
+    for hadm_id, prep in prepared:
+        n_retried += 1
+        try:
+            single = call_llm_batch(
+                [prep.prompt], cfg, note_texts=[prep.prompt_note_text],
+                raise_on_generate_error=True,
+            )
+            annotations.append(single[0])
+        except BatchGenerationError as exc:
+            n_retry_failed += 1
+            print(f"[stage3/batch] [generate-retry] hadm_id={hadm_id} "
+                  f"FAILED again: {exc} -- recording as annotation_failed", flush=True)
+            annotations.append(generation_failure_annotation(str(exc)))
+    print(f"[stage3/batch] [generate-retry] {n_retried} retried, "
+          f"{n_retried - n_retry_failed} recovered, {n_retry_failed} still failed",
+          flush=True)
+    return annotations, n_retried, n_retry_failed
+
+
+def _log_chunk_timing(n_prepared: int, gen_s: float) -> None:
+    """Log per-chunk average SHAP/attention/generation ms per patient plus the
+    CUDA peak memory (N7). SHAP/attention come from pipeline's accumulator."""
+    if n_prepared <= 0:
+        return
+    prep = get_prep_timings()
+    print(f"[stage3/batch] [timing] chunk n={n_prepared}: "
+          f"shap {prep['shap'] / n_prepared * 1000:.0f}ms/pt, "
+          f"attention {prep['attention'] / n_prepared * 1000:.0f}ms/pt, "
+          f"generation {gen_s / n_prepared * 1000:.0f}ms/pt"
+          f"{_cuda_peak_mem_str()}", flush=True)
+
+
+def _cuda_peak_mem_str() -> str:
+    """', cuda_peak <X.X>GB' if torch+CUDA are available, else '' (N7). Reads
+    torch.cuda.max_memory_allocated() only -- no device changes, no reset."""
+    try:
+        import torch  # noqa: PLC0415  pylint: disable=import-outside-toplevel
+        if torch.cuda.is_available():
+            return f", cuda_peak {torch.cuda.max_memory_allocated() / 1024 ** 3:.1f}GB"
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    return ""
+
+
+class _ChunkWriter(NamedTuple):
+    """Where _process_chunk writes: the CSV writer/handle, and (optionally) the
+    raw-output sidecar path for N5 plus whether to include the prompt in it."""
+
+    writer: "csv.DictWriter"
+    fh: object
+    raw_path: Path | None = None
+    include_prompt: bool = False
+
+
+def _append_raw(out: "_ChunkWriter", hadm_id: int, annotation: dict, prompt: str) -> None:
+    """Append one line to the <out>.raw.jsonl sidecar (N5): the raw model
+    response per admission, plus the prompt when --limit is set. Append mode
+    so --resume keeps earlier segments' lines. No-op when raw logging is off."""
+    if out.raw_path is None:
+        return
+    record = {"hadm_id": int(hadm_id), "raw_response": annotation.get("raw_response", "")}
+    if out.include_prompt:
+        record["prompt"] = prompt
+    with open(out.raw_path, "a", encoding="utf-8") as rf:
+        rf.write(json.dumps(record) + "\n")
+
+
 def _process_chunk(
     chunk: list[int],
     cfg: AppConfig,
+    setup: "_BatchSetup",
+    out: "_ChunkWriter",
     *,
-    results_df: pd.DataFrame,
-    artifact: dict,
-    feature_matrix: pd.DataFrame,
-    notes_lookup: dict[int, str],
-    writer: "csv.DictWriter",
-    fh,
-) -> tuple[int, int, int]:
+    suppress_note: bool = False,
+    suppress_stage2: bool = False,
+) -> tuple[int, int, int, int, int]:
     """Prepare, batch-generate, assemble, and write one chunk of patients.
 
     Extracted from run_batch_audit() (2026-09-15) to fix a pylint
     too-many-locals -- same reason src/stage2/calibrate.py's cache helpers
-    were split out. Returns (n_ok, n_failed, n_annotation_failed) deltas
+    were split out. ``setup`` bundles the pre-loaded artifact / results /
+    feature matrix / notes so this stays within the arg limit. Returns
+    (n_ok, n_failed, n_annotation_failed, n_retried, n_retry_failed) deltas
     for this chunk only; the caller accumulates running totals.
+
+    suppress_note/suppress_stage2: validation-control manipulation (Phase
+    D1/D2), threaded through to _prepare_patient. Default False for the
+    real run. scripts/run_validation_controls.py passes these through this
+    same batched path (not a separate one-at-a-time implementation) so the
+    manipulated input is the only thing that differs from the main run --
+    confirmed 2026-11 that running controls one patient at a time instead
+    of batched (as the main run does) is itself a confound in bfloat16.
     """
+    results_df = setup.results_df
     n_ok = n_failed = n_annotation_failed = 0
+    reset_prep_timings()  # accumulate this chunk's SHAP/attention time (N7)
     prepared: list[tuple[int, object]] = []
     for hadm_id in chunk:
         try:
             prepared.append((hadm_id, _prepare_patient(
                 hadm_id, cfg,
-                results_df=results_df, artifact=artifact,
-                feature_matrix=feature_matrix,
-                note_text=notes_lookup.get(hadm_id, ""),
+                results_df=results_df, artifact=setup.artifact,
+                suppress_note=suppress_note, suppress_stage2=suppress_stage2,
+                feature_matrix=setup.feature_matrix,
+                note_text=setup.notes_lookup.get(hadm_id, ""),
             )))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             # One bad admission (missing note, malformed feature row) must
             # not kill the whole batch -- and must still get a row (see
             # _prep_failure_row) so --resume doesn't retry it forever.
             print(f"[stage3/batch] [prep] hadm_id={hadm_id} FAILED: {exc}")
-            writer.writerow(_prep_failure_row(hadm_id, results_df, exc, cfg.stage3.model_name))
-            fh.flush()
+            out.writer.writerow(_prep_failure_row(hadm_id, results_df, exc, cfg.stage3.model_name))
+            out.fh.flush()
             n_failed += 1
 
     if not prepared:
-        return n_ok, n_failed, n_annotation_failed
+        return n_ok, n_failed, n_annotation_failed, 0, 0
 
     prompts = [p.prompt for _, p in prepared]
     note_texts = [p.prompt_note_text for _, p in prepared]
+    n_retried = n_retry_failed = 0
+    _t_gen = time.perf_counter()
     try:
-        annotations = call_llm_batch(prompts, cfg, note_texts=note_texts)
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        # A whole-chunk generation failure (OOM, transient LLM-serving
-        # error) must not kill the rest of the batch -- mark every patient
-        # in this chunk failed and let the caller move on to the next chunk.
+        annotations = call_llm_batch(
+            prompts, cfg, note_texts=note_texts, raise_on_generate_error=True
+        )
+    except BatchGenerationError as exc:
+        # A whole-chunk generate() failure (OOM, transient kernel/serving
+        # error) is not necessarily per-patient-fatal -- a batch of one may
+        # fit where a batch of four did not. Retry each patient individually
+        # before recording any of them as failed, so a transient batch-level
+        # failure doesn't permanently mark the whole chunk annotation_failed
+        # (which --resume would then skip forever).
         ids = ", ".join(str(h) for h, _ in prepared)
-        print(f"[stage3/batch] [generate] hadm_ids=[{ids}] FAILED: {exc}")
-        return n_ok, n_failed + len(prepared), n_annotation_failed
+        print(f"[stage3/batch] [generate] chunk hadm_ids=[{ids}] FAILED: {exc} "
+              f"-- retrying {len(prepared)} patient(s) individually", flush=True)
+        annotations, n_retried, n_retry_failed = _retry_chunk_individually(prepared, cfg)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # An unexpected, non-generate failure (e.g. model load) is not a
+        # per-patient problem -- mark the whole chunk failed, write no rows,
+        # and let the caller move on. --resume retries these next run since
+        # no row was written.
+        ids = ", ".join(str(h) for h, _ in prepared)
+        print(f"[stage3/batch] [generate] hadm_ids=[{ids}] FAILED (non-generate): {exc}",
+              flush=True)
+        return n_ok, n_failed + len(prepared), n_annotation_failed, n_retried, n_retry_failed
 
-    for (_, prep), annotation in zip(prepared, annotations):
+    for (hadm_id, prep), annotation in zip(prepared, annotations):
         result = _assemble_result(prep, annotation)
         row = result.model_dump()
         row["mitigating_grounds"] = json.dumps(row["mitigating_grounds"])
         row["aggravating_grounds"] = json.dumps(row["aggravating_grounds"])
-        writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
-        fh.flush()
+        row["top_shap_features"] = json.dumps(row["top_shap_features"])
+        row["attention_sentences"] = json.dumps(row["attention_sentences"])
+        out.writer.writerow({k: row[k] for k in _OUTPUT_FIELDS})
+        out.fh.flush()
+        _append_raw(out, hadm_id, annotation, prep.prompt)
         n_ok += 1
         if row["annotation_failed"]:
             n_annotation_failed += 1
 
-    return n_ok, n_failed, n_annotation_failed
+    _log_chunk_timing(len(prepared), time.perf_counter() - _t_gen)
+    return n_ok, n_failed, n_annotation_failed, n_retried, n_retry_failed
 
 
 class _BatchSetup(NamedTuple):
@@ -262,23 +486,48 @@ def _setup_batch(
     limit: int | None,
     resume: bool,
     out_path: Path,
+    range_start: int | None = None,
+    range_end: int | None = None,
 ) -> _BatchSetup:
     """Load artifact/results/feature-matrix/notes and resolve the target
     admission list -- extracted (2026-09-15) alongside _process_chunk to
-    fix a pylint too-many-locals on run_batch_audit."""
+    fix a pylint too-many-locals on run_batch_audit.
+
+    ``range_start``/``range_end`` (parallel range jobs) select the slice
+    ``targets[start:end]`` of the ordered target list instead of the whole
+    list; mutually exclusive with ``limit``. The cohort used for r1/r2 and the
+    discordance category is always the FULL flagged cohort (``results_df``),
+    independent of this slice -- the range only narrows WHICH admissions are
+    audited, not the population they are ranked against."""
     # Artifact MUST load before torch — see src/stage3/pipeline.py.
     artifact = _load_artifact(cfg)
     results_df = _load_results(get_model_dir())
     feature_matrix = load_feature_matrix(cfg, "full")
 
     targets = hadm_ids if hadm_ids is not None else results_df["hadm_id"].astype(int).tolist()
-    if limit is not None:
-        targets = targets[:limit]
-
     done = _already_done(out_path) if resume else set()
-    pending = [h for h in targets if h not in done]
+
+    range_requested = range_start is not None or range_end is not None
+    if range_requested:
+        if limit is not None:
+            raise SystemExit(
+                "[stage3/batch] --limit cannot be combined with "
+                "--range-start/--range-end."
+            )
+        validate_range(
+            range_start, range_end, len(targets), cfg.stage3.generation_batch_size
+        )
+        n_in_scope = range_end - range_start
+        pending = select_range(targets, range_start, range_end, done)
+        scope_note = f" [range {range_start}:{range_end}]"
+    else:
+        if limit is not None:
+            targets = targets[:limit]
+        n_in_scope = len(targets)
+        pending = [h for h in targets if h not in done]
+        scope_note = ""
     print(
-        f"[stage3/batch] {len(targets):,} target admissions, "
+        f"[stage3/batch] {n_in_scope:,} target admissions{scope_note}, "
         f"{len(done):,} already done, {len(pending):,} pending"
     )
 
@@ -303,6 +552,39 @@ def _setup_batch(
     )
 
 
+_FAILFAST_MIN_PROCESSED = 100
+_FAILFAST_RATE = 0.2
+
+
+def _trigger_failfast(out_path: Path, processed: int, failed_total: int) -> None:
+    """Fail-fast (N6): too many admissions are failing, so stop the whole run
+    rather than burn GPU hours producing a mostly-broken output. Writes
+    ``<out dir>/stage3_FAILFAST`` with the counts (the SLURM script refuses to
+    start while that file exists) and raises SystemExit after printing the
+    first three error justifications from the rows written so far."""
+    errs: list[str] = []
+    try:
+        done = pd.read_csv(out_path)
+        bad = done[done["annotation_failed"].astype(bool)]["clinical_justification"].head(3)
+        errs = [str(x) for x in bad]
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass  # diagnostics only -- never let the error readout mask the abort
+    rate = failed_total / processed
+    failfast = out_path.parent / "stage3_FAILFAST"
+    failfast.write_text(
+        f"processed={processed}\nfailed_or_annotation_failed={failed_total}\n"
+        f"failure_rate={rate:.4f}\n" + "".join(f"error: {e}\n" for e in errs)
+    )
+    print(f"[stage3/batch] FAIL-FAST: {failed_total}/{processed} failed ({rate:.1%} > "
+          f"{_FAILFAST_RATE:.0%}). First errors:", flush=True)
+    for e in errs:
+        print(f"  {e}", flush=True)
+    raise SystemExit(
+        f"[stage3/batch] Aborting: failure rate {rate:.1%} over {processed} admissions. "
+        f"Wrote {failfast}; investigate before resubmitting (and delete it to proceed)."
+    )
+
+
 def run_batch_audit(
     cfg: AppConfig,
     *,
@@ -310,6 +592,8 @@ def run_batch_audit(
     limit: int | None = None,
     resume: bool = False,
     out_path: Path | None = None,
+    range_start: int | None = None,
+    range_end: int | None = None,
 ) -> Path:
     """Run Stage 3 over every Stage 1-flagged, note-covered admission.
 
@@ -317,23 +601,55 @@ def run_batch_audit(
         cfg:      validated project config.
         hadm_ids: explicit list of admissions to audit. If ``None``, audits
                   every admission in ``models/stage2_results.csv``.
-        limit:    audit only the first N admissions (smoke-testing).
+        limit:    audit only the first N admissions (smoke-testing). Mutually
+                  exclusive with ``range_start``/``range_end``.
         resume:   skip hadm_ids already present in ``out_path`` and append
                   rather than overwrite.
         out_path: output CSV path. Defaults to
-                  ``models/stage3_batch_results.csv``.
+                  ``models/stage3_batch_results.csv``, or -- when a range is
+                  set and no path is given --
+                  ``models/stage3_batch_results.range{S}-{E}.csv``.
+        range_start / range_end: audit only ``targets[start:end]`` of the
+                  ordered target list (a parallel range job). Both must be
+                  multiples of the generation batch size, except ``end`` may
+                  equal the total target count; see
+                  :func:`src.stage3._ranges.validate_range`.
+                  The r1/r2 ranks and discordance category are still computed
+                  against the FULL flagged cohort, not this slice.
 
     Returns:
         The output path written to.
     """
-    out_path = out_path or (get_model_dir() / "stage3_batch_results.csv")
+    if out_path is None:
+        if range_start is not None:
+            out_path = (
+                get_model_dir()
+                / f"stage3_batch_results.range{range_start}-{range_end}.csv"
+            )
+        else:
+            out_path = get_model_dir() / "stage3_batch_results.csv"
+    if resume:
+        # Fail before the (expensive) note preload if the existing output is
+        # from a different run -- header + per-row stage2_score/stage1_score_raw
+        # must match the current stage2_results.csv.
+        _assert_output_matches_current_inputs(out_path, _load_results(get_model_dir()))
     setup = _setup_batch(
-        cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path
+        cfg, hadm_ids=hadm_ids, limit=limit, resume=resume, out_path=out_path,
+        range_start=range_start, range_end=range_end,
     )
 
     write_header = not (resume and out_path.exists())
     mode = "a" if resume and out_path.exists() else "w"
+    # Raw-output sidecar (N5): <out>.raw.jsonl, one line per audited admission.
+    # Cleared on a fresh run (same condition as the CSV header); appended on
+    # --resume so earlier segments' lines survive. Prompt included only under
+    # --limit (a smoke/dev run). Not part of _OUTPUT_FIELDS and *.raw.jsonl is
+    # gitignored (contains note text).
+    raw_path = out_path.with_name(out_path.stem + ".raw.jsonl")
+    if write_header:
+        raw_path.unlink(missing_ok=True)
     n_ok = n_failed = n_annotation_failed = 0
+    n_retried = n_retry_failed = 0
     # Patients per batched generate() call, not per-row CSV write -- rows
     # are still written and flushed one at a time within a chunk, so
     # --resume's crash-recovery granularity is unchanged. Only the LLM call
@@ -346,25 +662,35 @@ def run_batch_audit(
         writer = csv.DictWriter(fh, fieldnames=_OUTPUT_FIELDS)
         if write_header:
             writer.writeheader()
-
+        chunk_out = _ChunkWriter(writer, fh, raw_path, include_prompt=limit is not None)
         for chunk_start in range(0, len(setup.pending), chunk_size):
-            chunk = setup.pending[chunk_start:chunk_start + chunk_size]
-            d_ok, d_failed, d_annotation_failed = _process_chunk(
-                chunk, cfg,
-                results_df=setup.results_df, artifact=setup.artifact,
-                feature_matrix=setup.feature_matrix, notes_lookup=setup.notes_lookup,
-                writer=writer, fh=fh,
+            # deltas = (ok, failed, annotation_failed, retried, retry_failed) for
+            # this chunk -- kept as one tuple (not five locals) to stay within
+            # pylint's per-function local limit.
+            deltas = _process_chunk(
+                setup.pending[chunk_start:chunk_start + chunk_size], cfg, setup, chunk_out,
             )
-            n_ok += d_ok
-            n_failed += d_failed
-            n_annotation_failed += d_annotation_failed
+            n_ok += deltas[0]
+            n_failed += deltas[1]
+            n_annotation_failed += deltas[2]
+            n_retried += deltas[3]
+            n_retry_failed += deltas[4]
 
-            i_done = chunk_start + len(chunk)
-            print(f"[stage3/batch] [{i_done}/{len(setup.pending)}] "
+            # Fail-fast (N6): after >=100 processed, abort if >20% failed.
+            if ((n_ok + n_failed) >= _FAILFAST_MIN_PROCESSED
+                    and (n_failed + n_annotation_failed) / (n_ok + n_failed) > _FAILFAST_RATE):
+                _trigger_failfast(out_path, n_ok + n_failed, n_failed + n_annotation_failed)
+
+            print(f"[stage3/batch] "
+                  f"[{min(chunk_start + chunk_size, len(setup.pending))}/{len(setup.pending)}] "
                   f"ok={n_ok} failed={n_failed} annotation_failed={n_annotation_failed}")
 
     print(f"[stage3/batch] Done. Saved -> {out_path} "
           f"(ok={n_ok}, failed={n_failed}, annotation_failed={n_annotation_failed})")
+    if n_retried:
+        print(f"[stage3/batch] Individual generate() retries: {n_retried} "
+              f"({n_retried - n_retry_failed} recovered, {n_retry_failed} still failed "
+              f"and recorded as annotation_failed)")
     return out_path
 
 
@@ -385,14 +711,27 @@ def run_sensitivity_sweep(
             f"{results_path} not found. Run `python -m src.stage3.batch` first."
         )
     df = pd.read_csv(results_path)
-    sweep = sweep_discordance_thresholds(df["displacement"].to_numpy(), thresholds_pp)
+    # Exclude prep-failure rows (discordance_mode == "PREP_FAILED",
+    # displacement == NaN): they have no real discordance, so counting them
+    # would silently inflate CONCORDANT.
+    scored = df
+    if "discordance_mode" in scored.columns:
+        scored = scored[scored["discordance_mode"] != "PREP_FAILED"]
+    scored = scored.dropna(subset=["displacement"])
+    n_excluded = len(df) - len(scored)
+    sweep = sweep_discordance_thresholds(scored["displacement"].to_numpy(), thresholds_pp)
 
     out_path = model_dir / "discordance_sensitivity.json"
     out_path.write_text(json.dumps({
-        "n_patients": int(len(df)),
-        "current_config_value_pp": 20.0,
+        "n_patients": int(len(scored)),
+        "n_excluded_prep_failed": int(n_excluded),
+        # The provisional threshold the real run used, read from config (L2).
+        "current_config_value_pp": float(load_config().stage3.discordance_displacement_pp),
         "sweep": sweep,
     }, indent=2))
+    if n_excluded:
+        print(f"[stage3/batch] Sensitivity sweep excluded {n_excluded} "
+              "prep-failure row(s) with no discordance.")
     print(f"[stage3/batch] Sensitivity sweep saved -> {out_path}")
     for thr, dist in sweep.items():
         print(f"  ±{thr}pp: MITIGATES={dist['NOTE_MITIGATES']:.1%}  "
@@ -609,6 +948,25 @@ def main() -> None:
              "config.yaml each time -- Stage3Config isn't frozen, so this "
              "mutation is safe).",
     )
+    parser.add_argument(
+        "--out", type=Path, default=None,
+        help="Write results to this CSV instead of "
+             "models/stage3_batch_results.csv. Use with --limit for a smoke "
+             "run (e.g. --limit 20 --out models/stage3_smoke.csv) so the real "
+             "output file stays untouched.",
+    )
+    parser.add_argument(
+        "--range-start", type=int, default=None,
+        help="Start index (inclusive) into the ordered target list for a "
+             "parallel range job. Must be a multiple of the generation batch "
+             "size. Use with --range-end; mutually exclusive with --limit.",
+    )
+    parser.add_argument(
+        "--range-end", type=int, default=None,
+        help="End index (exclusive) into the ordered target list. Must be a "
+             "multiple of the generation batch size, or equal the total target "
+             "count. Use with --range-start.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
@@ -617,7 +975,10 @@ def main() -> None:
     if args.sweep:
         run_sensitivity_sweep()
     else:
-        run_batch_audit(cfg, limit=args.limit, resume=args.resume)
+        run_batch_audit(
+            cfg, limit=args.limit, resume=args.resume, out_path=args.out,
+            range_start=args.range_start, range_end=args.range_end,
+        )
 
 
 if __name__ == "__main__":

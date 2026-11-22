@@ -13,6 +13,8 @@ import pytest
 
 from src.model.evaluate_pipeline import (
     _apply_stage3_decisions,
+    _both_agree_report,
+    _conditional_predictions,
     _conditional_triggering_report,
     _control_arm_report,
     _pipeline_report,
@@ -126,6 +128,50 @@ def test_coverage_fraction_computed_correctly(tmp_path):
     assert info["coverage_of_flagged"] == 2 / 3
 
 
+def test_apply_stage3_decisions_outcome_categories_sum_to_stage3_rows(tmp_path):
+    """The four outcome categories (decided / insufficient / LLM-failed /
+    prep-failed) must partition the Stage 3 rows and sum to their count."""
+    pd.DataFrame({
+        "hadm_id": [1, 2, 3, 4],
+        "decision_model": ["uphold", "insufficient_evidence", np.nan, np.nan],
+        "discordance_mode": ["CONCORDANT", "NOTE_MITIGATES", "NOTE_AMPLIFIES", "PREP_FAILED"],
+        "annotation_failed": [False, False, True, True],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+    hadm_test = np.array([1, 2, 3, 4])
+
+    _pred, info = _apply_stage3_decisions(
+        tmp_path, hadm_test, np.array([1, 1, 1, 1]), np.array([True, True, True, True])
+    )
+
+    assert info["n_test_with_stage3_decision"] == 1   # hadm 1 uphold
+    assert info["n_insufficient_evidence"] == 1       # hadm 2
+    assert info["n_llm_annotation_failed"] == 1       # hadm 3 (failed, not prep)
+    assert info["n_prep_failed"] == 1                 # hadm 4
+    assert info["n_stage3_rows_outside_test"] == 0
+    total = (info["n_test_with_stage3_decision"] + info["n_insufficient_evidence"]
+             + info["n_llm_annotation_failed"] + info["n_prep_failed"])
+    assert total == 4  # == number of Stage 3 rows
+
+
+def test_apply_stage3_decisions_warns_on_rows_outside_test(tmp_path, capsys):
+    """A Stage 3 row whose hadm_id isn't in the test partition must be counted
+    and warned about loudly (it should never happen)."""
+    pd.DataFrame({
+        "hadm_id": [1, 999],  # 999 not in hadm_test
+        "decision_model": ["uphold", "uphold"],
+        "discordance_mode": ["CONCORDANT", "CONCORDANT"],
+        "annotation_failed": [False, False],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+    hadm_test = np.array([1, 2])
+
+    _pred, info = _apply_stage3_decisions(
+        tmp_path, hadm_test, np.array([1, 1]), np.array([True, True])
+    )
+
+    assert info["n_stage3_rows_outside_test"] == 1
+    assert "WARNING" in capsys.readouterr().out
+
+
 # ── _control_arm_report ───────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -134,28 +180,53 @@ def subgroups_20():  # pylint: disable=missing-function-docstring
 
 
 def test_control_arm_matches_target_alert_rate(subgroups_20):  # pylint: disable=redefined-outer-name
-    """The control arm's alert rate must match the target within quantile precision."""
+    """The primary arm selects exactly m = round(rate * n) by raw score, so
+    its realised alert count matches the target to within one admission."""
     rng = np.random.default_rng(0)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
     target_rate = 0.25
 
-    report = _control_arm_report(y, s1_scores, target_rate, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, target_rate, subgroups_20)
 
-    assert report["confirmed_rate"] == pytest.approx(target_rate, abs=0.06)
+    assert report["realised_alert_count"] == 5  # round(0.25 * 20)
+    assert report["realised_alert_rate"] == pytest.approx(0.25)
+    assert report["confirmed_rate"] == pytest.approx(0.25)
     assert report["target_alert_rate"] == target_rate
+    assert report["selection"] == "top_m_by_raw_stage1_score"
+
+
+def test_control_arm_top_m_by_raw_de_ties(subgroups_20):  # pylint: disable=redefined-outer-name
+    """When the calibrated score is tied but the raw score is not, the primary
+    (top-m by raw) arm hits the target exactly while the secondary
+    (quantile on calibrated) overshoots -- the whole reason for the switch."""
+    n = 20
+    y = np.array([i % 2 for i in range(n)])
+    # Calibrated score collapses to two tied blocks; raw score is distinct.
+    calibrated = np.array([0.4] * 10 + [0.6] * 10, dtype=float)
+    raw = np.linspace(0.01, 0.99, n)
+    target_rate = 0.25  # want 5 alerts
+
+    report = _control_arm_report(y, raw, calibrated, target_rate, subgroups_20)
+
+    assert report["realised_alert_count"] == 5
+    # The secondary calibrated-threshold arm cannot hit 5 on a tied block --
+    # it overshoots to the whole top tie block (10).
+    assert report["secondary_threshold_arm_calibrated"]["realised_alert_count"] == 10
 
 
 def test_control_arm_is_pipeline_report_shaped(subgroups_20):  # pylint: disable=redefined-outer-name
-    """Output must have the same shape as _pipeline_report, plus threshold fields."""
+    """Output must have the _pipeline_report shape plus the new selection fields."""
     rng = np.random.default_rng(1)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
 
-    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, 0.5, subgroups_20)
 
     for key in ("n", "pos_rate", "confirmed_rate", "precision", "recall",
-                "f1", "f2", "by_age_band", "threshold", "target_alert_rate"):
+                "f1", "f2", "by_age_band", "threshold", "target_alert_rate",
+                "selection", "realised_alert_count", "realised_alert_rate",
+                "secondary_threshold_arm_calibrated"):
         assert key in report
 
 
@@ -163,11 +234,12 @@ def test_control_arm_full_capacity_flags_everyone(subgroups_20):  # pylint: disa
     """target_alert_rate=1.0 must flag the entire population."""
     rng = np.random.default_rng(2)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
 
-    report = _control_arm_report(y, s1_scores, 1.0, subgroups_20)
+    report = _control_arm_report(y, s1_raw, s1_raw, 1.0, subgroups_20)
 
     assert report["confirmed_rate"] == pytest.approx(1.0)
+    assert report["realised_alert_count"] == 20
 
 
 # ── precision/recall CI wiring (audit finding 2026-09-18 2.2) ────────────────
@@ -237,10 +309,10 @@ def test_control_arm_report_with_groups_has_ci(subgroups_20):  # pylint: disable
     directly above."""
     rng = np.random.default_rng(6)
     y = rng.integers(0, 2, 20)
-    s1_scores = rng.uniform(0.0, 1.0, 20)
+    s1_raw = rng.uniform(0.0, 1.0, 20)
     groups = np.arange(20)
 
-    report = _control_arm_report(y, s1_scores, 0.5, subgroups_20, groups=groups)
+    report = _control_arm_report(y, s1_raw, s1_raw, 0.5, subgroups_20, groups=groups)
 
     assert "precision_ci" in report
     assert "recall_ci" in report
@@ -273,13 +345,16 @@ def test_conditional_triggering_concordant_cases_default_to_flag_stands(tmp_path
     }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
 
     hadm_test = np.array([1, 2])
-    pipeline_pred_full = np.array([1, 1])
+    # pred_with_stage3 = the array AFTER Stage 3 applied: admission 2 is a
+    # discordant override -> 0. The conditional arm keeps that for the
+    # discordant case and forces the concordant case to alert-stands (1).
+    pred_with_stage3 = np.array([0, 0])
     flagged = np.array([True, True])
     y_test = np.array([0, 1])
     sub_test = pd.DataFrame({"age_band": ["18-40", "18-40"]})
 
     result = _conditional_triggering_report(
-        tmp_path, hadm_test, pipeline_pred_full, flagged, y_test, sub_test
+        tmp_path, hadm_test, pred_with_stage3, flagged, y_test, sub_test
     )
 
     assert result is not None
@@ -287,7 +362,7 @@ def test_conditional_triggering_concordant_cases_default_to_flag_stands(tmp_path
     assert result["conditional_llm_calls"] == 1  # the discordant case
     assert result["blanket_llm_calls"] == 2
     # admission 1 (concordant, flag stands) -> predicted positive despite "override"
-    # admission 2 (discordant, real decision kept) -> "override" -> predicted negative
+    # admission 2 (discordant, real decision kept) -> pred_with_stage3[1]=0 -> negative
     assert result["report"]["confirmed_rate"] == pytest.approx(0.5)
 
 
@@ -313,3 +388,101 @@ def test_conditional_triggering_uncovered_admissions_keep_prior_prediction(tmp_p
     assert result["blanket_llm_calls"] == 1
     assert result["llm_calls_saved"] == 0  # the one covered case was discordant, not saved
     assert result["conditional_llm_calls"] == 1
+
+
+def test_conditional_triggering_concordant_insufficient_still_alert_stands(tmp_path):
+    """A CONCORDANT case whose auditor returned insufficient_evidence (no
+    uphold/override) must still be treated as alert-stands and counted as a
+    saved call -- decided from discordance_mode alone, NOT gated by whether a
+    real decision came back. And blanket == conditional + saved must hold even
+    though one covered case has no uphold/override decision."""
+    pd.DataFrame({
+        "hadm_id": [1, 2],
+        "decision_model": ["insufficient_evidence", "override"],
+        "discordance_mode": ["CONCORDANT", "NOTE_MITIGATES"],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+
+    hadm_test = np.array([1, 2])
+    pred_with_stage3 = np.array([0, 0])  # blanket pipeline's applied predictions
+    flagged = np.array([True, True])
+    y_test = np.array([1, 0])
+    sub_test = pd.DataFrame({"age_band": ["18-40", "18-40"]})
+
+    result = _conditional_triggering_report(
+        tmp_path, hadm_test, pred_with_stage3, flagged, y_test, sub_test
+    )
+
+    assert result["llm_calls_saved"] == 1        # concordant counted as saved...
+    assert result["conditional_llm_calls"] == 1  # ...the discordant one as a call...
+    assert result["blanket_llm_calls"] == 2      # ...and blanket == saved + conditional
+    assert (result["blanket_llm_calls"]
+            == result["conditional_llm_calls"] + result["llm_calls_saved"])
+    # concordant insufficient -> alert stands (1) despite pred_with_stage3[0]=0;
+    # discordant override -> keeps pred_with_stage3[1]=0 -> conditional_pred=[1,0].
+    assert result["report"]["confirmed_rate"] == pytest.approx(0.5)
+
+
+def test_both_agree_withdraws_only_when_model_and_rule_override(tmp_path):
+    """N4 secondary policy: an alert is withdrawn only when decision_model AND
+    decision_rule both say override; a model override that the rule doesn't
+    confirm leaves the alert standing (unlike the primary chain)."""
+    pd.DataFrame({
+        "hadm_id": [1, 2, 3],
+        "decision_model": ["override", "override", "uphold"],
+        "decision_rule":  ["override", "uphold",   "uphold"],
+    }).to_csv(tmp_path / "stage3_batch_results.csv", index=False)
+
+    hadm_test = np.array([1, 2, 3])
+    pred_with_stage3 = np.array([0, 0, 1])  # primary withdrew both overrides (1 and 2)
+    flagged = np.array([True, True, True])
+    y = np.array([0, 1, 1])
+    sub = pd.DataFrame({"age_band": ["18-40", "18-40", "18-40"]})
+    raw = np.array([0.9, 0.8, 0.7])
+
+    res = _both_agree_report(
+        tmp_path, hadm_test, pred_with_stage3, flagged, y, sub,
+        s1_scores_raw=raw, s1_scores=raw,
+    )
+
+    # hadm1 both-override -> withdrawn (0); hadm2 model-override/rule-uphold ->
+    # alert stands (1); hadm3 uphold -> 1. Secondary rate = 2/3 (primary was 1/3).
+    assert res["n_alerts_withdrawn"] == 1
+    assert res["report"]["confirmed_rate"] == pytest.approx(2 / 3)
+    # Its control arm is volume-matched to the secondary's realised rate.
+    ctrl = res["control_arm_stage1_matched"]
+    assert abs(ctrl["realised_alert_count"] - round(res["report"]["confirmed_rate"] * 3)) <= 1
+
+
+def test_both_agree_returns_none_without_batch_results(tmp_path):
+    """No batch Stage 3 result yet -> None, not a crash."""
+    assert _both_agree_report(
+        tmp_path, np.array([1]), np.array([1]), np.array([True]), np.array([0]),
+        pd.DataFrame({"age_band": ["18-40"]}),
+        s1_scores_raw=np.array([0.5]), s1_scores=np.array([0.5]),
+    ) is None
+
+
+def test_conditional_predictions_discordant_keeps_stage3_mapping():
+    """Locks the discordant mapping: a discordant row keeps pred_with_stage3,
+    which the pipeline builds as uphold->1, override->0, insufficient->that
+    row's stage2_confirmed. A concordant row is forced to alert-stands (1)."""
+    def _stage3_applied(decision, stage2_confirmed):
+        if decision == "uphold":
+            return 1
+        if decision == "override":
+            return 0
+        return int(stage2_confirmed)  # insufficient_evidence / failed -> Stage 2 fallback
+
+    rows = [  # (decision, stage2_confirmed, discordance_mode)
+        ("uphold", 0, "NOTE_MITIGATES"),
+        ("override", 1, "NOTE_AMPLIFIES"),
+        ("insufficient_evidence", 1, "NOTE_MITIGATES"),  # -> stage2_confirmed == 1
+        ("override", 1, "CONCORDANT"),                   # concordant -> alert stands
+    ]
+    mode_arr = np.array([r[2] for r in rows], dtype=object)
+    pred_with_stage3 = np.array([_stage3_applied(r[0], r[1]) for r in rows])
+    flagged = np.array([True, True, True, True])
+
+    out = _conditional_predictions(mode_arr, pred_with_stage3, flagged)
+
+    assert list(out) == [1, 0, 1, 1]

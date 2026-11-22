@@ -70,11 +70,14 @@ from __future__ import annotations
 
 import re
 import textwrap
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 from src.config_schema import AppConfig
+from src.stage3._annotation import PARSE_FAILURE, BatchGenerationError
+from src.stage3._notecap import _note_block, _shown_note_text
+from src.stage3._stopping import _detect_truncated, _stop_token_ids
 
 # torch/transformers are deliberately NOT imported at module level for the
 # generation path: everything else in this module (prompt building,
@@ -132,8 +135,10 @@ AGGRAVATING_GROUNDS: tuple[str, ...] = (
 _MITIGATING_DESCRIPTIONS: dict[str, str] = {
     "palliative_intent": "hospice, palliative, or comfort-focused care documented — "
                           "readmission isn't the relevant outcome",
-    "planned_return": "a scheduled return is documented (chemo cycle, staged "
-                       "procedure, planned dialysis admission)",
+    "planned_return": "a specific, scheduled inpatient admission within the next 30 days is "
+        "documented (e.g. an elective admission for a chemotherapy cycle or a staged "
+        "operation, with a date or concrete plan). Outpatient dialysis sessions, "
+        "outpatient infusions, clinic appointments and lab checks are not planned returns.",
     "structured_driver_contradicted": "the note explicitly contradicts what "
                                        "drove the structured model's alert",
 }
@@ -158,11 +163,6 @@ _AGGRAVATING_DESCRIPTIONS: dict[str, str] = {
 # is cited only when it actually drove the decision. Do not collapse these
 # two into one field.
 PLANNED_RETURN_ANSWERS: tuple[str, ...] = ("yes", "no", "not_stated")
-
-# Generous safety cap, not a routine truncation. Session 14 measured median
-# MIMIC discharge notes at ~2,649 tokens; at Stage 2's 4096-token window
-# (~4-5 chars/token in clinical text) that is comfortably under 20,000 chars.
-_NOTE_MAX_CHARS = 20_000
 
 # Output token budget for call_llm()'s generate() call. 2048 was the
 # original (vLLM-era) value, assumed "generous" but never actually
@@ -192,6 +192,22 @@ class _GroundHit(BaseModel):
     quote: str
 
 
+# Enum-typed variants used for the generation schema: lm-format-enforcer
+# enforces JSON-schema "enum", so an off-taxonomy ground / decision /
+# planned_return can no longer be generated at all (it previously failed the
+# whole response in _parse_response). _validate_grounds still re-checks.
+class _MitigatingHit(_GroundHit):
+    """A mitigating ground; ``ground`` restricted to MITIGATING_GROUNDS."""
+
+    ground: Literal[MITIGATING_GROUNDS]  # type: ignore[valid-type]
+
+
+class _AggravatingHit(_GroundHit):
+    """An aggravating ground; ``ground`` restricted to AGGRAVATING_GROUNDS."""
+
+    ground: Literal[AGGRAVATING_GROUNDS]  # type: ignore[valid-type]
+
+
 class _LLMOutput(BaseModel):
     """Raw shape of the LLM's JSON response, before taxonomy/decision validation.
 
@@ -214,8 +230,8 @@ class _LLMOutput(BaseModel):
     # just a prompt instruction the model can ignore -- matches this
     # project's existing top-k evidence caps elsewhere (top_shap_features,
     # top_attention_sentences).
-    mitigating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
-    aggravating_grounds: list[_GroundHit] = Field(default=[], max_length=3)
+    mitigating_grounds: list[_MitigatingHit] = Field(default=[], max_length=3)
+    aggravating_grounds: list[_AggravatingHit] = Field(default=[], max_length=3)
     # Three atomic discharge-support signals (module docstring item 4), each
     # its own quote-or-"" field so they don't compete with palliative_
     # intent/planned_return/structured_driver_contradicted for one of
@@ -227,7 +243,7 @@ class _LLMOutput(BaseModel):
     followup_plan_quote: str = Field(default="", max_length=400)
     named_caregiver_quote: str = Field(default="", max_length=400)
     clinically_stable_quote: str = Field(default="", max_length=400)
-    planned_return: str
+    planned_return: Literal[PLANNED_RETURN_ANSWERS]  # type: ignore[valid-type]
     # max_length=800 chars (2026-09-17): same fix, next field. Capping
     # grounds alone didn't fix truncation -- overflow just moved here. The
     # prompt already asks for "2-4 sentences" (~570 chars in a genuine
@@ -237,7 +253,22 @@ class _LLMOutput(BaseModel):
     # mid-sentence. 800 gives real headroom over a compliant response
     # while still being a hard ceiling, not just an ignorable instruction.
     clinical_justification: str = Field(max_length=800)
-    decision: str
+    decision: Literal[DECISIONS]  # type: ignore[valid-type]
+
+
+def _generation_schema() -> dict:
+    """JSON schema handed to lm-format-enforcer for generation.
+
+    Same as ``_LLMOutput``'s schema, but with EVERY property required, in
+    declaration order. Parsing stays lenient (defaults kept on the model), but
+    generation must emit every field, and -- with ``force_json_field_order`` --
+    in this order: evidence first, ``decision`` last. Without this, the
+    defaulted fields are optional and the enforcer lets the model skip them or
+    emit ``decision`` first.
+    """
+    schema = _LLMOutput.model_json_schema()
+    schema["required"] = list(schema["properties"])
+    return schema
 
 
 # ── Prompt templates ───────────────────────────────────────────────────────────
@@ -267,7 +298,8 @@ _USER_TEMPLATE = textwrap.dedent("""
 
     ── STRUCTURED RISK ESTIMATE (XGBoost) ────────────────────────────────
     Score: {stage1_score:.3f}   Flagged at threshold >= {stage1_threshold:.3f}
-    Top structured risk factors (SHAP-ranked):
+    Top structured risk factors (SHAP-ranked; SHAP values are contributions to
+    the model's log-odds, not probability points):
     {shap_block}
 
     {stage2_evidence_block}
@@ -324,10 +356,12 @@ _USER_TEMPLATE = textwrap.dedent("""
     "clinically_stable_quote": verbatim quote for discharge support evidence
       item 3 above, or "" if not documented.
 
-    "planned_return": does the note mention a planned return — a scheduled
-      chemotherapy cycle, a staged surgery, scheduled dialysis, or similar —
-      regardless of whether it affected your decision? One of
-      {planned_return_options}.
+    "planned_return": does the note document a specific, scheduled inpatient
+      admission within the next 30 days (e.g. an elective admission for a
+      chemotherapy cycle or a staged operation, with a date or concrete
+      plan)? Outpatient dialysis sessions, outpatient infusions, clinic
+      appointments and lab checks are NOT planned returns. Answer regardless
+      of whether it affected your decision. One of {planned_return_options}.
 
     "clinical_justification": 2-4 sentences, written AFTER you have
       identified the grounds above. Synthesise what you found — do not
@@ -346,27 +380,6 @@ _USER_TEMPLATE = textwrap.dedent("""
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def is_note_truncated(note_text: str) -> bool:
-    """Whether ``note_text`` exceeds the safety cap applied in the prompt.
-
-    Exposed separately from :func:`_note_block` so callers (pipeline.py,
-    batch.py) can log truncation as structured data, not just prose inside
-    the prompt string.
-    """
-    return len(note_text.strip()) > _NOTE_MAX_CHARS
-
-
-def _note_block(note_text: str) -> str:
-    """Return the discharge note, capped at a generous safety limit."""
-    text = note_text.strip()
-    if not text:
-        return "  (discharge note not available)"
-    if len(text) > _NOTE_MAX_CHARS:
-        text = text[:_NOTE_MAX_CHARS]
-        return f"(discharge note, capped at {_NOTE_MAX_CHARS:,} chars)\n  {text}"
-    return f"(full discharge note, {len(text):,} chars)\n  {text}"
-
-
 def _attention_block(attention_sentences: list[str]) -> str:
     """Return an optional auxiliary hint of what Stage 2 attended to most.
 
@@ -382,6 +395,12 @@ def _attention_block(attention_sentences: list[str]) -> str:
         "attention concentrated on, not a faithful explanation of its score:)\n"
         f"{lines}"
     )
+
+
+def _ordinal(value: float) -> str:
+    """English ordinal for a percentile (1st, 2nd, 3rd, 4th; 11th-13th -> th) (N13)."""
+    n = int(round(value))
+    return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
 def _grounds_block(grounds: tuple[str, ...], descriptions: dict[str, str]) -> str:
@@ -421,8 +440,8 @@ def _stage2_evidence_block(
 
         ── QUANTITATIVE DISCORDANCE ────────────────────────────────────────────
         Within the cohort of flagged, note-covered patients, this patient ranks
-        at the {discordance["r1"]:.0f}th percentile on the structured estimate and the
-        {discordance["r2"]:.0f}th percentile on the note-based estimate (displacement:
+        at the {_ordinal(discordance["r1"])} percentile on the structured estimate and the
+        {_ordinal(discordance["r2"])} percentile on the note-based estimate (displacement:
         {discordance["displacement"]:+.0f} percentile points -> {discordance["mode"]}).
           NOTE_MITIGATES -> the note-based estimate ranks this patient markedly
                              lower risk than the structured estimate alone.
@@ -501,18 +520,6 @@ def compute_decision_rule(
     return "uphold"
 
 
-_PARSE_FAILURE: dict[str, Any] = {
-    "mitigating_grounds": [],
-    "aggravating_grounds": [],
-    "planned_return": None,
-    "clinical_justification": "",
-    "decision_model": None,
-    "decision_rule": None,
-    "all_quotes_verified": None,
-    "annotation_failed": True,
-}
-
-
 def _validate_grounds(
     raw_grounds: list[_GroundHit], allowed: tuple[str, ...]
 ) -> list[dict[str, str]] | None:
@@ -567,7 +574,7 @@ def _parse_response(raw: str) -> dict[str, Any]:
         # chars wasn't enough to tell truncation apart from a genuinely
         # malformed response without re-running the model. 1500 gives real
         # room to see where generation actually broke.
-        return {**_PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
+        return {**PARSE_FAILURE, "clinical_justification": raw.strip()[:1500]}
 
     mitigating = _validate_grounds(parsed.mitigating_grounds, MITIGATING_GROUNDS)
     aggravating = _validate_grounds(parsed.aggravating_grounds, AGGRAVATING_GROUNDS)
@@ -580,7 +587,7 @@ def _parse_response(raw: str) -> dict[str, Any]:
         mitigating is None or aggravating is None
         or valid_decision is None or valid_planned_return is None
     ):
-        return {**_PARSE_FAILURE, "clinical_justification": parsed.clinical_justification}
+        return {**PARSE_FAILURE, "clinical_justification": parsed.clinical_justification}
 
     return {
         "mitigating_grounds": mitigating,
@@ -711,33 +718,6 @@ def _get_model(model_name: str) -> tuple["PreTrainedTokenizerBase", "PreTrainedM
     return _MODEL_CACHE[model_name]
 
 
-def _detect_truncated(generated_ids, eos_id: int | None) -> list[bool]:
-    """Per-sequence truncation flag: True if a generated row never produced
-    the EOS token (i.e. generation was cut off by max_new_tokens, not
-    stopped naturally).
-
-    Extracted as a pure function (2026-09-18, audit finding 2.3) so this
-    logic -- the one genuinely new, previously-untested piece of the
-    2026-09-15 batching rewrite -- is directly unit-testable with
-    hand-built token-ID tensors, without needing a real model, tokenizer,
-    or GPU. Only requires ``generated_ids`` support row iteration + a
-    ``.tolist()`` method per row (true for both real torch tensor slices
-    and the small torch.tensor(...) fixtures tests construct directly).
-
-    Args:
-        generated_ids: 2D tensor/array, one row per sequence in the batch,
-                        already sliced to exclude the prompt (see
-                        call_llm_batch).
-        eos_id:         the tokenizer's EOS token id, or None if unknown.
-
-    Returns:
-        One bool per row, True meaning "likely truncated by the token cap".
-    """
-    if eos_id is None:
-        return [False for _ in generated_ids]
-    return [eos_id not in row.tolist() for row in generated_ids]
-
-
 def _trim_incomplete_trailing_sentence(text: str) -> str:
     """If ``text`` doesn't end with sentence-ending punctuation, trim back
     to the end of the last complete sentence.
@@ -795,7 +775,13 @@ def _finalize_annotation(
     verification and ``decision_rule`` need each patient's own
     ``note_text``, so this can't be hoisted above the per-item loop.
     """
+    # Verify quotes against the text ACTUALLY SHOWN to the model (head+tail
+    # for a capped note), not the full note: a quote matching only the
+    # omitted middle was never shown, so it must count as unverified. Same
+    # text drives decision_rule's note-length check.
+    shown_text = _shown_note_text(note_text)
     annotation = _parse_response(raw)
+    annotation["raw_response"] = raw  # for the <out>.raw.jsonl sidecar (N5); not in CSV
     followup_quote = annotation.pop("followup_plan_quote", "")
     caregiver_quote = annotation.pop("named_caregiver_quote", "")
     stability_quote = annotation.pop("clinically_stable_quote", "")
@@ -816,16 +802,16 @@ def _finalize_annotation(
         return annotation
 
     mitigating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        {**g, "quote_verified": verify_quote(g["quote"], shown_text)}
         for g in annotation["mitigating_grounds"]
     ]
     discharge_support = _extract_discharge_support_ground(
-        followup_quote, caregiver_quote, stability_quote, note_text
+        followup_quote, caregiver_quote, stability_quote, shown_text
     )
     if discharge_support is not None:
         mitigating.append(discharge_support)
     aggravating = [
-        {**g, "quote_verified": verify_quote(g["quote"], note_text)}
+        {**g, "quote_verified": verify_quote(g["quote"], shown_text)}
         for g in annotation["aggravating_grounds"]
     ]
     annotation["mitigating_grounds"] = mitigating
@@ -837,7 +823,7 @@ def _finalize_annotation(
     verified_mitigating = [g for g in mitigating if g["quote_verified"]]
     verified_aggravating = [g for g in aggravating if g["quote_verified"]]
     annotation["decision_rule"] = compute_decision_rule(
-        verified_mitigating, verified_aggravating, note_text
+        verified_mitigating, verified_aggravating, shown_text
     )
     annotation["clinical_justification"] = _trim_incomplete_trailing_sentence(
         annotation["clinical_justification"]
@@ -850,6 +836,7 @@ def call_llm_batch(
     cfg: AppConfig,
     model_name: str | None = None,
     note_texts: list[str] | None = None,
+    raise_on_generate_error: bool = False,
 ) -> list[dict[str, Any]]:
     """Call a locally-served model for MULTIPLE patients in one batched
     ``generate()`` call, instead of one call per patient.
@@ -921,6 +908,7 @@ def call_llm_batch(
     # so this only works with the cluster's transformers==4.57.6 -- do not
     # upgrade transformers past that without re-verifying this import chain.
     from lmformatenforcer import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
+        CharacterLevelParserConfig,
         JsonSchemaParser,
     )
     from lmformatenforcer.integrations.transformers import (  # noqa: PLC0415  pylint: disable=import-outside-toplevel,import-error
@@ -940,8 +928,15 @@ def call_llm_batch(
             )
             for p in prompts
         ]
-        inputs = tokenizer(chat_texts, return_tensors="pt", padding=True).to(model.device)
-        parser = JsonSchemaParser(_LLMOutput.model_json_schema())
+        inputs = tokenizer(
+            chat_texts, return_tensors="pt", padding=True, add_special_tokens=False
+        ).to(model.device)
+        # force_json_field_order: emit fields in schema order (evidence first,
+        # decision last). Only applies to REQUIRED keys, hence no defaults above.
+        parser = JsonSchemaParser(
+            _generation_schema(),
+            config=CharacterLevelParserConfig(force_json_field_order=True),
+        )
         prefix_fn = build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
         do_sample = cfg.stage3.temperature > 0
         with torch.no_grad():
@@ -959,10 +954,15 @@ def call_llm_batch(
         prompt_len = inputs["input_ids"].shape[1]
         generated_ids = output_ids[:, prompt_len:]
         raws = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        truncated_flags = _detect_truncated(generated_ids, tokenizer.eos_token_id)
+        truncated_flags = _detect_truncated(generated_ids, _stop_token_ids(tokenizer, model))
     except Exception as exc:  # pylint: disable=broad-exception-caught
+        if raise_on_generate_error:
+            # Batch caller wants to retry each patient individually rather
+            # than record the whole chunk as failed in one shot.
+            raise BatchGenerationError(str(exc)) from exc
         return [
-            {**_PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]"}
+            {**PARSE_FAILURE, "clinical_justification": f"[HF generate error: {exc}]",
+             "raw_response": f"[HF generate error: {exc}]"}
             for _ in prompts
         ]
 

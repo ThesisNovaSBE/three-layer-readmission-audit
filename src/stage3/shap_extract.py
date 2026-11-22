@@ -1,8 +1,13 @@
-"""Extract top-k risk-driving features from the Stage 1 XGBoost model.
+"""Extract top-k risk-driving features from the Stage 1 model.
 
-Uses SHAP TreeExplainer when the ``shap`` library is installed, falling back
-to gain-based feature importances if it is not.  Either way the output is a
-list of human-readable strings suitable for inclusion in Stage 3 prompts.
+For the XGBoost Stage 1 model this uses XGBoost's own ``pred_contribs``
+(exact Tree SHAP, computed by the booster itself -- no ``shap`` library,
+no TreeExplainer), with missing values kept as NaN so the attribution
+describes the record the model actually scored. Any integrity failure on
+the XGBoost path RAISES (it becomes a PREP_FAILED row upstream) rather than
+silently returning a wrong attribution. Gain-based importances remain ONLY
+as the path for a non-XGBoost estimator. Either way the output is a list of
+human-readable strings for the Stage 3 prompt.
 
 Usage::
 
@@ -12,12 +17,8 @@ Usage::
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
 import pandas as pd
-
-_EXPLAINER_CACHE: dict[int, object] = {}
 
 _FEATURE_LABELS: dict[str, str] = {
     "age": "age (years)",
@@ -43,11 +44,94 @@ _FEATURE_LABELS: dict[str, str] = {
     "spo2_last": "SpO2 (last)",
     "discharged_to_facility": "discharged to SNF / facility",
     "admission_type_emergency": "emergency admission",
+    # Administrative / data-provenance features, not clinical findings -- marked
+    # so the auditor doesn't read them as medical risk drivers (N8).
+    "has_discharge_note": "has discharge note (administrative)",
+    "admit_hour": "admission hour (administrative)",
+    "admit_is_weekend": "weekend admission (administrative)",
+    "admit_is_night": "night admission (administrative)",
 }
 
 
 def _label(col: str) -> str:
     return _FEATURE_LABELS.get(col, col.replace("_", " "))
+
+
+def _format_value(val: float, col: str) -> str:
+    """Render a feature value for the prompt, labeling true missingness
+    instead of printing a bare 'nan'. A missing days_since_last_discharge
+    means there was no prior admission, so it reads 'no prior admission'
+    rather than the generic 'not recorded' (N8)."""
+    if np.isnan(val):
+        return "no prior admission" if col == "days_since_last_discharge" else "not recorded"
+    return f"{val:.3g}"
+
+
+def _direction(contrib: float) -> str:
+    """A SHAP contribution's sign as a readable risk direction: a feature that
+    didn't move this patient's log-odds at all (contrib exactly 0, e.g. a
+    value the model never split on) reads 'no effect', not a false direction."""
+    if contrib > 0:
+        return "↑ risk"
+    if contrib < 0:
+        return "↓ risk"
+    return "no effect"
+
+
+def _is_xgboost(model: object) -> bool:
+    """True for an XGBoost sklearn estimator (XGBClassifier/XGBRegressor).
+
+    Used instead of a bare ``hasattr(model, "get_booster")`` so a stand-in
+    mock in tests isn't misdetected as XGBoost; behaviourally equivalent for
+    the real Stage 1 artifact, which is an XGBClassifier."""
+    try:
+        import xgboost as xgb  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    return isinstance(model, xgb.XGBModel)
+
+
+def _xgb_shap_values(
+    model: object, feature_frame: pd.DataFrame, feature_cols: list[str], available: list[str]
+) -> np.ndarray:
+    """Per-sample SHAP values from XGBoost's native ``pred_contribs`` (exact
+    Tree SHAP, no ``shap`` library).
+
+    RAISES (never falls back to gain) on any integrity failure, because for
+    the real XGBoost Stage 1 model a bad attribution must become a
+    PREP_FAILED row, not a silently-wrong prompt:
+      - the feature columns must be the full training schema, in order;
+      - the per-sample contributions must reconstruct the model's raw margin
+        (sum over features + bias == predict(output_margin=True)).
+    """
+    import xgboost as xgb  # pylint: disable=import-outside-toplevel
+    if available != feature_cols:
+        raise ValueError(
+            "SHAP needs the full Stage 1 feature schema in training order: got "
+            f"{len(available)} columns, expected {len(feature_cols)}."
+        )
+    frame = feature_frame.astype(float)
+    # Match the trees used by the sklearn wrapper's predict(): the Stage 1
+    # model was trained with early stopping (best_iteration << n_estimators),
+    # and predict() uses (0, best_iteration+1) by default, whereas a bare
+    # booster pred_contribs would use EVERY boosted round. Without aligning
+    # the iteration_range the contributions reconstruct a different margin
+    # and the integrity check below fails for every admission.
+    best_it = getattr(model, "best_iteration", None)
+    iteration_range = (0, best_it + 1) if best_it is not None else (0, 0)
+    contrib = model.get_booster().predict(  # type: ignore[attr-defined]
+        xgb.DMatrix(frame, missing=np.nan),
+        pred_contribs=True, iteration_range=iteration_range,
+    )
+    shap_vals = contrib[:, :-1]  # final column is the bias/base term
+    margins = model.predict(frame, output_margin=True)  # type: ignore[call-arg]
+    if not np.allclose(contrib.sum(axis=1), margins, atol=1e-4):
+        raise ValueError(
+            "XGBoost pred_contribs do not reconstruct the model margin "
+            "(sum of contributions != predict(output_margin=True)); SHAP "
+            "attribution is unreliable."
+        )
+    return shap_vals
 
 
 def extract_shap_features(
@@ -65,44 +149,28 @@ def extract_shap_features(
     Returns:
         List of lists — one inner list per patient, each containing up to
         top_k strings such as
-        ``"creatinine (last): 3.2 (↑ risk, SHAP=+0.18)"``.
+        ``"creatinine (last): 3.2 (↑ risk, SHAP=+0.18 log-odds)"``.
     """
     model = artifact["estimator"]
     feature_cols: list[str] = artifact["feature_cols"]
 
     available = [c for c in feature_cols if c in patient_rows.columns]
-    x = patient_rows[available].fillna(0).values
+    # Keep missing values as NaN, not 0 -- XGBoost was trained and scores
+    # with missing values left as missing (routed to each split's learned
+    # default branch; see src/data/features.py). Filling with 0 here used
+    # to make SHAP explain a different, fabricated record than the one the
+    # model actually scored (e.g. spo2_last=0 for a patient who was never
+    # on a monitor, not spo2_last=missing) -- confirmed to flip the top-5
+    # driver set for 68% of the 9,899-admission full run.
+    x = patient_rows[available].values
 
-    use_shap = False
     shap_vals: np.ndarray | None = None
     gains: np.ndarray | None = None
-
-    try:
-        import shap  # optional dependency  # pylint: disable=import-outside-toplevel
-        cache_key = id(model)
-        if cache_key not in _EXPLAINER_CACHE:
-            # Constructing a TreeExplainer is not free -- confirmed 391ms/call
-            # against the real Stage 1 model (2026-09-13). This function is
-            # called once per patient in a batch run (~9,800 times), so an
-            # uncached explainer would waste ~64 minutes of pure
-            # reconstruction across a full run for an object that is
-            # identical every time the same model is passed in.
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                _EXPLAINER_CACHE[cache_key] = shap.TreeExplainer(model)
-        explainer = _EXPLAINER_CACHE[cache_key]
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            shap_vals = explainer.shap_values(x)
-        use_shap = True
-    except Exception:  # pylint: disable=broad-exception-caught
-        # Deliberately broad, not just ImportError: verified 2026-09-13 that
-        # shap.TreeExplainer raises its own InvalidModelError (not
-        # ImportError) for any model type it doesn't support -- narrower
-        # handling here would crash every patient in a batch run instead of
-        # falling back to gain importances as this function's docstring
-        # promises, if the installed shap version ever can't handle the
-        # real XGBoost artifact for any reason.
+    if _is_xgboost(model):
+        shap_vals = _xgb_shap_values(model, patient_rows[available], feature_cols, available)
+    else:
+        # Gain-based importances: only for a non-XGBoost estimator, which has
+        # no exact per-sample attribution. No fallback from the XGBoost path.
         raw_gains = model.feature_importances_
         gains = np.array([
             raw_gains[feature_cols.index(c)] if c in feature_cols else 0.0
@@ -111,25 +179,25 @@ def extract_shap_features(
 
     results: list[list[str]] = []
     for i in range(len(patient_rows)):
-        if use_shap and shap_vals is not None:
+        if shap_vals is not None:
             contribs = shap_vals[i]
             order = np.argsort(np.abs(contribs))[::-1][:top_k]
             features = []
             for j in order:
                 col = available[j]
-                val = x[i, j]
+                val_str = _format_value(x[i, j], col)
                 contrib = float(contribs[j])
-                direction = "↑ risk" if contrib > 0 else "↓ risk"
                 features.append(
-                    f"{_label(col)}: {val:.3g} ({direction}, SHAP={contrib:+.3f})"
+                    f"{_label(col)}: {val_str} "
+                    f"({_direction(contrib)}, SHAP={contrib:+.3f} log-odds)"
                 )
         else:
             order = np.argsort(gains)[::-1][:top_k]  # type: ignore[arg-type]
             features = []
             for j in order:
                 col = available[j]
-                val = x[i, j]
-                features.append(f"{_label(col)}: {val:.3g}")
+                val_str = _format_value(x[i, j], col)
+                features.append(f"{_label(col)}: {val_str}")
         results.append(features)
 
     return results

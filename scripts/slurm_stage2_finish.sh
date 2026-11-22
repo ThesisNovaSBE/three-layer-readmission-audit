@@ -5,15 +5,13 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=06:00:00
-# Bumped from 3h 2026-09-09: a real run measured calibration=1h19m, cascade
-# predict=17m, population-wide predict=~1h41m (79% done at cutoff) -- total
-# ~3.3h needed, and none of these steps are resumable/cached, so a timeout
-# means redoing the whole thing. 6h gives real headroom, not another guess.
+# 6h: measured on a previous run ~3.3h (calibration ~1h19m, cascade predict ~17m,
+# population-wide predict ~2h); limit kept short so the job can backfill.
 #SBATCH --job-name=thesis-stage2-finish
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage2_finish.sh ...
 
 # Runs only the post-training steps against the ALREADY fine-tuned model at
 # models/stage2_longformer_best -- deliberately does NOT call train_stage2()
@@ -55,6 +53,10 @@ echo "[slurm] Running Stage 2 per-age-group evaluation ..."
 python -m src.stage2.evaluate
 
 echo "[slurm] Refreshing Stage 1+2 end-to-end pipeline evaluation ..."
+echo "[slurm] NOTE: if models/stage3_batch_results.csv is still the old"
+echo "[slurm]   (pre-fix) Stage 3 run, this evaluate_pipeline output mixes"
+echo "[slurm]   corrected Stage 2 with uncorrected Stage 3 -- interim only,"
+echo "[slurm]   rerun this step after the real Stage 3 rerun completes."
 python -m src.model.evaluate_pipeline
 
 echo "[slurm] Running RQ1 comparison (Stage 1 vs Stage 2, notes-covered population) ..."
