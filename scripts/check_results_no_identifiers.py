@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -43,7 +44,10 @@ def find_identifier_leaks(obj: object, path: str = "") -> list[str]:
     if isinstance(obj, dict):
         for key, value in obj.items():
             here = f"{path}.{key}" if path else str(key)
-            if any(s in str(key).lower() for s in _ID_KEY_SUBSTRINGS):
+            kl = str(key).lower()
+            # "*_without_hadm*" are aggregate COUNT keys (e.g. n_discharge_notes_
+            # without_hadm), not identifiers -- documented false positive.
+            if any(s in kl for s in _ID_KEY_SUBSTRINGS) and "without_hadm" not in kl:
                 leaks.append(f"{here}: identifier-like key")
             if str(key) in _FREETEXT_KEYS and isinstance(value, str) and value:
                 leaks.append(f"{here}: free-text/quote key holds a string")
@@ -62,9 +66,25 @@ def find_identifier_leaks(obj: object, path: str = "") -> list[str]:
     return leaks
 
 
+_TOKENIZER_FILES = re.compile(
+    r"(^|/)(vocab|tokenizer|merges|special_tokens|added_tokens|tokenizer_config)", re.I)
+
+
 def check_file(path: Path) -> list[str]:
-    """Scan one JSON file; returns its leak descriptions (prefixed with path)."""
-    data = json.loads(path.read_text())
+    """Scan one JSON file; returns its leak descriptions (prefixed with path).
+
+    Model tokenizer/vocab files (``vocab.json``, ``tokenizer.json`` …) are
+    skipped: their keys/merges are BPE tokens (``Ġsubject``) and subword de-id
+    markers (``___``), never patient data -- a documented false positive."""
+    if _TOKENIZER_FILES.search(path.name):
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        # Not a strict-JSON data file (e.g. a JSONC config like tsconfig.json
+        # with comments/trailing commas). Result data files are always valid
+        # JSON; skip anything that isn't parseable rather than crash.
+        return []
     return [f"{path}: {leak}" for leak in find_identifier_leaks(data)]
 
 

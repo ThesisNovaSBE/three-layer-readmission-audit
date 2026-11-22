@@ -8,19 +8,23 @@ abstract: >
   rather than producing a risk score of its own: a capacity-constrained XGBoost
   screen on structured EHR features (Stage 1), an independent Clinical-Longformer
   risk estimate from discharge notes (Stage 2), and a local MedGemma-27B auditor
-  (Stage 3) that reviews each of Stage 1's flagged cases — reasoning over both
+  (Stage 3) that reviews each of Stage 1's flagged cases — weighing both
   scores, the percentile-rank displacement between them, and the note itself —
   to extract quoted, individually-verified mitigating and aggravating grounds,
   reach its own uphold / override / insufficient-evidence decision, and report a
   second decision recomputed deterministically from those grounds as a
   transparency check. Trained and evaluated on MIMIC-IV; at matched alert volume
   the full three-stage cascade does not improve on the structured screen alone
-  (a paired comparison shows slightly lower precision and statistically
-  unchanged recall), a validated negative result.
+  (a paired comparison's precision difference excludes zero and its recall
+  difference includes zero), a validated negative result.
 authors:
   - family-names: Stenzel
     given-names: Lennart
     affiliation: Nova School of Business and Economics
+  - family-names: Schmitz
+    given-names: Martin
+    affiliation: Nova School of Business and Economics
+    alias: schmitzkater
 version: "1.0.0"
 date-released: "2026-11-21"
 license: MIT
@@ -39,8 +43,14 @@ preferred-citation:
   type: thesis
   title: "Triage and Verify: A Large Language Model as Auditor of Structured 30-Day Readmission Alerts in MIMIC-IV"
   authors:
+    - family-names: Iby
+      given-names: Benjamin
     - family-names: Stenzel
       given-names: Lennart
+    - family-names: Schmitz
+      given-names: Martin
+    - family-names: Teichmann
+      given-names: Thomas
   institution:
     name: Nova School of Business and Economics
   year: 2026

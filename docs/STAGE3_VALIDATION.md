@@ -109,24 +109,27 @@ Annotators are blinded to each other's labels until both are complete.
 
 ### Interpretation thresholds (Landis & Koch 1977)
 
-| κ | Strength |
+| κ | Strength (Landis & Koch 1977) |
 |---|---|
-| < 0.40 | Poor — model not reliable enough for thesis claim |
-| 0.41–0.60 | Moderate — use with caveats |
-| 0.61–0.80 | Substantial — acceptable for thesis |
-| > 0.80 | Almost perfect — strong result |
+| < 0.00 | Poor |
+| 0.00–0.20 | Slight |
+| 0.21–0.40 | Fair |
+| 0.41–0.60 | Moderate |
+| 0.61–0.80 | Substantial |
+| 0.81–1.00 | Almost perfect |
 
 ## What to Do With the Results
 
-**If κ > 0.61:** Report the kappa value prominently in the thesis. Use it to
-justify the population-level discordance findings as a validated research result.
+**If κ ≥ 0.61 (substantial or almost perfect):** Report the kappa value
+prominently in the thesis. Use it to justify the population-level discordance
+findings as a validated research result.
 
-**If κ = 0.41–0.60:** Report with explicit caveats. Note that MedGemma's
-decisions are indicative rather than ground-truth. Shift the thesis claim
-from "we found X% NOTE_MITIGATES" to "our LLM auditor, with moderate
+**If 0.41 ≤ κ ≤ 0.60 (moderate):** Report with explicit caveats. Note that
+MedGemma's decisions are indicative rather than ground-truth. Shift the thesis
+claim from "we found X% NOTE_MITIGATES" to "our LLM auditor, with moderate
 agreement to human judgment, suggests X%."
 
-**If κ < 0.40:** The Stage 3 finding is not publishable as a research result.
+**If κ ≤ 0.40 (fair, slight, or poor):** The Stage 3 finding is not publishable as a research result.
 Options: (a) improve the prompt and re-annotate, (b) frame Stage 3 as a
 proof-of-concept / future work section only, (c) add a second LLM judge —
 must be another locally-served, fully offline model per the PhysioNet DUA

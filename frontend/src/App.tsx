@@ -138,7 +138,7 @@ export default function App() {
                     n: "1",
                     color: "bg-blue-100 text-blue-600",
                     title: "Stage 1 — Screen.",
-                    body: "An XGBoost model trained on 521,191 MIMIC-IV admissions scores every patient at discharge using structured EHR features (labs, vitals, comorbidities, LOS). The top 15% by risk score are forwarded to Stage 2 — a fixed follow-up capacity a hospital can actually act on, not a recall floor that flags most of the cohort.",
+                    body: "An XGBoost model trained on the 416,949-admission training partition of a 521,191-admission MIMIC-IV cohort (held-out test 104,242) scores every patient at discharge using 55 structured EHR features (labs, vitals, comorbidities, LOS). The top 15% by risk score are forwarded to Stage 2 — a fixed follow-up capacity a hospital can actually act on, not a recall floor that flags most of the cohort.",
                   },
                   {
                     n: "2",
@@ -150,7 +150,7 @@ export default function App() {
                     n: "3",
                     color: "bg-emerald-100 text-emerald-600",
                     title: "Stage 3 — Audit.",
-                    body: "For any Stage 1-flagged patient, a clinician can request an on-demand audit. A local phi4-mini model (via Ollama) reasons over Stage 1's SHAP features, Stage 2's independent score, the percentile-rank displacement between them, and the discharge note itself, then reaches its own uphold/override decision — quoting the note passage it relied on, and verifying that quote appears verbatim in the source text.",
+                    body: "For any Stage 1-flagged patient, a clinician can request an on-demand audit. A local MedGemma-27B model (an instruction-tuned medical language model, served via HF transformers) reviews Stage 1's SHAP features, Stage 2's independent score, the percentile-rank displacement between them, and the discharge note itself, then reaches its own uphold/override decision — quoting the note passage it relied on, and verifying that quote appears verbatim in the source text.",
                   },
                 ].map(({ n, color, title, body }) => (
                   <div key={n} className="flex gap-3">
@@ -168,11 +168,13 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-4 gap-3">
+              {/* Current (rerun) values hand-copied from committed result JSONs
+                  (bundle can't import gitignored models/); see docs/THESIS_NUMBERS.md. */}
               {[
-                { label: "Stage 1 AUROC", value: "0.706", sub: "XGBoost" },
-                { label: "Stage 1 Recall", value: "84.8%", sub: "recall-floor policy (secondary)" },
-                { label: "Stage 2 AUROC", value: "0.676", sub: "Clinical-Longformer" },
-                { label: "Stage 2 Recall", value: "90.8%", sub: "notes cohort" },
+                { label: "Stage 1 AUROC", value: "0.7215", sub: "XGBoost — xgboost_metrics.json auroc" },
+                { label: "Stage 1 Recall", value: "35.2%", sub: "capacity-15% (primary) — operating_point.recall" },
+                { label: "Stage 2 AUROC", value: "0.622", sub: "flagged group — stage2_evaluation.json overall.auroc" },
+                { label: "Stage 2 Recall", value: "98.7%", sub: "flagged group — stage2_evaluation.json overall.recall" },
               ].map((m) => (
                 <div
                   key={m.label}

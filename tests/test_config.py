@@ -68,7 +68,10 @@ def test_stage3_config_defaults():
 
 
 def test_age_group_targets_sum():
-    """Total age-group training targets should be around 249k."""
+    """The configured age-group training *targets* sum to the original ~249k
+    plan. This is the target only -- the final run trained on 141,767 summaries
+    (the targets were not reached; see results/stage2_training_log_excerpt.txt),
+    so this number is not the actual training sample size."""
     cfg = load_config()
     total = sum(cfg.stage2.age_group_train_targets.values())
     assert total > 100_000, f"Training targets too low: {total}"

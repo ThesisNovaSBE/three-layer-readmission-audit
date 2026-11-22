@@ -1,0 +1,69 @@
+{
+  "note": "RQ1 sensitivity: average AUROC with raw vs calibrated scores on the notes-covered test population. Stage 2 raw = Platt-inverted logit (z1-z0); Stage 1 raw = uncalibrated XGBoost probability. Paired patient-level bootstrap (1000 resamples, seed 42). Aggregates only; no admission identifiers.",
+  "n": 62759,
+  "prevalence": 0.198458,
+  "platt_inversion_max_abs_error": 1.6653345369377348e-16,
+  "auroc": {
+    "stage1_calibrated": {
+      "point_estimate": 0.7092969231217114,
+      "ci_lower": 0.702498263478091,
+      "ci_upper": 0.7162673502002538,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "stage1_raw": {
+      "point_estimate": 0.7094099875965689,
+      "ci_lower": 0.7026628982160691,
+      "ci_upper": 0.7163499805798096,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "stage2_calibrated": {
+      "point_estimate": 0.7102285331199953,
+      "ci_lower": 0.7034696192316509,
+      "ci_upper": 0.7167376688539548,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "stage2_raw": {
+      "point_estimate": 0.7100208117224552,
+      "ci_lower": 0.7034137984108398,
+      "ci_upper": 0.7164983805724126,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    }
+  },
+  "paired_auroc_diff": {
+    "s2cal_minus_s1cal": {
+      "point_estimate": 0.000932,
+      "ci_lower": -0.00402,
+      "ci_upper": 0.005606,
+      "excludes_zero": false,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "s2cal_minus_s1raw": {
+      "point_estimate": 0.000819,
+      "ci_lower": -0.004086,
+      "ci_upper": 0.005507,
+      "excludes_zero": false,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    },
+    "s2raw_minus_s1raw": {
+      "point_estimate": 0.000611,
+      "ci_lower": -0.004332,
+      "ci_upper": 0.005124,
+      "excludes_zero": false,
+      "confidence": 0.95,
+      "n_resamples_used": 1000,
+      "n_resamples_requested": 1000
+    }
+  }
+}

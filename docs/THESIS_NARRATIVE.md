@@ -36,12 +36,12 @@ notes-cohort denominator, clinical utility quantification) are now **answered, n
 catalogued** — the full Stage 3 batch run (rerun merged 2026-11-21, all 9,899 flagged+noted
 admissions) gives a real result, and it is not the flattering one a reader might expect: at
 matched alert volume the full cascade does not improve on Stage 1 alone — a patient-level
-paired bootstrap shows significantly lower precision (Δ −0.0048, 95% CI [−0.0085, −0.0015])
-and statistically unchanged recall (Δ −0.0035, CI [−0.0076, +0.0003]) — and a subgroup-level
-follow-up shows the auditor trades recall for little-to-no precision gain almost everywhere
-it's applied (see `MODEL_CARD.md`). This changes the storyline below from "does the cascade
-beat the baseline" (open question) to "why doesn't an independently-reasoning LLM auditor beat
-simple threshold tightening, and what does that say about this class of system" (answered, and
+paired bootstrap gives a precision difference of −0.0048 (95% CI [−0.0085, −0.0015], excludes
+zero) and a recall difference of −0.0035 (95% CI [−0.0076, +0.0003], includes zero) — and a
+subgroup-level follow-up shows the auditor trades recall for little-to-no precision gain almost
+everywhere it's applied (see `MODEL_CARD.md`). This changes the storyline below from "does the
+cascade beat the baseline" (open question) to "why doesn't an LLM auditor beat simple threshold
+tightening, and what does that say about this class of system" (answered, and
 arguably a more interesting thesis finding than a clean win would have been). The obvious
 pushback to a negative result — that the auditor might simply be broken or ignoring its inputs
 — is addressed by the RQ2 validation: the full-run decision profile is consistent with an
@@ -115,9 +115,10 @@ behaves as designed and still does not beat the simple baseline.
   and per-group calibration.
 - **Strengths:** Honest, self-critical science; fairness is a first-class thesis theme.
 - **Status:** The rebuilt Stage 2 is trained and evaluated. The age-stratified training and
-  per-group calibration closed the recall gap for patients 70+ (0.027 gap, down from a
-  13-point gap pre-rebuild), but the AUROC and precision gaps for that group did not close
-  (still the weakest subgroup in both Stage 1 and Stage 2, see `MODEL_CARD.md`). Tell this
+  per-group calibration narrowed the Stage 2 recall gap to 0.013 (the worst recall band is now
+  18-40, not 70+; `stage2_evaluation.json` `fairness_gaps.recall_gap`), down from the ~13-point
+  gap pre-rebuild — but the AUROC and precision gaps for the 70+ group did not close (still the
+  weakest subgroup by AUROC/precision in both Stage 1 and Stage 2, see `MODEL_CARD.md`). Tell this
   as a partial, honest win: one fairness dimension fixed, two still open, not a solved
   problem.
 
@@ -148,8 +149,8 @@ contribute, and do it with small, local, fairness-audited models."*
 2. **Alert-budget-matched comparison** as the recurring clinical metric: does the audited
    pipeline outperform the structured screen alone at the *same* alert volume
    (`_control_arm_report`)? Every results table repeats this comparison. [Done, at full
-   scale (`MODEL_CARD.md`): it does not — the paired test shows significantly lower precision
-   and statistically unchanged recall. Use the real numbers, not a placeholder.]
+   scale (`MODEL_CARD.md`): it does not — the paired test's precision difference excludes zero
+   and its recall difference includes zero. Use the real numbers, not a placeholder.]
 3. **Name the pipeline.** Prefer "screen, independent read, audit" over the retired
    "triage-and-verify" framing — use it consistently as a
    brand (figure titles, table captions), so the committee remembers *the pattern*, not just
@@ -165,7 +166,8 @@ contribute, and do it with small, local, fairness-audited models."*
 
 ## 4. Abstract (preview for Prof. Shen, ~400 words)
 
-> **Updated 2026-10-30: every result below is now real, final, and verified** — not a
+> **Updated 2026-11-22: every result below reflects the final rerun (Stage 3 merged
+> 2026-11-21); numbers are sourced from the committed JSONs via `docs/THESIS_NUMBERS.md`** — not a
 > placeholder. Stage 1 and Stage 2 are both retrained (`MODEL_CARD.md`); the full Stage 3
 > batch run, the RQ1–RQ3 comparisons, the subgroup analysis, and the four validation controls (done)
 > confirming the auditor genuinely uses its inputs are all complete
@@ -190,26 +192,27 @@ contribute, and do it with small, local, fairness-audited models."*
 > follow up on, not a recall floor that flags most of it. A fine-tuned clinical language
 > model (Clinical-Longformer) reads the same population's discharge notes independently,
 > producing its own risk estimate — evidence for what follows, not a verdict. A locally
-> deployed reasoning model (MedGemma-27B, served via HF transformers) then audits every flagged case: given the
+> deployed instruction-tuned medical language model (MedGemma-27B, served via HF transformers) then audits every flagged case: given the
 > structured score and its stated reasons, the independent note-based score, and the note
 > itself, it reaches its own uphold-or-override judgment, quotes the note passage it relied
-> on, and states its reasoning in plain language. No patient data leaves the hospital
+> on, and states its justification in plain language. No patient data leaves the hospital
 > environment at any stage: every model is small, open, and locally deployable by design.
 >
 > Beyond aggregate metrics, the thesis answers two separable questions directly. Does
 > narrative text add predictive signal structured data alone doesn't? Tested on the same
-> population, independent of the cascade: no — the two carry statistically indistinguishable
-> signal, a null result that is itself informative. Does an independently-informed auditor
-> improve on the structured screen alone, including against the simplest alternative of just
-> raising its threshold to the same alert budget? Also no: at matched alert volume the full
-> three-stage cascade does not improve on the structured screen — a paired comparison shows
-> significantly lower precision and statistically unchanged recall. The RQ2 decision profile
+> population, independent of the cascade: no — the two carry similar signal (the paired AUROC
+> difference's 95% CI includes zero), a null result that is itself informative. Does an
+> independently-informed auditor improve on the structured screen alone, including against the
+> simplest alternative of just raising its threshold to the same alert budget? Also no: at
+> matched alert volume the full three-stage cascade does not improve on the structured screen —
+> a paired comparison's precision difference excludes zero and its recall difference includes
+> zero. The RQ2 decision profile
 > is consistent with an attentive auditor, and the input-reliance validation controls confirm
 > it — the auditor abstains on 150/150 without the note and changes ~11% of decisions without
 > Stage 2's score; the gap worsens specifically where the two risk signals disagree. A fairness audit closed a recall disparity affecting patients over 70
 > through age-stratified training and per-group calibration, though a smaller discrimination
 > gap for that group remains open. Every override is quote-verified against the source note,
-> making human review of the audit's reasoning tractable rather than a leap of faith.
+> making human review of the audit's stated grounds tractable rather than a leap of faith.
 >
 > The result is intended less as another readmission model than as a transferable pattern for
 > clinical AI, and a cautionary finding about it: a cheap, broad screen, an independent second
