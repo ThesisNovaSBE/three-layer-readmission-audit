@@ -42,7 +42,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage1_tune_%j.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage1_tune.sh ...
 
 set -eo pipefail
 # Deliberately no -u (nounset): thesis-env's MKL conda activation hook

@@ -20,7 +20,6 @@ abstract: >
 authors:
   - family-names: Stenzel
     given-names: Lennart
-    email: <email-removed>
     affiliation: Nova School of Business and Economics
 version: "1.0.0"
 date-released: "2026-11-21"

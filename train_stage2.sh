@@ -17,7 +17,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> train_stage2.sh ...
 
 set -e          # exit immediately if any command fails
 set -o pipefail # catch errors inside pipes

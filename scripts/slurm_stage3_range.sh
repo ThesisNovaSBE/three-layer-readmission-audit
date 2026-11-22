@@ -17,7 +17,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_range_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_range_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage3_range.sh ...
 #
 # Parallel range job: audit targets[S:E] of the ordered target list (exactly
 # the list the full sequential run uses), so several segments can run at once

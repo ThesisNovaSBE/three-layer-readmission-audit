@@ -17,7 +17,7 @@
 # without TIME_LIMIT explicitly listed, a timed-out segment could go
 # unnoticed for hours while it sits idle waiting to be resubmitted.
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage3_batch.sh ...
 
 set -eo pipefail
 # No -u (nounset): thesis-env's MKL conda activation hook references an

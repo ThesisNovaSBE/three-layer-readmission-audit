@@ -1,11 +1,13 @@
-# Git history cleanup — removing admission identifiers
+# Git history cleanup — removing admission identifiers and the maintainer email
 
 **Status: prepared, NOT yet run.** This document is the runbook for scrubbing
 MIMIC-IV admission identifiers (`hadm_id`) that were committed to git history in
 earlier commits (e.g. an old `results/stage3_validation_controls_summary.json`
 that carried a 30-identifier sample list, and a few IDs in session notes / a
-docstring / a test). The current working tree has already been scrubbed; this
-job rewrites the **historical** commits where the identifiers still live.
+docstring / a test), plus the maintainer's personal email address that appeared
+in the SLURM scripts and a couple of other files. The current working tree has
+already been scrubbed; this job rewrites the **historical** commits where the
+identifiers and the email still live.
 
 > **This is destructive and rewrites every commit hash.** It requires a
 > force-push and a coordinated re-clone by every collaborator. Do not run any
@@ -13,25 +15,27 @@ job rewrites the **historical** commits where the identifiers still live.
 
 ## What gets replaced
 
-A total of **33 distinct identifiers** appear across the repository history.
-Every occurrence is replaced with the literal placeholder `<hadm_id>`. The
-replacements are applied with word-safe regexes so an identifier that happens to
-be a substring of a longer number or a decimal fraction is never touched, and
+A total of **33 distinct identifiers** appear across the repository history,
+each replaced with the literal placeholder `<hadm_id>`, **plus one rule that
+replaces the maintainer's email with `<email-removed>`** (34 rules total). The
+ID replacements are applied with word-safe regexes so an identifier that happens
+to be a substring of a longer number or a decimal fraction is never touched, and
 **SLURM job IDs, the project name/date, and citation IDs are deliberately
-excluded** (they are not patient data).
+excluded** (they are not patient data). The email rule is a plain literal line.
 
-The replacement list is held in a local file, **`id_replacements.txt`, which
-must never be committed** (it is the one place the plaintext identifiers still
-sit). It is kept outside the repository working tree. Each line has the form:
+The replacement list is held in **`~/thesis_private/history_id_replacements.txt`,
+which must never be committed** (it is the one place the plaintext identifiers
+and the address still sit). It is kept outside the repository working tree. Each
+ID line has the form:
 
 ```
 regex:(?<![\d.])2XXXXXXX(?![\d.])==><hadm_id>
 ```
 
-(the `2XXXXXXX` above is an illustration, not a real value). You can either use
-the pre-generated 33-line file (ask the person who prepared this runbook for its
-local path) or regenerate it yourself with the scan in the next step — the two
-are identical.
+(the `2XXXXXXX` above is an illustration, not a real value), and the final line
+is a literal `<the maintainer's email>==><email-removed>` rule. You can use the
+pre-generated 34-line file at the path above, or regenerate the 33 ID rules with
+the scan in the next step and append the one email rule yourself.
 
 ### Regenerate the replacement list (optional, self-serve)
 
@@ -66,14 +70,23 @@ for oid in oids:
                 ids.add(n)
         prev_job = bool(jobkw.search(line))
 proc.stdin.close()
-with open(sys.argv[1] + "/id_replacements.txt", "w") as f:
+with open(sys.argv[1] + "/thesis_private/history_id_replacements.txt", "w") as f:
     for n in sorted(ids):
         f.write(f"regex:(?<![\\d.]){n}(?![\\d.])==><hadm_id>\n")
-print(f"wrote {len(ids)} replacements to {sys.argv[1]}/id_replacements.txt  (do NOT commit)")
+print(f"wrote {len(ids)} id replacements  (do NOT commit)")
 PY
 ```
 
-Expected output: `wrote 33 replacements`.
+Expected output: `wrote 33 id replacements`. Then append **one** literal rule for
+the maintainer's email (fill in your actual address; it stays local, never
+committed):
+
+```bash
+printf 'literal:%s==><email-removed>\n' "<the maintainer's email>" \
+  >> ~/thesis_private/history_id_replacements.txt
+```
+
+The file should now have **34** lines (33 ID + 1 email).
 
 ## Prerequisites
 
@@ -101,21 +114,20 @@ git clone --mirror . ../readmission-audit-backup.git
 git tag pre-history-cleanup-backup
 ```
 
-## Step 1 — place the replacement list outside the repo
+## Step 1 — confirm the replacement list is outside the repo
 
-Put `id_replacements.txt` (pre-generated or regenerated above) at a path
-**outside** the working tree, e.g. `$HOME/id_replacements.txt`. Confirm it is not
-tracked and cannot be committed:
+The list lives at **`~/thesis_private/history_id_replacements.txt`** (34 lines:
+33 ID + 1 email), **outside** the working tree so it can never be committed:
 
 ```bash
-test -f "$HOME/id_replacements.txt" && echo present
-git check-ignore -v "$HOME/id_replacements.txt" 2>/dev/null || echo "outside repo — cannot be committed"
+test -f ~/thesis_private/history_id_replacements.txt && echo present
+wc -l ~/thesis_private/history_id_replacements.txt   # expect 34
 ```
 
 ## Step 2 — rewrite history
 
 ```bash
-git filter-repo --replace-text "$HOME/id_replacements.txt"
+git filter-repo --replace-text ~/thesis_private/history_id_replacements.txt
 ```
 
 `git filter-repo` rewrites every commit, replacing each identifier with
@@ -153,6 +165,15 @@ print("remaining identifier hits in history:", hits)   # must be 0
 PY
 ```
 
+Also confirm the email is gone from every blob and commit message (substitute
+your own address; it is not written in this file):
+
+```bash
+# expect 0 from both
+git grep -I -i "<the maintainer's email>" $(git rev-list --all) | wc -l
+git log --all --format='%B' | grep -ci "<the maintainer's email>"
+```
+
 ## Step 4 — force-push the rewritten history
 
 `git filter-repo` removes the `origin` remote on purpose. Re-add it and push all
@@ -188,7 +209,7 @@ incompatible and still contain the identifiers.
 ## Step 6 — clean up the local secret
 
 ```bash
-shred -u "$HOME/id_replacements.txt"   # or: rm -P on macOS
+shred -u ~/thesis_private/history_id_replacements.txt   # or: rm -P on macOS
 rm -rf ../readmission-audit-backup.git # only once the rewrite is confirmed good
 ```
 

@@ -9,7 +9,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/diag_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/diag_%j.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> diagnose_cluster.sh ...
 
 # NO set -e — all checks run even if some fail, so we see every problem at once
 

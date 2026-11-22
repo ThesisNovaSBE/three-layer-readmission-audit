@@ -11,7 +11,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_finish_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage2_finish.sh ...
 
 # Runs only the post-training steps against the ALREADY fine-tuned model at
 # models/stage2_longformer_best -- deliberately does NOT call train_stage2()

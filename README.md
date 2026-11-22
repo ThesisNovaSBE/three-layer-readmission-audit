@@ -259,6 +259,14 @@ squeue -u $USER
 tail -f /projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage2_<jobid>.log
 ```
 
+**Email notifications.** The Slurm scripts set `--mail-type` but no longer hard-code
+a recipient address. Pass your own at submit time if you want job emails:
+
+```bash
+sbatch --mail-user=<your-email> train_stage2.sh
+sbatch --mail-user=<your-email> scripts/slurm_stage3_range.sh 0 5200 models/stage3_batch_results.csv
+```
+
 `train_stage2.sh` includes pre-flight checks (Stage 1 artifact, local
 model cache, MIMIC-IV-Note path, CUDA) that fail fast with a clear
 message before the expensive part of the job starts. Read its header

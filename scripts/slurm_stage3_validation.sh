@@ -59,7 +59,7 @@
 #SBATCH --output=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_validation_%j.log
 #SBATCH --error=/projects/extern/kisski/kisski-nova-rpcl/dir.project/logs/stage3_validation_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
-#SBATCH --mail-user=<email-removed>
+# Email notifications: pass the address at submit time, e.g.  sbatch --mail-user=<your-email> scripts/slurm_stage3_validation.sh ...
 
 set -eo pipefail
 # No -u (nounset): thesis-env's MKL conda activation hook references an
