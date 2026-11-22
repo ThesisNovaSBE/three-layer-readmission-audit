@@ -16,11 +16,14 @@
 > (batches of four, in sample order) as the full audit, preceded by an
 > *acceptance arm test* (first 8 admissions, original batch grouping) and
 > accompanied by a *batch-size check* (first 20 admissions, one at a time).
-> Those results are **pending (validation job)**; they will land in
-> `models/stage3_validation_controls_summary.json` (committed without its
-> `sample_hadm_ids` list — see MODEL_CARD's data-handling note). The two
-> tracks answer different questions, and this one is not substituted by the
-> other.
+> **Those results are in** (`models/stage3_validation_controls_summary.json`,
+> `models/batch_size_comparison.json`; committed with the sample identifiers
+> removed on the cluster): note-withheld abstains on 150/150, Stage-2-withheld
+> agrees with the reference arm on 89.3%, the repeated reference agrees 100%,
+> the reference arm reproduces the main run on 145/150 (96.7%), the acceptance
+> arm test passed 8/8, and the batch-size check is decision 100% / grounds 65%.
+> The two tracks answer different questions, and this one is not substituted by
+> the other.
 >
 > **Partly superseded 2026-08-25, re-targeted 2026-08-28 (session 19).** As
 > of the current `src/stage3/explain.py`, the LLM no longer chooses the

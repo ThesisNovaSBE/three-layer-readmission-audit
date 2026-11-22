@@ -212,8 +212,12 @@ improve thirty-day readmission screening?*
   and **four validation control arms on 150 admissions** — reference, repeated
   reference, note-withheld, Stage-2-withheld — plus an acceptance arm test
   (first 8) and a batch-size check (first 20, one at a time)
-  (`scripts/run_validation_controls.py`, `scripts/compare_batch_size.py`). The
-  control-arm results are **pending (validation job)**.
+  (`scripts/run_validation_controls.py`, `scripts/compare_batch_size.py`). All
+  confirm the auditor uses its inputs: note-withheld abstains 150/150,
+  Stage-2-withheld agrees 89.3% with the reference arm (shifting toward uphold),
+  the repeated reference agrees 100%, the reference arm reproduces the main run
+  on 145/150 (96.7%), the acceptance test passed 8/8, and the batch-size check
+  is decision 100% / grounds 65%.
 - **RQ3** — *Does the auditor improve screening performance compared with the
   structured model alone at matched alert volume, and where and why does it
   help or harm?* Stage 3 audits **every** Stage 1-flagged, note-covered
@@ -529,15 +533,19 @@ end to end, after two more rounds of cluster troubleshooting.
   script. 607.5 core-hours were not wasted; they produced 150 real D1
   rows and 40 real D2 rows that job 16948923 then reused instead of
   recomputing.
-- **Validation controls (RQ2) — pending (validation job).** The four control
-  arms (reference, repeated reference, note-withheld, Stage-2-withheld; n=150,
-  run through the same batched procedure as the full audit), the acceptance
-  arm test (first 8 admissions in their original batch grouping) and the
-  batch-size check (first 20, one at a time) are **pending (validation job)**;
-  results will land in `models/stage3_validation_controls_summary.json`
-  (committed without its `sample_hadm_ids` list — see MODEL_CARD's data-handling
-  note). Until then, the RQ2 claim that the auditor genuinely relies on its
-  inputs rests on the full-run decision profile only
+- **Validation controls (RQ2) — done** (`models/stage3_validation_controls_summary.json`,
+  `models/batch_size_comparison.json`; sample identifiers removed on the cluster,
+  committed without them). The four control arms (reference, repeated reference,
+  note-withheld, Stage-2-withheld; n=150, same batched procedure as the full
+  audit) confirm the auditor uses its inputs: **note-withheld abstains on
+  150/150** (2.7% agreement with the reference arm — the auditor does not guess
+  without the note); **Stage-2-withheld agrees 89.3%** with the reference arm,
+  shifting toward uphold (125→139 uphold, 21→10 override); the **repeated
+  reference agrees 100%** on identical inputs; and the **reference arm
+  reproduces the main run on 145/150 (96.7%)** — the gap is the known bf16
+  batching effect. The **acceptance arm test passed 8/8**, and the **batch-size
+  check** (first 20, one at a time vs. the main run) is **decision 100% /
+  grounds 65%**. This corroborates the full-run decision profile
   (`stage3_run_summary.json`: 88.5% model/rule agreement among decided, 93.1%
   with all quotes verified, 219 abstentions). The RQ3 matched-volume finding
   below — the cascade does not improve on Stage 1 alone (precision

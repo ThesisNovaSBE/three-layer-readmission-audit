@@ -1,63 +1,65 @@
 {
-  "n_sample": 30,
-  "sample_hadm_ids": [
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>,
-    <hadm_id>
-  ],
+  "n_sample": 150,
   "d1_blind_note": {
-    "n": 150,
-    "decision_model_agreement_vs_real": 0.0,
-    "real_distribution": {
-      "uphold": 104,
-      "override": 46
+    "vs_reference_arm": {
+      "n": 150,
+      "decision_model_agreement_vs_real": 0.02666666666666667,
+      "real_distribution": {
+        "uphold": 125,
+        "override": 21,
+        "insufficient_evidence": 4
+      },
+      "blind_note_distribution": {
+        "insufficient_evidence": 150
+      }
     },
-    "blind_note_distribution": {
-      "insufficient_evidence": 150
+    "vs_main_run_secondary": {
+      "n": 150,
+      "decision_model_agreement_vs_real": 0.03333333333333333,
+      "real_distribution": {
+        "uphold": 125,
+        "override": 20,
+        "insufficient_evidence": 5
+      },
+      "blind_note_distribution": {
+        "insufficient_evidence": 150
+      }
     }
   },
   "d2_no_stage2": {
-    "n": 40,
-    "decision_model_agreement_vs_real": 0.825,
-    "real_distribution": {
-      "uphold": 27,
-      "override": 13
+    "vs_reference_arm": {
+      "n": 150,
+      "decision_model_agreement_vs_real": 0.8933333333333333,
+      "real_distribution": {
+        "uphold": 125,
+        "override": 21,
+        "insufficient_evidence": 4
+      },
+      "no_stage2_distribution": {
+        "uphold": 139,
+        "override": 10,
+        "insufficient_evidence": 1
+      }
     },
-    "no_stage2_distribution": {
-      "uphold": 30,
-      "override": 10
+    "vs_main_run_secondary": {
+      "n": 150,
+      "decision_model_agreement_vs_real": 0.8933333333333333,
+      "real_distribution": {
+        "uphold": 125,
+        "override": 20,
+        "insufficient_evidence": 5
+      },
+      "no_stage2_distribution": {
+        "uphold": 139,
+        "override": 10,
+        "insufficient_evidence": 1
+      }
     }
   },
   "d3_self_agreement": {
-    "n": 30,
+    "n": 150,
     "decision_model_agreement": 1.0,
     "decision_rule_agreement": 1.0
-  }
+  },
+  "note_on_sample": "150 sampled admission identifiers removed for data protection (MIMIC DUA); kept on the cluster only"
 }

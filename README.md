@@ -160,11 +160,15 @@ inputs failed to prepare. Its own decision matched the code-recomputed
 rule-based decision on 88.5% of decided admissions, and 93.1% of decided
 admissions had every cited quote verified against the note.
 
-Whether the auditor genuinely relies on its inputs is tested with four
-validation control arms (reference, repeated reference, note-withheld,
-Stage-2-withheld; n = 150), an acceptance arm test on the first 8
-admissions, and a batch-size check on the first 20 — **pending (validation
-job)**. See `docs/ARCHITECTURE.md` §3 and `MODEL_CARD.md`.
+Whether the auditor genuinely relies on its inputs was tested with four
+validation control arms (n = 150). It does: with the note withheld it
+abstained (`insufficient_evidence`) on **150 of 150** admissions; with
+Stage 2's score withheld it changed ~11% of decisions (**89.3% agreement**
+with the reference arm); the reference arm reproduced the main run on **145
+of 150** decisions (96.7%), and a repeated run of identical inputs agreed
+**100%**. The acceptance arm test passed **8/8**, and a batch-size check
+(first 20, one at a time) found the decisions unchanged (100%) with grounds
+agreeing 65%. See `docs/ARCHITECTURE.md` §3 and `MODEL_CARD.md`.
 
 ### Does the Auditor Improve Screening at Matched Alert Volume? (RQ3)
 

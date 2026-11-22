@@ -21,7 +21,9 @@ def test_hadm_subject_keys_flagged():
 
 
 def test_eight_digit_id_value_flagged():
-    leaks = find_identifier_leaks({"ids": [<hadm_id>]})
+    # 99999999 is an obviously-synthetic value that still lands in the
+    # [10_000_000, 99_999_999] range the guard treats as an identifier.
+    leaks = find_identifier_leaks({"ids": [99999999]})
     assert any("MIMIC id range" in leak for leak in leaks)
 
 

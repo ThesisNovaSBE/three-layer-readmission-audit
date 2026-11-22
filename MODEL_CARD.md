@@ -26,7 +26,7 @@
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
 - **Model type:** Three-stage LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
-- **Total compute:** 221.37 GPU-hours including every failed and superseded run, of which the single old Stage 3 batch run was 136.29 GPU-hours (~6 days wall-clock) [sacct AllocTRES, computed 2026-11-04, `sessions/2026-11-04_session-36.md`]
+- **Total compute:** 335.99 GPU-hours across 57 jobs (all project users, all jobs since 1 Jan 2026) [sacct, measured 2026-11-22]. Split: **221.37 h up to 4 Nov** and **114.62 h since** (Stage 2 recalibration 3.44 h, the final Stage 3 run 104.84 h in four jobs, validation 6.34 h). By job state: completed 134.05 h, timeout 180.04 h (planned segment ends of long runs), failed 9.60 h, cancelled 12.30 h. The 221.37 h to 4 Nov breaks down (old run) as: old Stage 3 batch 136.29 h, Stage 2 training 43.66 h, Stage 1 tuning 26.74 h, old validation controls 7.63 h, dev/smoke 6.21 h, other 0.83 h.
 
 ## Intended Use
 
@@ -464,27 +464,40 @@ a time.
 > exposure assessed) — it is flagged here deliberately and **not** rewritten by
 > this change set.
 
-**Validation controls — pending (validation job).** Whether the auditor
-genuinely relies on its inputs is tested with **four control arms on a fixed
-random sample of 150 admissions**, all run through the same batched
-procedure (batches of four, in sample order) as the full audit: a
-*reference arm* (unchanged inputs), a *repeated reference arm* (the same
-inputs a second time — tests whether identical inputs yield identical
-decisions), a *note-withheld arm* (summary and attention sentences removed —
-the auditor is then expected to abstain), and a *Stage-2-withheld arm*
-(Stage 2 score and the disagreement block removed). An **acceptance arm
-test** re-audits the first 8 admissions in their original batch grouping and
-the arms run only if all eight decisions match; a **batch-size check**
-re-audits the first 20 admissions one at a time to quantify how much
-batching moves decisions. **Results are pending (validation job).**
+**Validation controls (n=150, `stage3_validation_controls_summary.json`).**
+Whether the auditor genuinely relies on its inputs was tested with **four
+control arms on a fixed random sample of 150 admissions**, all run through the
+same batched procedure (batches of four, in sample order) as the full audit:
 
-**Taken together (so far):** the full-run decision profile — high
-model/rule agreement, a high quote-verified share, and a non-trivial
-abstention rate — is consistent with an attentive, evidence-grounded
-auditor, but the input-reliance controls that would confirm it
-(note-withheld, Stage-2-withheld, repeated-reference) are **pending
-(validation job)**. The RQ3 finding below stands on the full run regardless:
-the cascade does not improve on Stage 1 alone at matched alert volume.
+- **Reference arm** (unchanged inputs): agrees with the main run on **145 of
+  150 decisions (96.7%)** — the small gap is the expected effect of the sample
+  being batched differently from the full run (a known bf16 batching effect).
+- **Repeated reference arm** (the same inputs a second time): **100% agreement**
+  on both `decision_model` and `decision_rule` — identical inputs yield
+  identical decisions, as temperature-0 greedy decoding should.
+- **Note-withheld arm** (summary and attention sentences removed): the auditor
+  returned `insufficient_evidence` on **150 of 150** admissions — it abstains
+  rather than guess, versus the reference arm's 125 uphold / 21 override / 4
+  insufficient (2.7% agreement, which is the intended result: a decision cannot
+  survive without the note).
+- **Stage-2-withheld arm** (Stage 2 score and disagreement block removed):
+  **89.3% agreement** with the reference arm; removing Stage 2's evidence shifts
+  the auditor toward uphold (125→139 uphold, 21→10 override, 4→1 insufficient),
+  so Stage 2's score measurably influences the audit without dominating it.
+
+The **acceptance arm test** (first 8 admissions, original batch grouping)
+**passed 8/8**. The **batch-size check** (first 20 admissions re-audited one at
+a time vs. the main run, `batch_size_comparison.json`) found **decision_model
+100%, decision_rule 100%, grounds 65%** agreement — batching leaves the
+decisions unchanged but moves which grounds are extracted on about a third of
+admissions.
+
+**Taken together:** the auditor demonstrably reads the note (it abstains 150/150
+without it), demonstrably uses Stage 2's evidence (removing it flips ~11% of
+decisions), and is reproducible (100% on repeated inputs; decisions stable
+across batch size). Stage 3 behaves as designed — and the RQ3 finding below
+stands on the full run regardless: the cascade does not improve on Stage 1
+alone at matched alert volume.
 
 ## Changes between the old run and the rerun
 

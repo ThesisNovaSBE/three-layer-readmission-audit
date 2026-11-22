@@ -53,14 +53,22 @@ either signal is simply wrong. See `MODEL_CARD.md`'s `planned_return`
 section.
 
 **`stage3_validation_controls_summary.json`** (RQ2) — the robustness
-controls testing whether Stage 3 actually uses its inputs: four control
-arms on 150 admissions (reference, repeated reference, note-withheld,
-Stage-2-withheld), an acceptance arm test (first 8) and a batch-size check
-(first 20, one at a time). **Results pending (validation job).** Must be
-committed **without** its `sample_hadm_ids` list (MIMIC-IV-Note DUA — no
-admission identifiers in tracked files); run
+controls testing whether Stage 3 actually uses its inputs, on four control
+arms over 150 admissions. Note-withheld: `insufficient_evidence` on 150/150
+(the auditor abstains without the note). Stage-2-withheld: 89.3% agreement
+with the reference arm (removing Stage 2 shifts ~11% of decisions toward
+uphold). Repeated reference: 100% decision agreement on identical inputs.
+The reference arm reproduces the main run on 145/150 decisions (96.7%; the
+gap is the bf16 batching effect). Committed **without** any `sample_hadm_ids`
+(MIMIC-IV-Note DUA — the identifiers were removed on the cluster); run
 `python -m scripts.check_results_no_identifiers` on it before committing.
 See `MODEL_CARD.md`'s RQ2 section.
+
+**`batch_size_comparison.json`** (RQ2) — the batch-size check: the first 20
+admissions re-audited one at a time vs. the main (batched) run.
+decision_model 100%, decision_rule 100%, grounds 65% — batching leaves the
+decisions unchanged but moves which grounds are extracted on about a third of
+admissions. (The acceptance arm test, first 8 admissions, passed 8/8.)
 
 **`discordance_sensitivity.json`** (added 2026-10-08) — the
 `±10pp`–`±30pp` sweep of the discordance-mode threshold over the real,

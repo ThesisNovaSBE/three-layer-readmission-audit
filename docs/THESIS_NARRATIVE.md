@@ -46,10 +46,12 @@ arguably a more interesting thesis finding than a clean win would have been). Th
 pushback to a negative result — that the auditor might simply be broken or ignoring its inputs
 — is addressed by the RQ2 validation: the full-run decision profile is consistent with an
 attentive, evidence-grounded auditor (88.5% model/rule agreement among decided, 93.1% with all
-quotes verified), and the four input-reliance control arms (note-withheld, Stage-2-withheld,
-repeated reference, reference) plus the acceptance arm test and batch-size check are **pending
-(validation job)**. The provisional finding: the system behaves as designed and still does not
-beat the simple baseline.
+quotes verified), and the four input-reliance control arms confirm it — with the note withheld
+the auditor abstains on 150/150, with Stage 2 withheld it changes ~11% of decisions (89.3%
+agreement with the reference arm), a repeated run of identical inputs agrees 100%, and the
+reference arm reproduces the main run on 145/150 (96.7%); the acceptance arm test passed 8/8 and
+the batch-size check leaves decisions unchanged (100%, grounds 65%). The finding: the system
+behaves as designed and still does not beat the simple baseline.
 
 ---
 
@@ -165,7 +167,7 @@ contribute, and do it with small, local, fairness-audited models."*
 
 > **Updated 2026-10-30: every result below is now real, final, and verified** — not a
 > placeholder. Stage 1 and Stage 2 are both retrained (`MODEL_CARD.md`); the full Stage 3
-> batch run, the RQ1–RQ3 comparisons, the subgroup analysis, and the validation controls (pending)
+> batch run, the RQ1–RQ3 comparisons, the subgroup analysis, and the four validation controls (done)
 > confirming the auditor genuinely uses its inputs are all complete
 > (`docs/ARCHITECTURE.md` §3, session 34). The body below states the actual findings
 > directly rather than posing them as open questions, since they no longer are.
@@ -202,9 +204,9 @@ contribute, and do it with small, local, fairness-audited models."*
 > raising its threshold to the same alert budget? Also no: at matched alert volume the full
 > three-stage cascade does not improve on the structured screen — a paired comparison shows
 > significantly lower precision and statistically unchanged recall. The RQ2 decision profile
-> is consistent with an attentive auditor, and the input-reliance validation controls that
-> would rule out "the auditor is simply ignoring its inputs" are pending the validation job;
-> the gap worsens specifically where the two risk signals disagree. A fairness audit closed a recall disparity affecting patients over 70
+> is consistent with an attentive auditor, and the input-reliance validation controls confirm
+> it — the auditor abstains on 150/150 without the note and changes ~11% of decisions without
+> Stage 2's score; the gap worsens specifically where the two risk signals disagree. A fairness audit closed a recall disparity affecting patients over 70
 > through age-stratified training and per-group calibration, though a smaller discrimination
 > gap for that group remains open. Every override is quote-verified against the source note,
 > making human review of the audit's reasoning tractable rather than a leap of faith.
@@ -237,12 +239,13 @@ at ~400; re-check length after any further edits.)*
   *another model's* output. A rigorous, validated negative result (matched-volume control
   arm, subgroup-level test, and the RQ2 decision profile) is a real empirical finding, not a
   failed experiment.
-- **"How do you know the auditor isn't just ignoring its inputs?"** → Partly answered by the
-  full-run decision profile (88.5% model/rule agreement among decided, 93.1% with all quotes
-  verified, 219 abstentions), which is consistent with an attentive auditor. The four control
-  arms that test input reliance directly (note-withheld, Stage-2-withheld, repeated reference,
-  reference), plus the acceptance arm test and the batch-size check, are **pending (validation
-  job)**.
+- **"How do you know the auditor isn't just ignoring its inputs?"** → The full-run decision
+  profile (88.5% model/rule agreement among decided, 93.1% with all quotes verified, 219
+  abstentions) is consistent with an attentive auditor, and the four control arms confirm it:
+  with the note withheld it abstains on 150/150, with Stage 2 withheld it changes ~11% of
+  decisions (89.3% agreement with the reference arm), a repeated run of identical inputs agrees
+  100%, and the reference arm reproduces the main run on 145/150 (96.7%). The acceptance arm
+  test passed 8/8 and the batch-size check leaves decisions unchanged (100%, grounds 65%).
 - **"What's novel?"** → The *auditor* framing (LLM independently reviews another model's
   flagged output, on stated evidence, with a quoted and verified justification for every
   override) — a role absent from a systematic 49-study literature review — plus a validated
