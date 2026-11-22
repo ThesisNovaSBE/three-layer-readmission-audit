@@ -244,7 +244,7 @@ labelled old, in "Changes between the old run and the rerun".
 | Metric | Value |
 |--------|-------|
 | Stage 1 alone (test n=104,242) | AUROC=0.7215, recall=0.352, precision=0.431 |
-| Stage 2 alone (flagged+noted, n=9,899, 59.6% decided coverage of flagged) | AUROC=0.622, recall=0.987, precision=0.434 |
+| Stage 2 alone (flagged+noted, n=9,899, 61.1% of flagged have a note) | AUROC=0.622, recall=0.987, precision=0.434 |
 | Pipeline, full cohort (n=104,242, blanket Stage 3, C9 fallback applied) | precision=0.439 [0.423, 0.459], recall=0.324 [0.305, 0.345], F1=0.373, F2=0.342 |
 | Pipeline, notes cohort only (n=97,929) | precision=0.441, recall=0.215 |
 | Control arm (Stage 1 alone @ matched 14.0% alert rate, 14,638 alerts) | precision=0.444 [0.427, 0.463], recall=0.328 [0.309, 0.349], F1=0.377, F2=0.346 |
@@ -302,7 +302,7 @@ picture (95% CIs, patient-clustered bootstrap):
 | Concordant (n=4,517) | Stage 1 alone | 0.445 [0.425, 0.466] | 1.000 | 0.800 |
 | | Stage 3's decision | 0.453 [0.430, 0.476] | 0.888 [0.870, 0.905] | **0.745** |
 | Discordant (n=5,144) | Stage 1 alone | 0.412 [0.395, 0.428] | 1.000 | 0.778 |
-| | Stage 3's decision | 0.430 [0.413, 0.448] | 0.844 [0.823, 0.865] | **0.708** |
+| | Stage 3's decision | 0.430 [0.413, 0.448] | 0.844 [0.826, 0.862] | **0.708** |
 
 By F2 (β=2, which treats recall as twice as important as precision —
 appropriate here since a missed readmission is costlier than a false alarm),

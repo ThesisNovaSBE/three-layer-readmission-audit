@@ -25,7 +25,7 @@ Full design detail (and what's implemented vs. still pending) lives in
 
 - Models: Logistic Regression, XGBoost, HistGradientBoosting (selectable via `config.yaml`)
 - Input: 55 structured EHR features from MIMIC-IV (17 base — demographics, index-admission traits, prior utilisation, Charlson comorbidity index — plus 8 labs × 4 aggregates and 6 last-value vitals)
-- **Operating point: capacity-constrained (primary, since 2026-08-25)** — flags the top `capacity_k` (default 15%) of admissions by risk score. Recall-floor (`recall >= 0.85`) kept as a secondary table for literature comparability; it alone flagged 66.94% of admissions, which is not a deployable triage.
+- **Operating point: capacity-constrained (primary, since 2026-08-25)** — flags the top `capacity_k` (default 15%) of admissions by risk score. Recall-floor (`recall >= 0.85`) kept as a secondary table for literature comparability; on the current model it flags 66.7% of test admissions (`models/xgboost_metrics.json` `recall_tradeoff`), which is not a deployable triage.
 - Imbalance: `scale_pos_weight` / `class_weight="balanced"`
 - Split: patient-level (`subject_id`) grouped + stratified; tuning via Optuna (CV AUPRC)
 
