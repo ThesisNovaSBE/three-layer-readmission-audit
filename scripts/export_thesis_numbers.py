@@ -45,7 +45,30 @@ STAGE1_METHOD = {
     "early_stopping_on": "a single 15% patient-grouped hold-out of the training partition",
 }
 N_FEATURES = 55  # src/data/features.py: 17 base + 8 labs x 4 aggregates + 6 vitals (B2)
-GPU_HOURS = {"total": 335.99, "jobs": 57, "final_stage3": 104.84}
+
+# GPU-hours from sacct (AllocTRES gres/gpu x Elapsed), measured 2026-11-22 for
+# all users of the project account since 2026-01-01 -- NOT from any JSON. Every
+# value is recorded in MODEL_CARD.md's "Total compute" line; the 221.37 "to
+# 4 Nov" subset was first computed in sessions/2026-11-04_session-36.md. The two
+# combined figures are sums of repo-recorded components (shown inline). The
+# breakdowns reconcile: 104.84+6.34+3.44 = 114.62 (since 4 Nov);
+# 136.29+43.66+26.74+7.63+6.21+0.83 = 221.36 (~221.37, rounding); 221.37+114.62
+# = 335.99 total; per state 134.05+180.04+9.60+12.30 = 335.99.
+GPU_HOURS = {
+    "total": 335.99,            # all 57 jobs, all project users, since 1 Jan 2026
+    "jobs": 57,
+    "final_stage3": 104.84,     # final Stage 3 audit (four jobs; 17327544 recorded, the
+                                # three range jobs' IDs are not in the repo)
+    "validation_final": 6.34,   # validation job 17462868
+    "stage2_recal": 3.44,       # Stage 2 recalibration (job ID not recorded in the repo)
+    "stage2_training": 43.66,   # Stage 2 training incl. failed attempts
+    "stage1_tuning": 26.74,
+    "dev_test": 6.21,
+    "other": 0.83,
+    # combined (sum of verified components):
+    "superseded_first_audit_and_controls": "143.92 (136.29 + 7.63)",
+    "failed_or_cancelled": "21.90 (9.60 + 12.30)",   # subset of the total
+}
 
 _JSONS = ("pipeline_evaluation", "xgboost_metrics", "stage2_evaluation",
           "stage2_acceptance_check", "stage2_calibration", "comparison_rq1",
@@ -492,9 +515,20 @@ def _sec_planned_method(out: Out, d: dict) -> None:
             "src/model/train.py _select_thresholds")
     out.row("Calibration", STAGE1_METHOD["calibration"], "src/model/train.py _calibrate")
     out.h("Compute (from sacct, not a JSON)")
-    out.row("Total GPU-hours / jobs", f"{GPU_HOURS['total']} / {GPU_HOURS['jobs']}",
-            "sacct via MODEL_CARD.md")
-    out.row("Final Stage 3 run GPU-hours", str(GPU_HOURS["final_stage3"]), "sacct via MODEL_CARD.md")
+    src = "sacct, measured 2026-11-22, not a JSON"
+    out.row("Total GPU-hours, all runs incl. failed, cancelled and superseded "
+            "(57 jobs, all project users, since 1 Jan 2026)", str(GPU_HOURS["total"]), src)
+    out.row("Final Stage 3 audit", str(GPU_HOURS["final_stage3"]), src)
+    out.row("Validation controls (final)", str(GPU_HOURS["validation_final"]), src)
+    out.row("Stage 2 recalibration", str(GPU_HOURS["stage2_recal"]), src)
+    out.row("Stage 2 training incl. failed attempts", str(GPU_HOURS["stage2_training"]), src)
+    out.row("Stage 1 tuning", str(GPU_HOURS["stage1_tuning"]), src)
+    out.row("Superseded first audit + its controls",
+            GPU_HOURS["superseded_first_audit_and_controls"], src)
+    out.row("Development and test runs / other",
+            f"{GPU_HOURS['dev_test']} / {GPU_HOURS['other']}", src)
+    out.row("Failed or cancelled jobs (subset of the total)",
+            GPU_HOURS["failed_or_cancelled"], src)
 
 
 def build(out: Out) -> None:

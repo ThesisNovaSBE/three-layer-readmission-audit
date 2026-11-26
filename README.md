@@ -202,6 +202,9 @@ structured screen at matched volume. Full numbers, confidence intervals and
 caveats are in `MODEL_CARD.md`'s "Stage 1+2+3, combined pipeline" section
 and `models/pipeline_paired_differences.json`.
 
+**Total compute:** 335.99 GPU-hours (57 jobs, incl. failed and superseded
+runs), of which 104.84 for the final audit.
+
 ---
 
 ## Quick Start: Without MIMIC (Synthetic Data)
