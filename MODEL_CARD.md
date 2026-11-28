@@ -26,7 +26,7 @@
 - **Developed by:** Nova SBE thesis team (M.Sc. Business Analytics)
 - **Model type:** Three-stage LLM-auditing classification pipeline
 - **Language:** English (clinical notes)
-- **Total compute:** 335.99 GPU-hours across 57 jobs (all project users, all jobs since 1 Jan 2026) [sacct, measured 2026-11-22]. Split: **221.37 h up to 4 Nov** and **114.62 h since** (Stage 2 recalibration 3.44 h, the final Stage 3 run 104.84 h in four jobs, validation 6.34 h). By job state: completed 134.05 h, timeout 180.04 h (planned segment ends of long runs), failed 9.60 h, cancelled 12.30 h. The 221.37 h to 4 Nov breaks down (old run) as: old Stage 3 batch 136.29 h, Stage 2 training 43.66 h, Stage 1 tuning 26.74 h, old validation controls 7.63 h, dev/smoke 6.21 h, other 0.83 h.
+- **Total compute:** 335.99 GPU-hours across 57 jobs (all project users, all jobs since 1 Jan 2026) [sacct, measured 2026-11-22]. Split: **221.37 h up to 4 Nov** and **114.62 h since** (Stage 2 recalibration 3.44 h, the final Stage 3 run 104.84 h in four jobs, validation 6.34 h). By job state: completed 134.05 h, timeout 180.04 h (planned segment ends of long runs), failed 9.60 h, cancelled 12.30 h. The 221.37 h to 4 Nov breaks down (old run) as: old Stage 3 batch 136.29 h, Stage 2 training 43.66 h, Stage 1 tuning 26.74 h, old validation controls 7.63 h, Stage 3 dev/smoke 6.21 h, other 0.83 h.
 
 ## Intended Use
 
